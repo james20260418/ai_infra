@@ -55,7 +55,8 @@ jobs:
 
       - name: Build (Windows cross-compile)
         run: |
-          bazel build //demo/... //tools/jpov:jpov_demo.exe --config=windows
+          bazel build //demo/... //tools/jpov:jpov_demo.exe \
+            //tools/jpov:jpov_skylight_viewer.exe --config=windows
 
   genvolume:
     # 体积资产生成工具的 Python 单测（不参与 bazel；纯 unittest + pyopenvdb）。

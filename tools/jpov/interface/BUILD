@@ -447,6 +447,28 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# RenderPreference — 「想要硬件 / 软件光栅」的偏好声明 + 判定（纯 CPU，无 GL）。
+# 判定表是 JPOV::Init() 告警行为的唯一依据，见 render_preference.h 顶部注释。
+cc_library(
+    name = "render_preference",
+    srcs = ["render_preference.cc"],
+    hdrs = ["render_preference.h"],
+    visibility = ["//visibility:public"],
+    deps = [":gpu_info"],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "render_preference_test",
+    srcs = ["render_preference_test.cc"],
+    deps = [
+        ":render_preference",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # DebugInfo — 引擎级 debug 状态快照（~ 键 HUD 的内容）+ DebugString()。
 cc_library(
     name = "debug_info",

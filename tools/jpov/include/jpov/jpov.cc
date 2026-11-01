@@ -28,6 +28,27 @@
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+// ---- 混合显卡笔记本的「优先独显」提示（唯一官方手段）----
+//
+// Windows + OpenGL 没有选设备的 API（见 interface/gpu_info.h 顶部注释），能让驱动
+// 优先挑独显的只有这两个**全局变量**：最终 exe 的导出表里存在它们时，NVIDIA / AMD
+// 驱动在创建 context 时会优先使用高性能 GPU。
+//
+// 两个约束决定了它们必须写在这里、而不是某个按需链接的模块里：
+//   ① 必须是 __declspec(dllexport) —— 驱动直接读导出表；
+//   ② 必须落在**一定会被链接进 exe 的 TU** —— 静态库里没人引用的目标文件会被丢弃，
+//      导出符号会随之消失（jpov.cc 恒被链接，所以放在这里）。
+//
+// 注意：导出表是链接期的静态属性，运行时无法按 Config::render_preference 开关 ——
+// 所以它对所有 JPOV app 都生效。用户在「设置 → 显示 → 图形」或显卡控制面板里
+// 为本 exe 手动指定时，玩家的选择赢（这也是游戏引擎的通行做法）。
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 // ========== GLFW 静态回调 ==========
 
 void JPOV::OnMouseButton(GLFWwindow* window, int button, int action, int mods) {
@@ -65,6 +86,46 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 
 // ========== 生命周期 ==========
 
+namespace {
+
+// 偏好落空时的告警：必须写「为什么 + 怎么办」，否则用户只会看到一个慢得很均匀的
+// 窗口，无从下手。
+// Pre-condition: gpu 是本次 Init 里 QueryGpuInfo() 的快照（context 已创建）。
+void ReportRenderPreference(jpov::RenderPreference preference,
+                            const jpov::GpuInfo& gpu) {
+    const jpov::RenderPreferenceVerdict verdict =
+        jpov::JudgeRenderPreference(preference, gpu.kind);
+    if (verdict == jpov::RenderPreferenceVerdict::kSatisfied) {
+        return;
+    }
+    // kUnknown 时冤枉告警比不告警更糟：glGetString 什么都没给，我们不知道真相。
+    if (verdict == jpov::RenderPreferenceVerdict::kUndetermined) {
+        LOG(WARNING) << "Config::render_preference="
+                     << jpov::RenderPreferenceName(preference)
+                     << " 无法核对：GL_RENDERER 为空（GpuKind=kUnknown）";
+        return;
+    }
+    const char* renderer = gpu.renderer.empty() ? "?" : gpu.renderer.c_str();
+    if (preference == jpov::RenderPreference::kPreferGpu) {
+        LOG(WARNING)
+            << "Config::render_preference=prefer-gpu，但当前 context 落在软件光栅器上"
+               "（renderer=" << renderer << "）。JPOV/OpenGL 无法自行选设备，请排查："
+               "① 是否在 WSLg / 远程桌面 / 虚拟机里（这些环境常常没有硬件 GL）；"
+               "② 显卡驱动是否正常安装；"
+               "③ Windows「设置 → 系统 → 显示 → 图形」里为本 exe 选「高性能」；"
+               "④ 笔记本混合显卡用 NVIDIA 控制面板 / AMD 软件做 per-app 首选项。"
+               "不中断：偏好落空只影响帧率，不影响正确性。";
+        return;
+    }
+    LOG(WARNING)
+        << "Config::render_preference=prefer-cpu，但当前 context 不是已知软件光栅器"
+           "（renderer=" << renderer << "）。LIBGL_ALWAYS_SOFTWARE 只对 Mesa 系驱动"
+           "生效；Windows 上「系统 opengl32.dll + 厂商 ICD」那条栈没有软件后端，"
+           "需要把 Mesa 的 opengl32.dll 放到 exe 旁才可能落软光栅。";
+}
+
+}  // namespace
+
 JPOV::JPOV(Config cfg)
     : config_(cfg),
       window_(nullptr),
@@ -79,6 +140,17 @@ JPOV::~JPOV() {
 
 void JPOV::Init() {
     CHECK(!initialized_) << "JPOV already initialized. Call Finalize() first.";
+    // 非法枚举值（外部 cast 出来的）会让后面的 switch 无从判断，早崩早暴露。
+    CHECK(config_.render_preference == jpov::RenderPreference::kAny ||
+          config_.render_preference == jpov::RenderPreference::kPreferGpu ||
+          config_.render_preference == jpov::RenderPreference::kPreferCpu)
+        << "Config::render_preference 非法：不是 RenderPreference 的枚举值";
+
+    // 偏好必须在**建 context 之前**落地：Mesa 只在建 context 时读这个环境变量。
+    if (jpov::ApplyRenderPreferenceEnvHint(config_.render_preference)) {
+        LOG(INFO) << "Config::render_preference=prefer-cpu ⇒ 已设置 "
+                     "LIBGL_ALWAYS_SOFTWARE=1（Mesa 系驱动会在建 context 时落软光栅）";
+    }
 
     if (!glfwInit()) {
         if (!config_.headless) {
@@ -189,6 +261,9 @@ void JPOV::Init() {
     // kind == kCpuRaster 就是软件在跑。
     debug_.gpu = jpov::QueryGpuInfo();
 
+    // 偏好核对：用 glGetString 的真话判定；不满足只告警（“偏好”不是“要求”）。
+    ReportRenderPreference(config_.render_preference, debug_.gpu);
+
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
@@ -196,7 +271,8 @@ void JPOV::Init() {
               << " | renderer=" << (debug_.gpu.renderer.empty() ? "?" : debug_.gpu.renderer)
               << " | vendor=" << (debug_.gpu.vendor.empty() ? "?" : debug_.gpu.vendor)
               << " | version=" << (debug_.gpu.version.empty() ? "?" : debug_.gpu.version)
-              << " | max_vertex_attribs=" << debug_.gpu.max_vertex_attribs;
+              << " | max_vertex_attribs=" << debug_.gpu.max_vertex_attribs
+              << " | preference=" << jpov::RenderPreferenceName(config_.render_preference);
 }
 
 void JPOV::Finalize() {

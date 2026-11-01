@@ -17,6 +17,7 @@
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
+#include "tools/jpov/interface/render_preference.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/renderer.h"
 
@@ -78,6 +79,24 @@ public:
         // headless = true: 无可见窗口（适用于 CI / 后台截图）
         // headless = false: 正常窗口（Run() 进入事件循环）
         bool        headless     = false;
+
+        // 「这一帧由谁来画」的偏好声明（默认 kAny = 完全不介入，行为与老版本一致）。
+        //
+        // JPOV **不能**选显卡（Windows/Linux + GL 都没有这个能力，见
+        // interface/gpu_info.h 顶部注释），这个字段只做三件事：
+        //   ① 建 context **之前**给驱动提示：
+        //      - kPreferCpu：对 Mesa 系驱动设 LIBGL_ALWAYS_SOFTWARE=1
+        //        （已显式设置则**不覆盖**，用户/CI 的环境优先）；
+        //      - kPreferGpu：JPOV 在 Windows 上**恒定**导出 NvOptimusEnablement /
+        //        AmdPowerXpressRequestHighPerformance —— 它们是 exe 导出表里的静态
+        //        属性，只能在链接期决定，因此对所有 JPOV app 都生效（混合显卡笔记本
+        //        上会优先独显）；用户可在「显示设置 → 图形」/ 控制面板 per-app 覆盖。
+        //   ② 建 context **之后**用 glGetString 的真话核对偏好是否被满足；
+        //   ③ 不满足时 LOG(WARNING) 写清原因与补救办法，**不中断**（这是「偏好」，
+        //      不是「要求」；硬性门禁请自行检查 debug() 里的 GpuInfo）。
+        //
+        // 判定表与三态语义见 interface/render_preference.h。
+        jpov::RenderPreference render_preference = jpov::RenderPreference::kAny;
 
         // OneIteration 调用帧率（Hz），默认 60。
         // Run() 按此帧率调度 OneIteration，实际帧率受 vsync 限制。

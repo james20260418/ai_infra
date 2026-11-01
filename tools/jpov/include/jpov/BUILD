@@ -14,6 +14,7 @@ cc_library(
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:render_preference",
         "//tools/jpov/interface:window_info",
     ] + select({
         "@platforms//os:windows": ["@glfw_mingw//:glfw"],

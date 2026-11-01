@@ -7,12 +7,14 @@
 #
 # 效果：
 #   1. bazel build //tools/jpov:jpov_skylight_viewer（Linux ELF）
-#   2. 产物拷贝到工程 output/jpov_skylight_viewer/ 下
-#   3. 拷贝分发态字体到 exe 旁 fonts/
-#   4. 打印用法提示
+#   2. bazel build //tools/jpov:jpov_skylight_viewer.exe --config=windows（Windows PE）
+#   3. 两个产物拷贝到工程 output/jpov_skylight_viewer/ 下
+#   4. 拷贝分发态字体 + 模型到 exe 旁 fonts/ / models/
+#   5. 打印用法提示
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_skylight_viewer/jpov_skylight_viewer
+# Windows（真卡）：把整个 output/jpov_skylight_viewer/ 目录拷过去，双击 jpov_skylight_viewer.exe
 # =============================================================================
 
 set -euo pipefail
@@ -34,8 +36,15 @@ echo ""
 echo "OK: Linux 编译完成"
 
 echo ""
+echo "==> 1b. 编译 Windows 版 jpov_skylight_viewer.exe（MinGW 交叉编译）"
+bazel build //tools/jpov:jpov_skylight_viewer.exe --config=windows 2>&1
+echo ""
+echo "OK: Windows 编译完成"
+
+echo ""
 echo "==> 2. 拷贝产物到 output/jpov_skylight_viewer/"
-cp -v "$BAZEL_BIN/jpov_skylight_viewer" "$OUTPUT_DIR/jpov_skylight_viewer"
+cp -v "$BAZEL_BIN/jpov_skylight_viewer"     "$OUTPUT_DIR/jpov_skylight_viewer"
+cp -v "$BAZEL_BIN/jpov_skylight_viewer.exe" "$OUTPUT_DIR/jpov_skylight_viewer.exe"
 ls -lh "$OUTPUT_DIR/"
 
 # 拷贝分发态字体到 exe 旁 fonts/（与 demo cfg.fonts 声明的相对路径一致，
@@ -65,6 +74,11 @@ echo "============================================"
 echo ""
 echo "📂 产物位置："
 echo "   $OUTPUT_DIR/jpov_skylight_viewer       (Linux ELF)"
+echo "   $OUTPUT_DIR/jpov_skylight_viewer.exe   (Windows PE，静态链接，无 .dll 依赖)"
+echo ""
+echo "🪟 Windows 跑法：把整个 output/jpov_skylight_viewer/ 目录拷到 Windows，双击 exe。"
+echo "   字体/模型是相对 exe 的 fonts/ models/，必须连着目录一起拷。"
+echo "   启动日志第一行会打：GL: hardware|cpu-raster | renderer=… | preference=prefer-gpu"
 echo ""
 echo "🧪 用法："
 echo "   交互窗口（需 DISPLAY/WSLg）："

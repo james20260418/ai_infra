@@ -49,6 +49,47 @@ bazel build //tools/jpov:jpov_demo.exe --config=windows
 
 Windows 版缺少 OpenCV 截图功能（需要 MinGW 交叉编译 OpenCV 静态库），其余窗口绘制、输入响应、blend 等功能与 Linux 版一致。
 
+## 渲染设备偏好（prefer GPU / prefer CPU）
+
+`JPOV::Config::render_preference`（默认 `kAny` = 完全不介入，行为与老版本一致）：
+
+| 值 | 建 context **之前** | 建 context **之后** |
+|----|--------------------|--------------------|
+| `kAny` | — | — |
+| `kPreferGpu` | Windows exe 导出表**恒**含 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`（混合显卡笔记本优先独显） | 落到已知软件光栅器（llvmpipe / SwiftShader / GDI Generic / WARP…）→ `WARNING` + 排查清单 |
+| `kPreferCpu` | 对 Mesa 系驱动设 `LIBGL_ALWAYS_SOFTWARE=1`（**已显式设置则不覆盖**） | 落到 `kHardware` → `WARNING` |
+
+**这不是「选显卡」**：Windows/Linux + OpenGL 都没有这个能力（见 [interface/gpu_info.h](interface/gpu_info.h)
+顶部注释）——最终落到哪块设备由驱动 / 系统「显示设置 → 图形」的 per-app 首选项 / X server 决定。
+偏好只能「提个醒 + 事后核对 + 把怎么办写进日志」，判定表见 [interface/render_preference.h](interface/render_preference.h)。
+
+跑起来后看启动日志那一行即可：
+
+```
+GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | … | preference=prefer-gpu
+```
+
+或按 `F3` 打开 debug HUD（左上角显示 `gpu:` 一行）。
+
+## 各 viewer 的 Windows 构建现状
+
+目前已构建出 `.exe` 的（可直接拷到 Windows 跑）：
+
+| target | 构建脚本 |
+|--------|---------|
+| `//tools/jpov:jpov_demo.exe` | `build_jpov_demo.sh` |
+| `//tools/jpov:jpov_ui_demo.exe` | `build_jpov_ui_demo.sh` |
+| `//tools/jpov:jpov_sp_ui_demo.exe` | `build_jpov_sp_ui_demo.sh` |
+| `//tools/jpov:jpov_skylight_viewer.exe` | `build_jpov_skylight_viewer.sh` |
+
+其余 viewer / 工具目前**只有 Linux target**（`jpov_pick_highlight_viewer`、`jpov_fire_fog_viewer`、
+`jpov_model_viewer`、`jpov_particle_viewer`、`jpov_strip_viewer`、`jpov_volume_fire_viewer`、
+`jpov_soft_mesh_viewer`、`jpov_clothing_tool`、`jpov_fbx_viewer`、`jpov_model_editor`、
+vegetation v2 viewer）。要加一个：照 BUILD 里现有 `.exe` target 复制一份，只把
+`target_compatible_with` 换成 `@platforms//os:windows`，再跑
+`bazel build //tools/jpov:<name>.exe --config=windows` —— 能过就补进 CI 的 windows-build job，
+否则会悄悄腐坏（没人交叉编译的 target 不会自己保持可编译）。
+
 ## 设计
 
 详见 [DESIGN.md](DESIGN.md)。

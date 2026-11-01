@@ -464,6 +464,12 @@ int main(int argc, char** argv) {
     cfg.resizable  = false;
     cfg.target_fps = static_cast<int>(jpov_skylight::kViewerFps);
     cfg.headless   = false;
+    // 交互模式声明「想要硬件光栅」：这是个看效果的工具，落到软件光栅（llvmpipe /
+    // WARP）上只能看幻灯片。JPOV 不能选设备，所以这里能做的只有两件事 ——
+    // Windows 导出表里请求高性能 GPU（见 jpov.cc 顶部注释）+ Init 后核对并告警。
+    // headless 拍摄**不设**（保持 kAny）：CI / 黄金图本来就跑在 llvmpipe 上，
+    // 每次拍摄都刷一条「偏好落空」告警没有意义。
+    cfg.render_preference = jpov::RenderPreference::kPreferGpu;
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_skylight_viewer.sh 同构拷贝）。
     cfg.fonts = {
