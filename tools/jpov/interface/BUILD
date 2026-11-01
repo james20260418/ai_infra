@@ -437,11 +437,54 @@ cc_library(
     linkstatic = 1,
 )
 
+# WindowedStat — 「每 N 秒定格一次」的稳定读数（帧率 / 耗时 / 事件率，纯 CPU）。
+cc_library(
+    name = "windowed_stat",
+    srcs = ["windowed_stat.cc"],
+    hdrs = ["windowed_stat.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@glog_static//:glog"],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "windowed_stat_test",
+    srcs = ["windowed_stat_test.cc"],
+    deps = [
+        ":windowed_stat",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_test(
     name = "gpu_info_test",
     srcs = ["gpu_info_test.cc"],
     deps = [
         ":gpu_info",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# RenderPreference — 「想要硬件 / 软件光栅」的偏好声明 + 判定（纯 CPU，无 GL）。
+# 判定表是 JPOV::Init() 告警行为的唯一依据，见 render_preference.h 顶部注释。
+cc_library(
+    name = "render_preference",
+    srcs = ["render_preference.cc"],
+    hdrs = ["render_preference.h"],
+    visibility = ["//visibility:public"],
+    deps = [":gpu_info"],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "render_preference_test",
+    srcs = ["render_preference_test.cc"],
+    deps = [
+        ":render_preference",
         "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],

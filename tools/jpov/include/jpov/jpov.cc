@@ -16,8 +16,28 @@
 #include "jpov.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <tuple>
+
+#if defined(_WIN32)
+// windows.h 定义 ERROR 宏，与 glog 的 ERROR 严重级别冲突 ⇒ 必须先 suppress（同
+// shader_manager.cc）。本文件只需 GetModuleFileNameA / MAX_PATH。
+#ifndef GLOG_NO_ABBREVIATED_SEVERITIES
+#define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
+#include <windows.h>
+#include <io.h>
+#include <timeapi.h>   // timeBeginPeriod：把系统计时器粒度压到 1ms（帧率控制需要）
+// winuser.h 把 DrawText 定义成 DrawTextA（Win32 GDI 的绘制文本 API），会撞上
+// RenderCommandList::DrawText。本文件不用 GDI 画字，撤掉这个宏。
+#ifdef DrawText
+#undef DrawText
+#endif
+#endif
+
 #include <glog/logging.h>
 
 #include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
@@ -26,6 +46,27 @@
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+// ---- 混合显卡笔记本的「优先独显」提示（唯一官方手段）----
+//
+// Windows + OpenGL 没有选设备的 API（见 interface/gpu_info.h 顶部注释），能让驱动
+// 优先挑独显的只有这两个**全局变量**：最终 exe 的导出表里存在它们时，NVIDIA / AMD
+// 驱动在创建 context 时会优先使用高性能 GPU。
+//
+// 两个约束决定了它们必须写在这里、而不是某个按需链接的模块里：
+//   ① 必须是 __declspec(dllexport) —— 驱动直接读导出表；
+//   ② 必须落在**一定会被链接进 exe 的 TU** —— 静态库里没人引用的目标文件会被丢弃，
+//      导出符号会随之消失（jpov.cc 恒被链接，所以放在这里）。
+//
+// 注意：导出表是链接期的静态属性，运行时无法按 Config::render_preference 开关 ——
+// 所以它对所有 JPOV app 都生效。用户在「设置 → 显示 → 图形」或显卡控制面板里
+// 为本 exe 手动指定时，玩家的选择赢（这也是游戏引擎的通行做法）。
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
 #endif
 
 // ========== GLFW 静态回调 ==========
@@ -65,6 +106,232 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 
 // ========== 生命周期 ==========
 
+namespace {
+
+// 睡到绝对时刻 deadline（秒，glfwGetTime 基准）。
+//
+// 为什么不直接 nanosleep「剩余时长」：Windows 上 Sleep/nanosleep 的粒度默认是
+// ~15.6ms，睡 11ms 可能真睡 16ms —— 60 帧的目标直接被压成 ~46 帧（实测）。
+// 这里两级：先粗睡到 deadline - 1.5ms，再自旋收尾（自旋只占 1.5ms/帧，代价可控）。
+// spin_tail=false 时不自旋：粗睡到 deadline 就返回（开 vsync 时够用，见 Run()）。
+void SleepUntilSeconds(double deadline, bool spin_tail) {
+    // spin_tail：是否用「自旋收尾」把误差压到亚毫秒。
+    //   · 关 vsync ⇒ 需要精确（睡早/睡晚都直接变成帧率误差）；
+    //   · 开 vsync ⇒ 只要**提前一点**到达 swap 即可（多等的那几毫秒由垂直同步吃掉），
+    //     此时自旋纯属烧 CPU（1.5ms/帧 ≈ 一个核的 9%），所以用粗睡。
+    const double kSpinWindow = spin_tail ? 0.0015 : 0.0;
+    for (;;) {
+        const double remaining = deadline - glfwGetTime();
+        if (remaining <= 0.0) {
+            return;
+        }
+        if (remaining > kSpinWindow) {
+            const double coarse = remaining - kSpinWindow;
+            const long us = static_cast<long>(coarse * 1e6);
+            if (us > 0) {
+                struct timespec ts = {0, us * 1000};
+                nanosleep(&ts, nullptr);
+            }
+        }
+        // 尾部自旋：不再 sleep，避免被系统调度走导致睡过头。
+    }
+}
+
+// 相对日志路径 → exe 所在目录下的路径（Windows 双击启动时 CWD 不保证是 exe 目录）。
+// 绝对路径原样返回。
+std::string ResolveLogPath(const char* log_file) {
+    std::string path(log_file);
+#if defined(_WIN32)
+    // "C:\\..." / "\\\\server\\share..." 视为绝对路径，其余按 exe 目录解析。
+    const bool is_absolute =
+        (path.size() >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) ||
+        (path.size() >= 2 && path[0] == '\\' && path[1] == '\\');
+    if (!is_absolute) {
+        char exe_path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(nullptr, exe_path, MAX_PATH) > 0) {
+            std::string exe(exe_path);
+            const size_t slash = exe.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                path = exe.substr(0, slash + 1) + path;
+            }
+        }
+    }
+#endif
+    return path;
+}
+
+// Config::log_file 非空时把 stderr 重定向到该文件。
+//
+// 为什么用「重定向 stderr」而不是给日志加一个文件 sink：glog 默认就写 stderr，
+// 重定向是唯一一处改动、覆盖所有日志来源（含第三方库与崩溃时的 CHECK 输出）。
+// 无缓冲是必须的：LOG(FATAL) 之后进程立刻 abort，缓冲区里没刷出去的行就永远丢了。
+void RedirectStderrToLogFile(const char* log_file) {
+    // 默认名带时间戳：双击跑好几次也不会互相覆盖（出事时拿最近那份就是）。
+    std::string auto_name;
+    const char* chosen = log_file;
+#if defined(_WIN32)
+    if (chosen == nullptr) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char name[64];
+        std::snprintf(name, sizeof(name), "jpov_%04u%02u%02u-%02u%02u%02u_%lu_log.txt",
+                      static_cast<unsigned>(st.wYear), static_cast<unsigned>(st.wMonth),
+                      static_cast<unsigned>(st.wDay), static_cast<unsigned>(st.wHour),
+                      static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond),
+                      static_cast<unsigned long>(GetCurrentProcessId()));
+        auto_name = name;
+        chosen = auto_name.c_str();
+    }
+#else
+    if (chosen == nullptr) {
+        return;   // 其他平台默认不落盘（CI 不该到处留文件）
+    }
+#endif
+    if (chosen[0] == '\0') {
+        return;
+    }
+    std::string path = ResolveLogPath(chosen);
+    FILE* file = std::fopen(path.c_str(), "w");
+#if defined(_WIN32)
+    // exe 放在 \\wsl$ / 网络共享 / 只读目录时这里打不开（实测：从 WSL 盘直接运行）
+    // ⇒ 退到 %TEMP%：总比完全没有日志强，实际路径会打在日志第一行。
+    if (file == nullptr) {
+        char temp_dir[MAX_PATH] = {0};
+        if (GetTempPathA(MAX_PATH, temp_dir) > 0) {
+            std::string fallback(temp_dir);
+            fallback += "jpov_run_log.txt";
+            FILE* alt = std::fopen(fallback.c_str(), "w");
+            if (alt != nullptr) {
+                path = fallback;
+                file = alt;
+            }
+        }
+    }
+#endif
+    if (file == nullptr) {
+        LOG(WARNING) << "日志文件打开失败：" << path << "（日志仍然只写 stderr）";
+        return;
+    }
+    std::setvbuf(file, nullptr, _IONBF, 0);
+#if defined(_WIN32)
+    _dup2(_fileno(file), _fileno(stderr));
+#else
+    dup2(fileno(file), fileno(stderr));
+#endif
+    LOG(INFO) << "日志已重定向到 " << path;
+}
+
+#if defined(_WIN32)
+// 未捕获异常兜底：把异常码 / 出错地址 / 模块内偏移 / 调用栈写进日志（= 日志文件）。
+//
+// 为什么必需：真正的崩溃（访问违例 / 除零）不是 LOG(FATAL)，一行日志都不会留；
+// 双击运行时控制台窗口又立刻消失 ⇒ 没有这个 handler 就完全无从下手。
+// 输出的 rva（相对 exe 镜像基址的偏移）可以拿二进制反查：
+//   x86_64-w64-mingw32-addr2line -e <exe> -f -C 0x<rva>
+// 崩溃路径上的日志输出用**裸 fd 写**（_write(2, …)）而不是 fprintf：
+//   · 崩溃可能就发生在 stdio 内部（比如 glog 正在写日志）—— 那时 stderr 的
+//     FILE 锁可能还握着，fprintf 会直接死锁，什么也拿不到；
+//   · _write 不做缓冲、不加锁，且 stderr 已被重定向到日志文件。
+void CrashLog(const char* text) {
+    const int fd = _fileno(stderr);
+    if (fd < 0) {
+        return;
+    }
+    _write(fd, text, static_cast<unsigned>(std::strlen(text)));
+}
+
+LONG WINAPI JpovUnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* rec = (info != nullptr) ? info->ExceptionRecord : nullptr;
+    const unsigned long long module_base =
+        reinterpret_cast<unsigned long long>(GetModuleHandleA(nullptr));
+    char line[256];
+    CrashLog("\n*** FATAL: 未捕获异常 ***\n");
+    if (rec != nullptr) {
+        const unsigned long long addr =
+            reinterpret_cast<unsigned long long>(rec->ExceptionAddress);
+        std::snprintf(line, sizeof(line), "exception code = 0x%08lX\n",
+                      static_cast<unsigned long>(rec->ExceptionCode));
+        CrashLog(line);
+        std::snprintf(line, sizeof(line),
+                      "fault address  = 0x%llX  (exe rva = 0x%llX)\n",
+                      addr, (module_base != 0) ? (addr - module_base) : 0ULL);
+        CrashLog(line);
+    }
+    // 崩在哪儿：ContextRecord->Rip 是**真正**出错的那条指令（调用空指针时是 0）。
+    if (info != nullptr && info->ContextRecord != nullptr) {
+        const unsigned long long rip =
+            static_cast<unsigned long long>(info->ContextRecord->Rip);
+        std::snprintf(line, sizeof(line), "rip            = 0x%llX  (exe rva = 0x%llX)\n",
+                      rip, (module_base != 0) ? (rip - module_base) : 0ULL);
+        CrashLog(line);
+        // 栈扫描：CaptureStackBackTrace 只能看到 handler 自己的栈，对崩溃上下文没用
+        //（实测帧全是系统 DLL）。没有 dbghelp 符号时，从 Rsp 往上翻「落在本 exe
+        // 镜像内、且像返回地址」的值，是最直接能拿到调用点的办法。
+        const unsigned char* mod = reinterpret_cast<const unsigned char*>(
+            GetModuleHandleA(nullptr));
+        unsigned long long mod_size = 0;
+        if (mod != nullptr) {
+            const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(mod);
+            const IMAGE_NT_HEADERS64* nt =
+                reinterpret_cast<const IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+            mod_size = nt->OptionalHeader.SizeOfImage;
+        }
+        const unsigned long long* sp =
+            reinterpret_cast<const unsigned long long*>(info->ContextRecord->Rsp);
+        int shown = 0;
+        for (int i = 0; i < 512 && shown < 16; ++i) {
+            const unsigned long long v = sp[i];
+            if (v >= module_base && v < module_base + mod_size) {
+                std::snprintf(line, sizeof(line), "  stack[%3d] rva = 0x%llX\n",
+                              i, v - module_base);
+                CrashLog(line);
+                ++shown;
+            }
+        }
+    }
+    std::fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
+// 偏好落空时的告警：必须写「为什么 + 怎么办」，否则用户只会看到一个慢得很均匀的
+// 窗口，无从下手。
+// Pre-condition: gpu 是本次 Init 里 QueryGpuInfo() 的快照（context 已创建）。
+void ReportRenderPreference(jpov::RenderPreference preference,
+                            const jpov::GpuInfo& gpu) {
+    const jpov::RenderPreferenceVerdict verdict =
+        jpov::JudgeRenderPreference(preference, gpu.kind);
+    if (verdict == jpov::RenderPreferenceVerdict::kSatisfied) {
+        return;
+    }
+    // kUnknown 时冤枉告警比不告警更糟：glGetString 什么都没给，我们不知道真相。
+    if (verdict == jpov::RenderPreferenceVerdict::kUndetermined) {
+        LOG(WARNING) << "Config::render_preference="
+                     << jpov::RenderPreferenceName(preference)
+                     << " 无法核对：GL_RENDERER 为空（GpuKind=kUnknown）";
+        return;
+    }
+    const char* renderer = gpu.renderer.empty() ? "?" : gpu.renderer.c_str();
+    if (preference == jpov::RenderPreference::kPreferGpu) {
+        LOG(WARNING)
+            << "Config::render_preference=prefer-gpu，但当前 context 落在软件光栅器上"
+               "（renderer=" << renderer << "）。JPOV/OpenGL 无法自行选设备，请排查："
+               "① 是否在 WSLg / 远程桌面 / 虚拟机里（这些环境常常没有硬件 GL）；"
+               "② 显卡驱动是否正常安装；"
+               "③ Windows「设置 → 系统 → 显示 → 图形」里为本 exe 选「高性能」；"
+               "④ 笔记本混合显卡用 NVIDIA 控制面板 / AMD 软件做 per-app 首选项。"
+               "不中断：偏好落空只影响帧率，不影响正确性。";
+        return;
+    }
+    LOG(WARNING)
+        << "Config::render_preference=prefer-cpu，但当前 context 不是已知软件光栅器"
+           "（renderer=" << renderer << "）。LIBGL_ALWAYS_SOFTWARE 只对 Mesa 系驱动"
+           "生效；Windows 上「系统 opengl32.dll + 厂商 ICD」那条栈没有软件后端，"
+           "需要把 Mesa 的 opengl32.dll 放到 exe 旁才可能落软光栅。";
+}
+
+}  // namespace
+
 JPOV::JPOV(Config cfg)
     : config_(cfg),
       window_(nullptr),
@@ -79,6 +346,25 @@ JPOV::~JPOV() {
 
 void JPOV::Init() {
     CHECK(!initialized_) << "JPOV already initialized. Call Finalize() first.";
+
+    // 日志落盘必须排在所有 LOG 之前：Windows 双击运行时没有可看的控制台，
+    // 崩溃（LOG(FATAL)/CHECK）时控制台窗口会立刻关闭，后面这些行就是唯一线索。
+    RedirectStderrToLogFile(config_.log_file);
+#if defined(_WIN32)
+    // 紧挨着装：Init 内部也可能崩（GL context / 着色器 / 字体）。
+    SetUnhandledExceptionFilter(JpovUnhandledExceptionFilter);
+#endif
+    // 非法枚举值（外部 cast 出来的）会让后面的 switch 无从判断，早崩早暴露。
+    CHECK(config_.render_preference == jpov::RenderPreference::kAny ||
+          config_.render_preference == jpov::RenderPreference::kPreferGpu ||
+          config_.render_preference == jpov::RenderPreference::kPreferCpu)
+        << "Config::render_preference 非法：不是 RenderPreference 的枚举值";
+
+    // 偏好必须在**建 context 之前**落地：Mesa 只在建 context 时读这个环境变量。
+    if (jpov::ApplyRenderPreferenceEnvHint(config_.render_preference)) {
+        LOG(INFO) << "Config::render_preference=prefer-cpu ⇒ 已设置 "
+                     "LIBGL_ALWAYS_SOFTWARE=1（Mesa 系驱动会在建 context 时落软光栅）";
+    }
 
     if (!glfwInit()) {
         if (!config_.headless) {
@@ -136,6 +422,15 @@ void JPOV::Init() {
 
     glfwMakeContextCurrent(window_);
 
+    // 垂直同步：显式设置（GLFW 默认就是 1，但写出来才能和 Config::vsync 对上）。
+    glfwSwapInterval(config_.vsync ? 1 : 0);
+#if defined(_WIN32)
+    // 帧率控制依赖 sleep 精度：默认系统计时器粒度 ~15.6ms，会把 60 帧压到 ~46。
+    // 压到 1ms 后配 SleepUntilSeconds 的 1.5ms 自旋尾巴，误差 <0.5ms。
+    timeBeginPeriod(1);
+    timer_period_active_ = true;
+#endif
+
     if (!config_.headless) {
         glfwSetWindowUserPointer(window_, this);
         glfwSetMouseButtonCallback(window_, OnMouseButton);
@@ -189,6 +484,14 @@ void JPOV::Init() {
     // kind == kCpuRaster 就是软件在跑。
     debug_.gpu = jpov::QueryGpuInfo();
 
+    // 偏好核对：用 glGetString 的真话判定；不满足只告警（“偏好”不是“要求”）。
+    ReportRenderPreference(config_.render_preference, debug_.gpu);
+
+    // 先把窗口变成"有内容"再返回：应用随后要加载模型/贴图，期间窗口停在这一帧。
+    if (!config_.headless) {
+        DrawSplashFrame(win_w, win_h);
+    }
+
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
@@ -196,10 +499,17 @@ void JPOV::Init() {
               << " | renderer=" << (debug_.gpu.renderer.empty() ? "?" : debug_.gpu.renderer)
               << " | vendor=" << (debug_.gpu.vendor.empty() ? "?" : debug_.gpu.vendor)
               << " | version=" << (debug_.gpu.version.empty() ? "?" : debug_.gpu.version)
-              << " | max_vertex_attribs=" << debug_.gpu.max_vertex_attribs;
+              << " | max_vertex_attribs=" << debug_.gpu.max_vertex_attribs
+              << " | preference=" << jpov::RenderPreferenceName(config_.render_preference);
 }
 
 void JPOV::Finalize() {
+#if defined(_WIN32)
+    if (timer_period_active_) {
+        timeEndPeriod(1);
+        timer_period_active_ = false;
+    }
+#endif
     CHECK(initialized_) << "JPOV not initialized.";
 
     renderer_.reset();
@@ -377,14 +687,13 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     debug_.height      = winfo.height;
     debug_.frame_count = frame_count;
     {
-        // 瞬时 fps = 1 / 相邻两帧的墙钟间隔（含渲染耗时，因此是真帧率）。
-        // 首帧没有上一帧参照 ⇒ 保持 0。
+        // fps：每 0.5 秒统计一次，结果保持到下一个统计窗口结束（读得出来、可比）。
+        // 首个窗口结束前 has_result() 为 false ⇒ 读数保持 0。
         const double now = glfwGetTime();
-        if (last_frame_time_ > 0.0) {
-            const double dt = now - last_frame_time_;
-            debug_.fps = (dt > 0.0) ? static_cast<float>(1.0 / dt) : 0.0f;
+        fps_stat_.Tick(now);
+        if (fps_stat_.has_result()) {
+            debug_.fps = static_cast<float>(fps_stat_.rate_per_second());
         }
-        last_frame_time_ = now;
     }
 
     renderer_->BeginFrame(
@@ -397,6 +706,36 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     if (debug_overlay_visible_) {
         renderer_->DrawDebugOverlay(debug_.DebugString(), debug_overlay_scale_);
     }
+}
+
+
+void JPOV::DrawSplashFrame(int width, int height) {
+    CHECK(renderer_ != nullptr);
+    CHECK(window_ != nullptr);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+
+    jpov::RenderCommandList cmds;
+    cmds.Clear();
+    // 深灰底：比纯黑更像"已经起来了"，也不会被误认成白屏/花屏故障。
+    const jpov::Color background = {0.10f, 0.11f, 0.13f, 1.0f};
+    cmds.DrawRect({0.0f, 0.0f},
+                  {static_cast<float>(width), static_cast<float>(height)}, background);
+    if (!config_.fonts.empty()) {
+        // 只画 ASCII：任何注册字体都含 ASCII 字形，而 CJK 字体不一定被注册。
+        const char* kSplashText = "JPOV - starting...";
+        const float font_size = 20.0f;
+        cmds.DrawText(kSplashText,
+                      {static_cast<float>(width) * 0.5f, static_cast<float>(height) * 0.5f},
+                      font_size, jpov::kColorWhite,
+                      /*alignment=*/jpov::TextAlignment::kCenter,
+                      /*font_alias=*/config_.fonts.front().alias);
+    }
+    const jpov::WindowInfo winfo = {static_cast<float>(width), static_cast<float>(height)};
+    renderer_->BeginFrame(width, height);
+    renderer_->Render(cmds, winfo);
+    renderer_->Present(window_, width, height);
+    LOG(INFO) << "启动画面已绘制（加载资源期间窗口保持这一帧）";
 }
 
 // ========== 运行模式 ==========
@@ -436,12 +775,21 @@ void JPOV::Run() {
         glfwPollEvents();
 
         // 4. 帧率控制
-        double elapsed = glfwGetTime() - frame_start_time_;
-        double remaining = frame_interval - elapsed;
-        if (remaining > 0.0) {
-            long us = static_cast<long>(remaining * 1e6);
-            struct timespec ts = {0, us * 1000};
-            nanosleep(&ts, nullptr);
+        //
+        // 睡到「本帧开始 + 目标间隔」这个**绝对时刻**（不是「睡剩余时长」，两者在
+        // 有抖动时会越差越多）。
+        //
+        // ⚠️ 开了 vsync 时必须**提前几毫秒**到达 swap（这里取 3ms）：swap 会阻塞到下一个垂直同步，
+        // 如果我们正好睡到 16.67ms 才去 swap，就会错过最近的那次刷新、白等到再下
+        // 一次 —— 实测把 60Hz 屏上的 60 帧压成 ~46 帧（2026-11-01 真卡）。
+        // 关掉 vsync 时则严格睡到 deadline（此时 swap 不阻塞，睡早就是白丢帧）。
+        if (config_.target_fps > 0) {
+            // 提前 3ms 到达 swap：留给系统调度抖动一点余量（偶尔被抢占 2~3ms 也不会
+            // 错过垂直同步；实测提前 2ms 时仍会零星掉到 ~57 帧）。
+            constexpr double kVsyncArriveEarly = 0.003;
+            const double deadline = frame_start_time_ + frame_interval -
+                                    (config_.vsync ? kVsyncArriveEarly : 0.0);
+            SleepUntilSeconds(deadline, /*spin_tail=*/!config_.vsync);
         }
         ++frame;
     }

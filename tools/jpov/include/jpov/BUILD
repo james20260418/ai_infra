@@ -14,6 +14,8 @@ cc_library(
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:render_preference",
+        "//tools/jpov/interface:windowed_stat",
         "//tools/jpov/interface:window_info",
     ] + select({
         "@platforms//os:windows": ["@glfw_mingw//:glfw"],
@@ -21,7 +23,8 @@ cc_library(
     }),
     copts = ["-std=c++20"],
     linkopts = select({
-        "@platforms//os:windows": ["-lopengl32"],
+        # winmm：timeBeginPeriod / timeEndPeriod（帧率控制要 1ms 计时器粒度）
+        "@platforms//os:windows": ["-lopengl32", "-lwinmm"],
         "//conditions:default": ["-lGL"],
     }),
     linkstatic = 1,

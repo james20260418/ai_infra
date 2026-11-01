@@ -206,42 +206,6 @@ void UploadInstanceTints(const InstancedObjectCommand& cmd,
     enabled_buf->Upload(enabled);
 }
 
-// ==================== UploadLightData ====================
-
-void InstancedObjectRenderer::UploadLightData(const RenderCommandList& cmds,
-                                               ShaderManager& shader_mgr,
-                                               unsigned int prog,
-                                               unsigned int prog_full) {
-    const unsigned int programs[] = {prog, prog_full};
-
-    const int total = static_cast<int>(cmds.point_lights.size());
-    const int clamped = std::min(total, kMaxTotalLights);
-
-    char buf[64];
-    for (unsigned int p : programs) {
-        glUseProgram(p);
-        for (int i = 0; i < clamped; ++i) {
-            const PointLight& l = cmds.point_lights[i];
-            snprintf(buf, sizeof(buf), "uLights[%d].position", i);
-            glUniform3f(shader_mgr.GetUniform(p, buf),
-                        l.position.x(), l.position.y(), l.position.z());
-            snprintf(buf, sizeof(buf), "uLights[%d].color", i);
-            glUniform3f(shader_mgr.GetUniform(p, buf),
-                        l.color.r, l.color.g, l.color.b);
-            snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
-            glUniform1f(shader_mgr.GetUniform(p, buf), l.linear_radius);
-            snprintf(buf, sizeof(buf), "uLights[%d].physicalRadius", i);
-            glUniform1f(shader_mgr.GetUniform(p, buf), l.physical_radius);
-            snprintf(buf, sizeof(buf), "uLights[%d].intensity", i);
-            glUniform1f(shader_mgr.GetUniform(p, buf), l.intensity);
-        }
-        glUniform1i(shader_mgr.GetUniform(p, "uTotalLights"), clamped);
-        // uTileCulling=1（默认）：片元走 tile 索引纹理；=0：遍历全部光源。
-        glUniform1i(shader_mgr.GetUniform(p, "uTileCulling"),
-                    cmds.tile_culling ? 1 : 0);
-    }
-}
-
 // ==================== UploadAmbient ====================
 
 void InstancedObjectRenderer::UploadAmbient(ShaderManager& shader_mgr,

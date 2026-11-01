@@ -140,6 +140,10 @@ private:
     unsigned int tile_index_tex_ = 0;
     int tile_grid_w_ = 0, tile_grid_h_ = 0, tile_tex_w_ = 0, tile_tex_h_ = 0;
 
+    // 点光源数据纹理（RGBA32F，255 列 × 3 行；见 src/lights_texture.h）。
+    // 首次用到时建（EnsureLightDataTexture），析构时销毁。
+    unsigned int light_data_tex_ = 0;
+
     unsigned int out_fbo_ = 0, out_color_tex_ = 0;
     int out_w_ = 0, out_h_ = 0;
 

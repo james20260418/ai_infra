@@ -56,6 +56,11 @@ inline constexpr int kTexUnitPartialRotationChannel = 15;
 //   回 0..15 区间（不是单点问题，要整体重排）。
 inline constexpr int kTexUnitEnvCube = 17;
 
+// 点光源数据纹理（见 src/lights_texture.h）。
+//   仅在 PBR 片元（object3d / instanced）里用，不参与蒙皮路径；16 是 0..17 里仅剩的空号。
+//   与 kTexUnitEnvCube 同类风险（> 15 的号靠驱动给 32 个单元，GL 3.3 只保证 16）。
+inline constexpr int kTexUnitLightData = 16;
+
 // 植被风的「关节表」纹理（每关节 2 texel：pivot.xyz+parent / level+phase+soft；RGBA32F，2N×1）。
 //   仅静态/object3d 路径的枢轴风使用（VS 里 texelFetch）。
 //   ⚠️ **故意与蒙皮专用槽 12 同号**：12..15 只被蒙皮路径（pose atlas/粗细/部位旋转）占用，
@@ -77,6 +82,8 @@ static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
               "部位额外旋转的两张表单元重叠");
 static_assert(kTexUnitPartialRotationChannel < kTexUnitEnvCube,
               "部位额外旋转通道表与天空 cubemap 单元重叠");
+static_assert(kTexUnitLightData < kTexUnitEnvCube,
+              "光源数据纹理与天空 cubemap 单元重叠");
 // ⚠️ kTexUnitWindJointTable 故意 = kTexUnitPoseAtlas（12）：蒙皮与植被风不同时活跃，
 // 同号共用，且必须留在 0..15（见该常量处注释）。故不参与下列顺序断言。
 

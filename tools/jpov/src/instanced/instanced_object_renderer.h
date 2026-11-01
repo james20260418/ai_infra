@@ -374,7 +374,7 @@ void main() {
 }
 )glsl";
     // kMeshFs3dPBR: 统一 GGX PBR 片元（含 16×16 tile culling，拷贝自 Object3DRenderer）。
-    //   ⚠️ 其 GLSL #define（TILE_SIZE / MAX_LIGHTS_PER_TILE / MAX_TOTAL_LIGHTS /
+    //   ⚠️ 其 GLSL #define（TILE_SIZE / MAX_LIGHTS_PER_TILE /
     //      LIGHT_INDEX_SENTINEL）与下方 kTileSize16 等主机端常量一一对应，改任一处必须同改另一处。
     //   ⚠️ 类型是 std::string：源文由「字面量 + 共享片段 kEnvSpecularGlsl + 字面量」拼成
     //（环境镜面那段三份 PBR 片元共用，各自拷贝必然分叉，见 src/env_specular.h）。
@@ -383,7 +383,6 @@ void main() {
 
 #define TILE_SIZE 16
 #define MAX_LIGHTS_PER_TILE 16
-#define MAX_TOTAL_LIGHTS 255
 #define LIGHT_INDEX_SENTINEL 255u
 
 in vec3 vWorldPos;
@@ -410,7 +409,29 @@ struct Light {
     float intensity;        // 亮度标量（乘 color，见 LIGHT_INTENSITY.md）
 };
 
-uniform Light uLights[MAX_TOTAL_LIGHTS];
+// 点光源数据走**纹理**而不是 uniform 数组 —— 原因见 src/lights_texture.h：
+// NVIDIA 片元级常量寄存器只有 1024 个 vec4，`Light uLights[255]` 在它的打包下要
+// 1020 个，加上阴影/PCF/环境镜面必然 error C6020 链接失败（2026-11-01 Windows 真卡）。
+// 布局（与 src/lights_texture.cc 一一对应，改行序必须同步改两处）：
+//   row 0 = (position.xyz, linear_radius)
+//   row 1 = (color.rgb,    intensity)
+//   row 2 = (physical_radius, 0, 0, 0)
+uniform sampler2D uLightData;
+
+// 取第 li 盏灯（3 次 texelFetch）。Pre-condition: 0 <= li < uTotalLights
+Light ReadLight(int li) {
+    Light l;
+    vec4 row0 = texelFetch(uLightData, ivec2(li, 0), 0);
+    vec4 row1 = texelFetch(uLightData, ivec2(li, 1), 0);
+    vec4 row2 = texelFetch(uLightData, ivec2(li, 2), 0);
+    l.position       = row0.xyz;
+    l.radius         = row0.w;
+    l.color          = row1.xyz;
+    l.intensity      = row1.w;
+    l.physicalRadius = row2.x;
+    return l;
+}
+
 uniform int uTotalLights;
 uniform vec3 uCameraPos;
 uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级联过渡权重用）
@@ -793,25 +814,26 @@ int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_P
 }
 
 // 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
-// li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
+// li: 光源在光源数据纹理中的下标（见 src/lights_texture.h）。共用于 tile culling 路径与非 cull 路径。
 // 需传入 base_color / metallic / roughness（片元已解析的材质参数）；
 // 通过 inout total_diffuse / total_specular 累加。
 void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
                          vec3 base_color, float metallic, float roughness,
                          inout vec3 total_diffuse, inout vec3 total_specular) {
-    vec3 L = uLights[li].position - world_pos;
+    Light light = ReadLight(li);
+    vec3 L = light.position - world_pos;
     float dist = length(L);
-    if (dist >= uLights[li].radius) return;
+    if (dist >= light.radius) return;
 
     vec3 light_dir = L / dist;
-    float attenuation = 1.0 - (dist / uLights[li].radius);
+    float attenuation = 1.0 - (dist / light.radius);
 
     // ── Representative Point (Karis 2013) ──
     // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
     // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
     // 能从不同区域命中镜面 lobe → 金属面不会全黑。
     // physicalRadius = 0 时退化为原始点光源行为。
-    float sourceRadius = uLights[li].physicalRadius;
+    float sourceRadius = light.physicalRadius;
     vec3 spec_dir = light_dir;  // default: same as point light
     if (sourceRadius > 0.0) {
         vec3 Rf = reflect(-V, N);
@@ -829,7 +851,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
                      mix(vec3(0.04), base_color, metallic));
         vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
         vec3 diffuse = kD * base_color / PI;
-        total_diffuse += uLights[li].color * uLights[li].intensity * diffuse * NdotL * attenuation;
+        total_diffuse += light.color * light.intensity * diffuse * NdotL * attenuation;
     }
 
     // ── specular：representative point 方向 ──
@@ -842,7 +864,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         float D = distributionGGX(N, H, roughness);
         float G = geometrySmith(N, V, spec_dir, roughness);
         vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
-        total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
+        total_specular += light.color * light.intensity * spec * NdotL_s * attenuation;
     }
 }
 )glsl") + kEnvSpecularGlsl + R"glsl(
@@ -993,15 +1015,6 @@ void main() {
     static constexpr int kTexelsPerTile = kMaxLightsPerTile / 4;
     static constexpr int kMaxTotalLights = 255;
     static constexpr uint8_t kLightIndexSentinel = 255;
-
-    // ---- UploadLightData ----
-    // 把 cmds.point_lights（至多 kMaxTotalLights 个）上传到实例 PBR 的两个 program
-    // （prog / prog_full）的 uLights[] / uTotalLights / uTileCulling。
-    // 每帧在发起实例 draw 之前调用一次（非逐 object 热路径）。语义同 Object3DRenderer。
-    static void UploadLightData(const RenderCommandList& cmds,
-                                ShaderManager& shader_mgr,
-                                unsigned int prog,
-                                unsigned int prog_full);
 
     // ---- UploadAmbient ----
     // 把 AmbientLight（含可选三色）上传到实例 PBR 两个 program 的 uAmbientColor /

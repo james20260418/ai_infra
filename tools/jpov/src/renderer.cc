@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/env_specular.h"
+#include "tools/jpov/src/lights_texture.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
@@ -581,6 +582,16 @@ float SrgbToLinear(float c) {
 
 namespace jpov {
 
+// 三处渲染器各自复制了「全局光源上限 255」，而光源数据纹理的宽度由
+// jpov::kMaxPointLights 决定 —— 只改一边会让越界索引静默读到上一帧的旧列
+//（片元里 uTotalLights 只保证 < 各自的常量，不保证 < 纹理宽度）。
+static_assert(Object3DRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "Object3DRenderer::kMaxTotalLights 必须等于 kMaxPointLights（光源纹理宽度）");
+static_assert(InstancedObjectRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "InstancedObjectRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
+static_assert(FireFogRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "FireFogRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
+
 const Color kColorRed         = {1.0f, 0.0f, 0.0f, 1.0f};
 const Color kColorGreen       = {0.0f, 1.0f, 0.0f, 1.0f};
 const Color kColorBlue        = {0.0f, 0.0f, 1.0f, 1.0f};
@@ -609,6 +620,7 @@ Renderer::~Renderer() {
     smaa_renderer_.Finalize();
     debug_overlay_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
+    if (light_data_tex_) { glDeleteTextures(1, &light_data_tex_); light_data_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
         glDeleteTextures(1, &pick_tex_);
@@ -1588,23 +1600,35 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
         Primitives3DRenderer::BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
 
+        // ---- 点光源数据纹理（每帧只更新一次，PBR 与体积雾共用）----
+        // 见 src/lights_texture.h：每盏灯 9 个 float 曾经放在 `uniform Light uLights[255]`
+        // 里，NVIDIA 的打包下独占 1020 个**常量寄存器**，而片元级上限只有 1024 ⇒
+        // 真卡上 error C6020 直接链接失败。纹理不吃常量寄存器，且上传从
+        // 「每盏灯 × 5 次 glUniform × 每帧 × 4~8 个 program」降成一次 glTexSubImage2D。
+        //
+        // 位置放在这里（而不是各自的分支里）：PBR 与雾两条路径都要用同一份数据，
+        // 放外面就只有一次上传；Ensure 幂等，没有光源时 Upload 直接返回。
+        EnsureLightDataTexture(&light_data_tex_);
+        UploadLightDataTexture(cmds, light_data_tex_);
+        const int light_count = ClampedPointLightCount(cmds);
+
         // ---- Tile Forward 光照准备 ----
         // 若有 Object3D 需光照（!object_use_default_color）：
-        //   - 总是上传光源 uniform + uTileCulling 开关（uLights[]/uTotalLights）
+        //   - 给每个 PBR program 绑一次光源数据纹理 + uTotalLights + uTileCulling
         //   - 仅当 tile_culling=true 才做 CPU 端 tile 索引构建（写入 tile 纹理）；
         //     tile_culling=false 时跳过，shader 走全光源遍历（无分界线）。
         if (!cmds.object_use_default_color &&
             (!cmds.object3d.empty() || !cmds.instanced_object.empty())) {
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProg(), DrawObject3DProgFull());
-            // cutout 变体 program 同源，也需光照 uniform。
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
-            // 实例 program 同源，也需光照 uniform。
-            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
-            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout());
+            const unsigned int lit_programs[] = {
+                DrawObject3DProg(),        DrawObject3DProgFull(),
+                DrawObject3DProgCutout(),  DrawObject3DProgFullCutout(),
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+            };
+            for (unsigned int lit_prog : lit_programs) {
+                BindLightDataTexture(&shader_mgr_, lit_prog, light_data_tex_,
+                                     light_count, cmds.tile_culling);
+            }
             if (cmds.tile_culling) {
                 Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
                     &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
@@ -1897,7 +1921,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
+                // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
+                //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
+                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights,
+                                        light_data_tex_, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
                                         ff_params, ff_light);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,

@@ -49,6 +49,88 @@ bazel build //tools/jpov:jpov_demo.exe --config=windows
 
 Windows 版缺少 OpenCV 截图功能（需要 MinGW 交叉编译 OpenCV 静态库），其余窗口绘制、输入响应、blend 等功能与 Linux 版一致。
 
+## 渲染设备偏好（prefer GPU / prefer CPU）
+
+`JPOV::Config::render_preference`（默认 `kAny` = 完全不介入，行为与老版本一致）：
+
+| 值 | 建 context **之前** | 建 context **之后** |
+|----|--------------------|--------------------|
+| `kAny` | — | — |
+| `kPreferGpu` | Windows exe 导出表**恒**含 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`（混合显卡笔记本优先独显） | 落到已知软件光栅器（llvmpipe / SwiftShader / GDI Generic / WARP…）→ `WARNING` + 排查清单 |
+| `kPreferCpu` | 对 Mesa 系驱动设 `LIBGL_ALWAYS_SOFTWARE=1`（**已显式设置则不覆盖**） | 落到 `kHardware` → `WARNING` |
+
+**这不是「选显卡」**：Windows/Linux + OpenGL 都没有这个能力（见 [interface/gpu_info.h](interface/gpu_info.h)
+顶部注释）——最终落到哪块设备由驱动 / 系统「显示设置 → 图形」的 per-app 首选项 / X server 决定。
+偏好只能「提个醒 + 事后核对 + 把怎么办写进日志」，判定表见 [interface/render_preference.h](interface/render_preference.h)。
+
+跑起来后看启动日志那一行即可：
+
+```
+GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | … | preference=prefer-gpu
+```
+
+或按 `F3` 打开 debug HUD（左上角显示 `gpu:` 一行）。
+
+## Windows 分发：代码签名 / SmartScreen（谁负责什么）
+
+**证书归发布者，工具归引擎。** 私钥一旦进了引擎仓库就等于公开（任何人都能签出
+"官方"exe），而且签名表达的是「谁发布」，所以：
+
+- **JPOV 提供工具**：`tools/jpov/sign_windows_exe.sh`（构建脚本已自动调用）——
+  生成自签名代码签名证书（10 年，`output/signing/`，私钥不进 git）→ 用
+  `osslsigncode` 签名并校验 → 往产物目录放 `jpov_codesign.crt` +
+  `install_cert.bat` / `uninstall_cert.bat`（一键装进「受信任的根证书颁发机构 +
+  受信任的发布者」，需管理员，只需一次）。
+- **发布者自己持有证书**：默认 CN 是 `JPOV Local Dev`（开发机够用），产品或团队
+  发布时用 `JPOV_SIGN_CN="Studio XYZ"` 覆盖；**不要**把某个人的证书/私钥提交进仓库。
+
+边界（别指望它解决一切）：
+
+| 场景 | 自签名证书够吗 | 说明 |
+|------|---------------|------|
+| 自己的开发机 / 内网工具 | ✅ | 装一次证书即可，不再弹「未查到此应用的发布信息」 |
+| 发给同事的机器 | ✅ | 对方跑一次 `install_cert.bat` |
+| 对外公开发布 | ❌ | 需要 CA 代码签名证书（OV/EV）或 MSIX / 商店分发；自签名在别人机器上仍是未知发布者 |
+
+另外：从网络复制来的 exe 带 **MOTW**（网络来源标记），即使签名也可能被拦 ——
+右键属性勾「解除锁定」或 `Unblock-File -Path <exe>`。
+
+## 运行日志（Windows 默认落盘）
+
+双击启动的进程没有可看的控制台（已用 `-mwindows` 做成 GUI 子系统），所以
+`JPOV::Init()` 一开始就把 stderr 重定向到文件：
+
+| `Config::log_file` | 行为 |
+|--------------------|------|
+| `nullptr`（默认） | **自动**：Windows → exe 同级 `jpov_YYYYMMDD-HHMMSS_<pid>_log.txt`；其他平台不落盘 |
+| `""` | 彻底关闭日志 |
+| 其他路径 | 写到该路径（相对路径按 **exe 目录**解析） |
+
+- 截断写 + 无缓冲：`LOG(FATAL)` / 崩溃前的最后一行也一定在盘上。
+- exe 目录不可写（例如直接跑在 `\\wsl$` 共享上）→ 自动退到 `%TEMP%\jpov_run_log.txt`，
+  日志第一行会打印真实路径。
+- Windows 另外装了 `SetUnhandledExceptionFilter`：访问违例这类崩溃会写异常码 / RIP /
+  exe 内 rva / 栈扫描结果（没有符号表时定位调用点的唯一办法）。
+
+## 各 viewer 的 Windows 构建现状
+
+目前已构建出 `.exe` 的（可直接拷到 Windows 跑）：
+
+| target | 构建脚本 |
+|--------|---------|
+| `//tools/jpov:jpov_demo.exe` | `build_jpov_demo.sh` |
+| `//tools/jpov:jpov_ui_demo.exe` | `build_jpov_ui_demo.sh` |
+| `//tools/jpov:jpov_sp_ui_demo.exe` | `build_jpov_sp_ui_demo.sh` |
+| `//tools/jpov:jpov_skylight_viewer.exe` | `build_jpov_skylight_viewer.sh` |
+
+其余 viewer / 工具目前**只有 Linux target**（`jpov_pick_highlight_viewer`、`jpov_fire_fog_viewer`、
+`jpov_model_viewer`、`jpov_particle_viewer`、`jpov_strip_viewer`、`jpov_volume_fire_viewer`、
+`jpov_soft_mesh_viewer`、`jpov_clothing_tool`、`jpov_fbx_viewer`、`jpov_model_editor`、
+vegetation v2 viewer）。要加一个：照 BUILD 里现有 `.exe` target 复制一份，只把
+`target_compatible_with` 换成 `@platforms//os:windows`，再跑
+`bazel build //tools/jpov:<name>.exe --config=windows` —— 能过就补进 CI 的 windows-build job，
+否则会悄悄腐坏（没人交叉编译的 target 不会自己保持可编译）。
+
 ## 设计
 
 详见 [DESIGN.md](DESIGN.md)。

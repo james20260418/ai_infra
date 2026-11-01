@@ -17,6 +17,8 @@
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
+#include "tools/jpov/interface/render_preference.h"
+#include "tools/jpov/interface/windowed_stat.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/renderer.h"
 
@@ -79,6 +81,32 @@ public:
         // headless = false: 正常窗口（Run() 进入事件循环）
         bool        headless     = false;
 
+        // 「这一帧由谁来画」的偏好声明（默认 kAny = 完全不介入，行为与老版本一致）。
+        //
+        // JPOV **不能**选显卡（Windows/Linux + GL 都没有这个能力，见
+        // interface/gpu_info.h 顶部注释），这个字段只做三件事：
+        //   ① 建 context **之前**给驱动提示：
+        //      - kPreferCpu：对 Mesa 系驱动设 LIBGL_ALWAYS_SOFTWARE=1
+        //        （已显式设置则**不覆盖**，用户/CI 的环境优先）；
+        //      - kPreferGpu：JPOV 在 Windows 上**恒定**导出 NvOptimusEnablement /
+        //        AmdPowerXpressRequestHighPerformance —— 它们是 exe 导出表里的静态
+        //        属性，只能在链接期决定，因此对所有 JPOV app 都生效（混合显卡笔记本
+        //        上会优先独显）；用户可在「显示设置 → 图形」/ 控制面板 per-app 覆盖。
+        //   ② 建 context **之后**用 glGetString 的真话核对偏好是否被满足；
+        //   ③ 不满足时 LOG(WARNING) 写清原因与补救办法，**不中断**（这是「偏好」，
+        //      不是「要求」；硬性门禁请自行检查 debug() 里的 GpuInfo）。
+        //
+        // 判定表与三态语义见 interface/render_preference.h。
+        jpov::RenderPreference render_preference = jpov::RenderPreference::kAny;
+
+        // 是否开垂直同步（glfwSwapInterval(1)）。默认 true。
+        //
+        // 关掉后帧率只由 target_fps 决定（拿来做性能测量/录制比较稳，但会有撕裂）。
+        // ⚠️ 开 vsync 时帧率**由显示器刷新率给节奏**：此时如果代码还额外 sleep
+        // 「凑满」一帧，就会错过下一个垂直同步 —— 实测把 60Hz 屏上的 60 帧压成
+        // ~46 帧（2026-11-01 Windows RTX 5060 Ti）。见 Run() 的帧率控制。
+        bool        vsync        = true;
+
         // OneIteration 调用帧率（Hz），默认 60。
         // Run() 按此帧率调度 OneIteration，实际帧率受 vsync 限制。
         // 设为 0 表示不限制（尽可能快）。
@@ -101,6 +129,19 @@ public:
         // jpov::DebugInfo::kMaxLineChars（单行 <= 500px，与窗口宽度无关；
         // 窗口更窄时右侧被裁，不会崩也不会缩字）。
         bool        debug_overlay = false;
+
+        // 日志落盘路径（默认空 = 不落盘，行为与老版本一致）。
+        //
+        // 为什么要它：Windows 下双击启动的进程**没有可看的控制台** —— 控制台窗口
+        // 随进程退出（尤其是 CHECK/LOG(FATAL) 崩溃）瞬间关闭，关键错误行看不到。
+        //   nullptr（默认）→ **自动**：Windows 落盘到 exe 同级的 jpov_run_log.txt
+        //                    （目录不可写时退到 %TEMP%）；其他平台不落盘
+        //                    （CI 一次跑几百个测试二进制，不该到处留文件）
+        //   ""             → 显式关闭落盘
+        //   其他           → 该路径（相对路径按 **exe 所在目录**解析）
+        //
+        // Init 一开始就把 stderr 重定向过去（截断写 + 无缓冲 ⇒ 崩溃前最后一行也落盘）。
+        const char* log_file = nullptr;
 
         // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
         // 1 是「还能看清」的下限（点阵字体再小就得换 5x7 字模，中文更不可能），
@@ -377,6 +418,13 @@ public:
     void SetDebugOverlayVisible(bool visible) { debug_overlay_visible_ = visible; }
 
 private:
+    // 启动画面：窗口 + 渲染器就绪后立刻出一帧（纯 2D：深灰底 + 一行提示）并 Present。
+    //
+    // 为什么要它：应用接下来要加载 glb / 4K 贴图（几百毫秒到几秒），这期间窗口
+    // 什么都不画就是一片空白。先画一帧静态内容再返回，加载期间窗口就停在这一帧上。
+    // Pre-condition: renderer_ / window_ 已创建；仅 windowed 模式调用
+    void DrawSplashFrame(int width, int height);
+
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //
     // 1. 调用 OneIteration → cmds
@@ -437,7 +485,16 @@ private:
     // 运行时由 F3 切换。
     bool debug_overlay_visible_ = false;
     // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
-    double last_frame_time_ = 0.0;
+    // HUD 的 fps 读数：每 0.5 秒统计一次，结果在下一个 0.5 秒内保持不变。
+    // 用瞬时帧率（1/相邻两帧间隔）时数字每帧都在跳，屏幕上根本读不出来；
+    // 分窗统计还顺带回答了"这半秒到底多少帧"。见 interface/windowed_stat.h。
+    jpov::WindowedStat fps_stat_{0.5};
+
+#if defined(_WIN32)
+    // Init 里调了 timeBeginPeriod(1)（帧率控制要 1ms 粒度），Finalize 必须还原，
+    // 否则会把整台机器的计时器精度一直钉在 1ms（费电，且影响其它进程）。
+    bool timer_period_active_ = false;
+#endif
     pid_t xvfb_pid_    = 0;
     bool  started_xvfb_ = false;
     bool  initialized_  = false;

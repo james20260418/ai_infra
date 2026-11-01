@@ -191,6 +191,29 @@ cc_binary(
     ],
 )
 
+# Windows 版（供真卡上肉眼验收；字体/模型资源由
+# build_jpov_skylight_viewer.sh 同构拷到 exe 旁边的 fonts//models/）。
+cc_binary(
+    name = "jpov_skylight_viewer.exe",
+    srcs = ["demo/jpov_skylight_viewer.cc"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # pick/highlight 查看器：三大 renderer（蒙皮蓝人 ×5 / 连衣裙实例 ×3 / 凳子 object3d ×2）
 # + 统一拾取/高亮交互（左键点选切换高亮，右键轨道 / 滚轮缩放）。
 cc_binary(
@@ -263,6 +286,9 @@ cc_binary(
     name = "jpov_demo.exe",
     srcs = ["demo/jpov_demo.cc"],
     deps = ["//tools/jpov/include/jpov:jpov"],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -294,6 +320,9 @@ cc_binary(
         "//tools/jpov:ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -337,6 +366,9 @@ cc_binary(
         "//tools/jpov:sp_ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",

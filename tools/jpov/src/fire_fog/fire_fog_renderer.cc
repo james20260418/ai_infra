@@ -43,6 +43,7 @@
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
 #include "tools/jpov/src/csm_shadow_glsl.h"
+#include "tools/jpov/src/texture_units.h"
 #include "tools/jpov/src/fire_fog/fire_fog_shader.h"
 
 namespace {
@@ -56,9 +57,12 @@ constexpr int kShadowTexUnitBase = 6;
 // Draw() 会触碰的纹理单元数：inject 用 0..5（团 tile / z 范围 / 团属性 / tile 射线 /
 // z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0..4
 //（scatter / 场景深度 / 玻璃 accum / reveal / depth）。
-// 取上界 kShadowTexUnitBase+kMaxCascades（=11，覆盖 0..10；kMaxLevels=5 也含在内）。
+// 取上界 = max(kShadowTexUnitBase+kMaxCascades, kTexUnitLightData+1)：点光源数据纹理
+// 在单元 16，比 CSM 区间（6..10）高，必须纳入保存/复原范围，否则会把采样器绑定泄漏给
+// 调用方（JPOV 的「命令即全局状态」约定要求 Draw 自己复原）。
 int TexUnitsTouched() {
-    return kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades;
+    return std::max(kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades,
+                    jpov::kTexUnitLightData + 1);
 }
 
 // 4x4 列主序求逆（Gauss-Jordan + 部分主元）。无法求逆返回 false。
@@ -452,6 +456,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
 
 void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            const std::vector<PointLight>& point_lights,
+                           unsigned int light_data_tex,
                            const Camera& cam,
                            const float view_proj[16],
                            int viewport_w,
@@ -743,21 +748,15 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     }
 
     // ── 点光源（tile culling；仅需内散射的 position/color/radius/intensity）──
+    // 数据走**共享光源纹理**（同 object3d/instanced；见 src/lights_texture.h）：
+    // `uniform FogLight uFogLights[255]` 在 NVIDIA 上占 1020 个常量寄存器 ⇒ C6020。
     const int light_count =
         std::min(static_cast<int>(point_lights.size()), kMaxTotalLights);
-    for (int i = 0; i < light_count; ++i) {
-        const PointLight& pl = point_lights[i];
-        const std::string n_pos = "uFogLights[" + std::to_string(i) + "].position";
-        glUniform3f(shader_mgr_->GetUniform(prog_inject_, n_pos.c_str()),
-                    pl.position.x(), pl.position.y(), pl.position.z());
-        const std::string n_col = "uFogLights[" + std::to_string(i) + "].color";
-        glUniform3f(shader_mgr_->GetUniform(prog_inject_, n_col.c_str()),
-                    pl.color.r, pl.color.g, pl.color.b);
-        const std::string n_rad = "uFogLights[" + std::to_string(i) + "].radius";
-        glUniform1f(shader_mgr_->GetUniform(prog_inject_, n_rad.c_str()), pl.linear_radius);
-        const std::string n_int = "uFogLights[" + std::to_string(i) + "].intensity";
-        glUniform1f(shader_mgr_->GetUniform(prog_inject_, n_int.c_str()), pl.intensity);
-    }
+    glActiveTexture(GL_TEXTURE0 + jpov::kTexUnitLightData);
+    glBindTexture(GL_TEXTURE_2D, light_data_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uLightData"),
+                jpov::kTexUnitLightData);
+    glActiveTexture(GL_TEXTURE0);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalLights"), light_count);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 

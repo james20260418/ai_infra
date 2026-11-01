@@ -311,7 +311,25 @@ struct FogLight {
     float radius;      // 衰减半径（线性，与 object3d 同）
     float intensity;   // 亮度标量（乘 color）
 };
-uniform FogLight uFogLights[MAX_TOTAL_LIGHTS];
+// 光源数据走**纹理**而不是 uniform 数组 —— 原因见 src/lights_texture.h：
+// NVIDIA 片元级常量寄存器只有 1024 个 vec4，255 盏灯的结构体数组在它的打包下要
+// 1020 个，必然 error C6020 链接失败（2026-11-01 Windows 真卡实测）。
+// 与 PBR 路径**共用同一张** uLightData（row 0 = position+radius，row 1 = color+intensity）。
+uniform sampler2D uLightData;
+
+// 取第 li 盏灯（只用前两行：雾的内散射不要 physicalRadius）。
+// Pre-condition: 0 <= li < uTotalLights
+FogLight ReadFogLight(int li) {
+    FogLight l;
+    vec4 row0 = texelFetch(uLightData, ivec2(li, 0), 0);
+    vec4 row1 = texelFetch(uLightData, ivec2(li, 1), 0);
+    l.position  = row0.xyz;
+    l.radius    = row0.w;
+    l.color     = row1.xyz;
+    l.intensity = row1.w;
+    return l;
+}
+
 uniform int uTotalLights;
 
 // ── 光照（**始终开启**；无「无光照 / base 发射」链路）──
@@ -431,15 +449,15 @@ void main() {
         }
         for (int k2 = 0; k2 < nl; ++k2) {
             int li = int(light_idx[k2]);
-            vec3 Lp = uFogLights[li].position - p;
+            FogLight fl = ReadFogLight(li);
+            vec3 Lp = fl.position - p;
             float ldist = length(Lp);
-            if (ldist >= uFogLights[li].radius) {
+            if (ldist >= fl.radius) {
                 continue;
             }
-            float atten_l = 1.0 - ldist / uFogLights[li].radius;
+            float atten_l = 1.0 - ldist / fl.radius;
             float mu = clamp(dot(rd, Lp / max(ldist, 1e-5)), -1.0, 1.0);
-            Llight += uFogLights[li].color * uFogLights[li].intensity
-                      * atten_l * HgPhase(mu, uSunPhaseG);
+            Llight += fl.color * fl.intensity * atten_l * HgPhase(mu, uSunPhaseG);
         }
         float cover = 1.0 - exp(-dtau);
         // 源项分两块：散射 = albedo⊙L_light×覆盖；自发光 = ε×长度×自吸收

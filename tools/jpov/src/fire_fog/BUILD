@@ -17,6 +17,7 @@ cc_library(
         ":convex_hull_tiles",
         "//tools/jpov/src:csm_shadow_glsl",
         "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src:texture_units",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
         "@glog_static//:glog",
