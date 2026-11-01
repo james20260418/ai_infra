@@ -50,6 +50,13 @@ ls -lh "$OUTPUT_DIR/"
 # 拷贝分发态字体到 exe 旁 fonts/（与 demo cfg.fonts 声明的相对路径一致，
 # ResolveFontPath 按 exe 相对路径命中；PR #68 强调 exe 旁 fonts/ 优先）。
 # UI 滑条用 CJK 显中文，DejaVu 做拉丁，两者都拷。
+# 本地代码签名（消除 SmartScreen「未查到此应用的发布信息」；证书缺失时脚本自己生成，
+# 需要把 output/signing/jpov_codesign.crt 装进本机「受信任的根/发布者」）。
+# 没有 osslsigncode 时静默跳过，不阻塞构建。
+echo ""
+echo "==> 2b. 给 Windows 版签名（可选）"
+"$SCRIPT_DIR/sign_windows_exe.sh" "$OUTPUT_DIR/jpov_skylight_viewer.exe" || true
+
 echo ""
 echo "==> 3. 拷贝字体资源到 output/jpov_skylight_viewer/fonts/"
 mkdir -p "$OUTPUT_DIR/fonts"

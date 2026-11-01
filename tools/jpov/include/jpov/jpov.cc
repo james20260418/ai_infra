@@ -112,8 +112,12 @@ namespace {
 // 为什么不直接 nanosleep「剩余时长」：Windows 上 Sleep/nanosleep 的粒度默认是
 // ~15.6ms，睡 11ms 可能真睡 16ms —— 60 帧的目标直接被压成 ~46 帧（实测）。
 // 这里两级：先粗睡到 deadline - 1.5ms，再自旋收尾（自旋只占 1.5ms/帧，代价可控）。
-void SleepUntilSeconds(double deadline) {
-    constexpr double kSpinWindow = 0.0015;
+void SleepUntilSeconds(double deadline, bool spin_tail) {
+    // spin_tail：是否用「自旋收尾」把误差压到亚毫秒。
+    //   · 关 vsync ⇒ 需要精确（睡早/睡晚都直接变成帧率误差）；
+    //   · 开 vsync ⇒ 只要**提前一点**到达 swap 即可（多等的那几毫秒由垂直同步吃掉），
+    //     此时自旋纯属烧 CPU（1.5ms/帧 ≈ 一个核的 9%），所以用粗睡。
+    const double kSpinWindow = spin_tail ? 0.0015 : 0.0;
     for (;;) {
         const double remaining = deadline - glfwGetTime();
         if (remaining <= 0.0) {
@@ -759,10 +763,12 @@ void JPOV::Run() {
         // 一次 —— 实测把 60Hz 屏上的 60 帧压成 ~46 帧（2026-11-01 真卡）。
         // 关掉 vsync 时则严格睡到 deadline（此时 swap 不阻塞，睡早就是白丢帧）。
         if (config_.target_fps > 0) {
-            constexpr double kVsyncArriveEarly = 0.002;
+            // 提前 3ms 到达 swap：留给系统调度抖动一点余量（偶尔被抢占 2~3ms 也不会
+            // 错过垂直同步；实测提前 2ms 时仍会零星掉到 ~57 帧）。
+            constexpr double kVsyncArriveEarly = 0.003;
             const double deadline = frame_start_time_ + frame_interval -
                                     (config_.vsync ? kVsyncArriveEarly : 0.0);
-            SleepUntilSeconds(deadline);
+            SleepUntilSeconds(deadline, /*spin_tail=*/!config_.vsync);
         }
         ++frame;
     }
