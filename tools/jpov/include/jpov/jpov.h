@@ -99,6 +99,14 @@ public:
         // 判定表与三态语义见 interface/render_preference.h。
         jpov::RenderPreference render_preference = jpov::RenderPreference::kAny;
 
+        // 是否开垂直同步（glfwSwapInterval(1)）。默认 true。
+        //
+        // 关掉后帧率只由 target_fps 决定（拿来做性能测量/录制比较稳，但会有撕裂）。
+        // ⚠️ 开 vsync 时帧率**由显示器刷新率给节奏**：此时如果代码还额外 sleep
+        // 「凑满」一帧，就会错过下一个垂直同步 —— 实测把 60Hz 屏上的 60 帧压成
+        // ~46 帧（2026-11-01 Windows RTX 5060 Ti）。见 Run() 的帧率控制。
+        bool        vsync        = true;
+
         // OneIteration 调用帧率（Hz），默认 60。
         // Run() 按此帧率调度 OneIteration，实际帧率受 vsync 限制。
         // 设为 0 表示不限制（尽可能快）。
@@ -483,6 +491,12 @@ private:
     // 用瞬时帧率（1/相邻两帧间隔）时数字每帧都在跳，屏幕上根本读不出来；
     // 分窗统计还顺带回答了"这半秒到底多少帧"。见 interface/windowed_stat.h。
     jpov::WindowedStat fps_stat_{0.5};
+
+#if defined(_WIN32)
+    // Init 里调了 timeBeginPeriod(1)（帧率控制要 1ms 粒度），Finalize 必须还原，
+    // 否则会把整台机器的计时器精度一直钉在 1ms（费电，且影响其它进程）。
+    bool timer_period_active_ = false;
+#endif
     pid_t xvfb_pid_    = 0;
     bool  started_xvfb_ = false;
     bool  initialized_  = false;

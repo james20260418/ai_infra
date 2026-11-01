@@ -23,7 +23,8 @@ cc_library(
     }),
     copts = ["-std=c++20"],
     linkopts = select({
-        "@platforms//os:windows": ["-lopengl32"],
+        # winmm：timeBeginPeriod / timeEndPeriod（帧率控制要 1ms 计时器粒度）
+        "@platforms//os:windows": ["-lopengl32", "-lwinmm"],
         "//conditions:default": ["-lGL"],
     }),
     linkstatic = 1,

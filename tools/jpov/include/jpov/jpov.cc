@@ -29,6 +29,7 @@
 #endif
 #include <windows.h>
 #include <io.h>
+#include <timeapi.h>   // timeBeginPeriod：把系统计时器粒度压到 1ms（帧率控制需要）
 // winuser.h 把 DrawText 定义成 DrawTextA（Win32 GDI 的绘制文本 API），会撞上
 // RenderCommandList::DrawText。本文件不用 GDI 画字，撤掉这个宏。
 #ifdef DrawText
@@ -105,6 +106,30 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 // ========== 生命周期 ==========
 
 namespace {
+
+// 睡到绝对时刻 deadline（秒，glfwGetTime 基准）。
+//
+// 为什么不直接 nanosleep「剩余时长」：Windows 上 Sleep/nanosleep 的粒度默认是
+// ~15.6ms，睡 11ms 可能真睡 16ms —— 60 帧的目标直接被压成 ~46 帧（实测）。
+// 这里两级：先粗睡到 deadline - 1.5ms，再自旋收尾（自旋只占 1.5ms/帧，代价可控）。
+void SleepUntilSeconds(double deadline) {
+    constexpr double kSpinWindow = 0.0015;
+    for (;;) {
+        const double remaining = deadline - glfwGetTime();
+        if (remaining <= 0.0) {
+            return;
+        }
+        if (remaining > kSpinWindow) {
+            const double coarse = remaining - kSpinWindow;
+            const long us = static_cast<long>(coarse * 1e6);
+            if (us > 0) {
+                struct timespec ts = {0, us * 1000};
+                nanosleep(&ts, nullptr);
+            }
+        }
+        // 尾部自旋：不再 sleep，避免被系统调度走导致睡过头。
+    }
+}
 
 // 相对日志路径 → exe 所在目录下的路径（Windows 双击启动时 CWD 不保证是 exe 目录）。
 // 绝对路径原样返回。
@@ -371,6 +396,15 @@ void JPOV::Init() {
 
     glfwMakeContextCurrent(window_);
 
+    // 垂直同步：显式设置（GLFW 默认就是 1，但写出来才能和 Config::vsync 对上）。
+    glfwSwapInterval(config_.vsync ? 1 : 0);
+#if defined(_WIN32)
+    // 帧率控制依赖 sleep 精度：默认系统计时器粒度 ~15.6ms，会把 60 帧压到 ~46。
+    // 压到 1ms 后配 SleepUntilSeconds 的 1.5ms 自旋尾巴，误差 <0.5ms。
+    timeBeginPeriod(1);
+    timer_period_active_ = true;
+#endif
+
     if (!config_.headless) {
         glfwSetWindowUserPointer(window_, this);
         glfwSetMouseButtonCallback(window_, OnMouseButton);
@@ -444,6 +478,12 @@ void JPOV::Init() {
 }
 
 void JPOV::Finalize() {
+#if defined(_WIN32)
+    if (timer_period_active_) {
+        timeEndPeriod(1);
+        timer_period_active_ = false;
+    }
+#endif
     CHECK(initialized_) << "JPOV not initialized.";
 
     renderer_.reset();
@@ -710,12 +750,19 @@ void JPOV::Run() {
         glfwPollEvents();
 
         // 4. 帧率控制
-        double elapsed = glfwGetTime() - frame_start_time_;
-        double remaining = frame_interval - elapsed;
-        if (remaining > 0.0) {
-            long us = static_cast<long>(remaining * 1e6);
-            struct timespec ts = {0, us * 1000};
-            nanosleep(&ts, nullptr);
+        //
+        // 睡到「本帧开始 + 目标间隔」这个**绝对时刻**（不是「睡剩余时长」，两者在
+        // 有抖动时会越差越多）。
+        //
+        // ⚠️ 开了 vsync 时必须**提前约 2ms** 到达 swap：swap 会阻塞到下一个垂直同步，
+        // 如果我们正好睡到 16.67ms 才去 swap，就会错过最近的那次刷新、白等到再下
+        // 一次 —— 实测把 60Hz 屏上的 60 帧压成 ~46 帧（2026-11-01 真卡）。
+        // 关掉 vsync 时则严格睡到 deadline（此时 swap 不阻塞，睡早就是白丢帧）。
+        if (config_.target_fps > 0) {
+            constexpr double kVsyncArriveEarly = 0.002;
+            const double deadline = frame_start_time_ + frame_interval -
+                                    (config_.vsync ? kVsyncArriveEarly : 0.0);
+            SleepUntilSeconds(deadline);
         }
         ++frame;
     }
