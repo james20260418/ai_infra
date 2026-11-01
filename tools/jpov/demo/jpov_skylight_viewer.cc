@@ -470,6 +470,9 @@ int main(int argc, char** argv) {
     // headless 拍摄**不设**（保持 kAny）：CI / 黄金图本来就跑在 llvmpipe 上，
     // 每次拍摄都刷一条「偏好落空」告警没有意义。
     cfg.render_preference = jpov::RenderPreference::kPreferGpu;
+    // Windows 是双击运行，控制台窗口会随进程退出（崩溃）瞬间关闭 —— 日志落盘到 exe
+    // 旁边的 jpov_run_log.txt，出事时直接把那个 txt 发出来即可。
+    cfg.log_file = "jpov_run_log.txt";
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_skylight_viewer.sh 同构拷贝）。
     cfg.fonts = {

@@ -16,8 +16,21 @@
 #include "jpov.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <tuple>
+
+#if defined(_WIN32)
+// windows.h 定义 ERROR 宏，与 glog 的 ERROR 严重级别冲突 ⇒ 必须先 suppress（同
+// shader_manager.cc）。本文件只需 GetModuleFileNameA / MAX_PATH。
+#ifndef GLOG_NO_ABBREVIATED_SEVERITIES
+#define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
+#include <windows.h>
+#include <io.h>
+#endif
+
 #include <glog/logging.h>
 
 #include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
@@ -88,6 +101,53 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 
 namespace {
 
+// 相对日志路径 → exe 所在目录下的路径（Windows 双击启动时 CWD 不保证是 exe 目录）。
+// 绝对路径原样返回。
+std::string ResolveLogPath(const char* log_file) {
+    std::string path(log_file);
+#if defined(_WIN32)
+    // "C:\\..." / "\\\\server\\share..." 视为绝对路径，其余按 exe 目录解析。
+    const bool is_absolute =
+        (path.size() >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) ||
+        (path.size() >= 2 && path[0] == '\\' && path[1] == '\\');
+    if (!is_absolute) {
+        char exe_path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(nullptr, exe_path, MAX_PATH) > 0) {
+            std::string exe(exe_path);
+            const size_t slash = exe.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                path = exe.substr(0, slash + 1) + path;
+            }
+        }
+    }
+#endif
+    return path;
+}
+
+// Config::log_file 非空时把 stderr 重定向到该文件。
+//
+// 为什么用「重定向 stderr」而不是给日志加一个文件 sink：glog 默认就写 stderr，
+// 重定向是唯一一处改动、覆盖所有日志来源（含第三方库与崩溃时的 CHECK 输出）。
+// 无缓冲是必须的：LOG(FATAL) 之后进程立刻 abort，缓冲区里没刷出去的行就永远丢了。
+void RedirectStderrToLogFile(const char* log_file) {
+    if (log_file == nullptr || log_file[0] == '\0') {
+        return;
+    }
+    const std::string path = ResolveLogPath(log_file);
+    FILE* file = std::fopen(path.c_str(), "w");
+    if (file == nullptr) {
+        LOG(WARNING) << "Config::log_file 打开失败：" << path << "（日志仍然只写 stderr）";
+        return;
+    }
+    std::setvbuf(file, nullptr, _IONBF, 0);
+#if defined(_WIN32)
+    _dup2(_fileno(file), _fileno(stderr));
+#else
+    dup2(fileno(file), fileno(stderr));
+#endif
+    LOG(INFO) << "日志已重定向到 " << path;
+}
+
 // 偏好落空时的告警：必须写「为什么 + 怎么办」，否则用户只会看到一个慢得很均匀的
 // 窗口，无从下手。
 // Pre-condition: gpu 是本次 Init 里 QueryGpuInfo() 的快照（context 已创建）。
@@ -140,6 +200,10 @@ JPOV::~JPOV() {
 
 void JPOV::Init() {
     CHECK(!initialized_) << "JPOV already initialized. Call Finalize() first.";
+
+    // 日志落盘必须排在所有 LOG 之前：Windows 双击运行时没有可看的控制台，
+    // 崩溃（LOG(FATAL)/CHECK）时控制台窗口会立刻关闭，后面这些行就是唯一线索。
+    RedirectStderrToLogFile(config_.log_file);
     // 非法枚举值（外部 cast 出来的）会让后面的 switch 无从判断，早崩早暴露。
     CHECK(config_.render_preference == jpov::RenderPreference::kAny ||
           config_.render_preference == jpov::RenderPreference::kPreferGpu ||

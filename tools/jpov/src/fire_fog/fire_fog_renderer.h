@@ -110,6 +110,8 @@ public:
     //   view_proj       : Proj*View（列主序 16 float）。
     //   viewport_w/h    : 当前 3D FBO 像素尺寸（= froxel 纹理尺寸）。
     //   scene_depth_tex : MRT#1 场景深度（R32F，单采样），composite 按像素深度裁剪；0 = 不裁剪。
+    //   light_data_tex  : 点光源数据纹理（RGBA32F 255×3，见 src/lights_texture.h）；
+    //                     与 object3d/instanced 共用同一张，调用方每帧 Ensure/Upload 一次。
     //   params          : 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
     //   light           : 物理光照来源（ambient + 太阳×CSM 资源）。
     // Pre-conditions: Init 已调用；调用方已绑定 HDR FBO 并设好 viewport；场景深度纹理
@@ -118,6 +120,7 @@ public:
     //       viewport / 活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
     void Draw(const std::vector<PointFog>& fogs,
               const std::vector<PointLight>& point_lights,
+              unsigned int light_data_tex,
               const Camera& cam,
               const float view_proj[16],
               int viewport_w,

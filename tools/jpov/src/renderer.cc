@@ -1906,7 +1906,13 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
+                // 雾的内散射也要点光源数据：与 PBR 共用同一张光源纹理。
+                // Ensure 幂等；Upload 只写前 N 盏灯（PBR 那条分支已上传时这里是一次
+                // 几 KB 的重复写，换来两条分支互不依赖）。
+                EnsureLightDataTexture(&light_data_tex_);
+                UploadLightDataTexture(cmds, light_data_tex_);
+                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights,
+                                        light_data_tex_, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
                                         ff_params, ff_light);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
