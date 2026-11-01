@@ -522,6 +522,67 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.ssr_depth_mode_ = 1;
     app.RunOnce(input, winfo, (out_dir + "/ssr_graze_unity.png").c_str());
 
+    // ===== TEMP（复现"铬人身上饱和红/蓝镜面点"，用完撤）=====
+    // Danis 截图机位：pos(4.50665426, 1.07715046, 6.4661479) -> 原点，fov60 near .05 far 1000
+    app.view_.R     = 7.9550;
+    app.view_.phi   = std::asin(1.07715046 / 7.9550);
+    app.view_.theta = std::atan2(4.50665426, 6.4661479);
+    app.ssr_scale_  = 0.5f;
+    const float kSun[3] = {35.0f, 8.0f, 60.0f};
+    for (int i = 0; i < 3; ++i) {
+        app.deg_.sun_elev_deg = kSun[i];
+        app.SetSsr(true);
+        char nm[256];
+        std::snprintf(nm, sizeof(nm), "%s/tmp_r_on_sun%d.png", out_dir.c_str(),
+                      static_cast<int>(kSun[i]));
+        app.RunOnce(input, winfo, nm);
+        app.SetSsr(false);
+        std::snprintf(nm, sizeof(nm), "%s/tmp_r_off_sun%d.png", out_dir.c_str(),
+                      static_cast<int>(kSun[i]));
+        app.RunOnce(input, winfo, nm);
+    }
+    app.deg_.sun_elev_deg = 35.0f;
+    // 变体：合成层把 base_color 换成铬人的 0.9（验证"单一材质"是不是饱和红/蓝的成因）
+    app.SetSsr(true);
+    app.ssr_bc_ = 0.90f;
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_on_bc090.png").c_str());
+    app.ssr_bc_ = 0.03f;
+    app.ssr_debug_ = 3;   // 只看 SSR 采到的辐亮度
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_rad_sun35.png").c_str());
+    app.ssr_debug_ = 5;   // 只加 SSR，不扣环境
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_add_sun35.png").c_str());
+    app.ssr_debug_ = 6;   // 只扣环境，不加 SSR
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_sub_sun35.png").c_str());
+    app.ssr_debug_ = 0;
+    // 关掉 tone map 再走一遍：读线性值（clamp 到 1），看是哪个量把通道打到负数
+    app.no_tonemap_ = true;
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_lin_off.png").c_str());
+    app.SetSsr(true);
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_lin_on.png").c_str());
+    app.ssr_debug_ = 3;
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_lin_rad.png").c_str());
+    app.ssr_debug_ = 5;
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_lin_add.png").c_str());
+    app.ssr_debug_ = 6;
+    app.RunOnce(input, winfo, (out_dir + "/tmp_r_lin_sub.png").c_str());
+    app.ssr_debug_ = 0;
+    app.no_tonemap_ = false;
+    // ===== TEMP END =====
+    // ===== TEMP（复现"月盘倒影变形"，用完撤）=====
+    // Danis 截图机位：pos(2.64530659, 0.210002124, -0.931883872) -> 原点，fov60
+    app.view_.R     = 2.8130;
+    app.view_.phi   = std::asin(0.210002124 / 2.8130);
+    app.view_.theta = std::atan2(2.64530659, -0.931883872);
+    app.ssr_scale_  = 0.5f;
+    app.deg_.sun_elev_deg = -10.0f;   // 负 = 夜间：月亮升到 +10°
+    app.deg_.sun_azim_deg = 109.0f;   // 月亮方位 = azim+180 = 289°，正好在镜头前方
+    app.ssr_debug_ = 0;
+    app.SetSsr(true);
+    app.RunOnce(input, winfo, (out_dir + "/tmp_m_on.png").c_str());
+    app.SetSsr(false);
+    app.RunOnce(input, winfo, (out_dir + "/tmp_m_off.png").c_str());
+    app.SetSsr(true);
+    // ===== TEMP END =====
     LOG(INFO) << "SSR A/B captured to " << out_dir;
     app.Finalize();
     return 0;

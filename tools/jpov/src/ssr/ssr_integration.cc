@@ -267,6 +267,12 @@ void main() {
         FragColor = vec4(vec3(A), 1.0);
         return;
     }
+    // TEMP 调试：3 = 只输出 SSR 采到的辐亮度（A 加权），4 = 只输出被替换的环境项
+    if (uCoverageDebug == 3) {
+        FragColor = vec4(ssr_L * A, 1.0);
+        return;
+    }
+
     // 3 = 直出 SSR 辐亮度（**不经材质/环境项**）：用来判断一个可疑颜色是"SSR 采到的内容"
     // 还是"合成公式里的材质/环境项"。调试用，不进面板。
     if (uCoverageDebug == 3) {
@@ -288,7 +294,19 @@ void main() {
     vec3 weight = F0 * AB.x + AB.y;
     vec3 env_term = EnvSpecularTerm(n_hi, V, uRoughness, uMetallic, uBaseColor);
 
-    vec3 out_rgb = hdr + mask * A * uAo * (ssr_L * weight - env_term);
+    // TEMP 调试：5 = 只加 SSR 不扣环境；6 = 只扣环境不加 SSR（定位红蓝饱和来自哪一半）
+    if (uCoverageDebug == 5) {
+        FragColor = vec4(hdr + mask * A * uAo * (ssr_L * weight), 1.0);
+        return;
+    }
+    if (uCoverageDebug == 6) {
+        FragColor = vec4(hdr - mask * A * uAo * env_term, 1.0);
+        return;
+    }
+    // TEMP 实验：把环境项按通道钳到 hdr 以下，避免 hdr − env < 0（负通道 → tone map 归零
+    // ⇒ 单通道饱和成纯红/纯蓝）。
+    vec3 env_clamped = min(env_term, hdr);
+    vec3 out_rgb = hdr + mask * A * uAo * (ssr_L * weight - env_clamped);
     FragColor = vec4(out_rgb, 1.0);
 }
 )glsl";
@@ -585,7 +603,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uDepthMode"),
                 in.cfg.upsample_depth_mode);
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uCoverageDebug"),
-                in.cfg.debug_coverage ? 1 : 0);
+                in.cfg.debug_coverage);
     // 环境镜面：**每帧必须重传**（uniform 是 program 状态，上一帧开着本帧不传就还用旧的）。
     UploadEnvSpecular(*shader_mgr_, prog_composite_, in.env_cube_tex, in.env_max_lod,
                       in.env_sky_scale, in.env_enabled);
