@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <tuple>
 
@@ -112,6 +113,7 @@ namespace {
 // 为什么不直接 nanosleep「剩余时长」：Windows 上 Sleep/nanosleep 的粒度默认是
 // ~15.6ms，睡 11ms 可能真睡 16ms —— 60 帧的目标直接被压成 ~46 帧（实测）。
 // 这里两级：先粗睡到 deadline - 1.5ms，再自旋收尾（自旋只占 1.5ms/帧，代价可控）。
+// spin_tail=false 时不自旋：粗睡到 deadline 就返回（开 vsync 时够用，见 Run()）。
 void SleepUntilSeconds(double deadline, bool spin_tail) {
     // spin_tail：是否用「自旋收尾」把误差压到亚毫秒。
     //   · 关 vsync ⇒ 需要精确（睡早/睡晚都直接变成帧率误差）；
@@ -172,10 +174,11 @@ void RedirectStderrToLogFile(const char* log_file) {
         SYSTEMTIME st;
         GetLocalTime(&st);
         char name[64];
-        std::snprintf(name, sizeof(name), "jpov_%04u%02u%02u-%02u%02u%02u_log.txt",
+        std::snprintf(name, sizeof(name), "jpov_%04u%02u%02u-%02u%02u%02u_%lu_log.txt",
                       static_cast<unsigned>(st.wYear), static_cast<unsigned>(st.wMonth),
                       static_cast<unsigned>(st.wDay), static_cast<unsigned>(st.wHour),
-                      static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond));
+                      static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond),
+                      static_cast<unsigned long>(GetCurrentProcessId()));
         auto_name = name;
         chosen = auto_name.c_str();
     }
@@ -225,25 +228,42 @@ void RedirectStderrToLogFile(const char* log_file) {
 // 双击运行时控制台窗口又立刻消失 ⇒ 没有这个 handler 就完全无从下手。
 // 输出的 rva（相对 exe 镜像基址的偏移）可以拿二进制反查：
 //   x86_64-w64-mingw32-addr2line -e <exe> -f -C 0x<rva>
+// 崩溃路径上的日志输出用**裸 fd 写**（_write(2, …)）而不是 fprintf：
+//   · 崩溃可能就发生在 stdio 内部（比如 glog 正在写日志）—— 那时 stderr 的
+//     FILE 锁可能还握着，fprintf 会直接死锁，什么也拿不到；
+//   · _write 不做缓冲、不加锁，且 stderr 已被重定向到日志文件。
+void CrashLog(const char* text) {
+    const int fd = _fileno(stderr);
+    if (fd < 0) {
+        return;
+    }
+    _write(fd, text, static_cast<unsigned>(std::strlen(text)));
+}
+
 LONG WINAPI JpovUnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
     const EXCEPTION_RECORD* rec = (info != nullptr) ? info->ExceptionRecord : nullptr;
     const unsigned long long module_base =
         reinterpret_cast<unsigned long long>(GetModuleHandleA(nullptr));
-    std::fprintf(stderr, "\n*** FATAL: 未捕获异常 ***\n");
+    char line[256];
+    CrashLog("\n*** FATAL: 未捕获异常 ***\n");
     if (rec != nullptr) {
         const unsigned long long addr =
             reinterpret_cast<unsigned long long>(rec->ExceptionAddress);
-        std::fprintf(stderr, "exception code = 0x%08lX\n",
-                     static_cast<unsigned long>(rec->ExceptionCode));
-        std::fprintf(stderr, "fault address  = 0x%llX  (exe rva = 0x%llX)\n",
-                     addr, addr - module_base);
+        std::snprintf(line, sizeof(line), "exception code = 0x%08lX\n",
+                      static_cast<unsigned long>(rec->ExceptionCode));
+        CrashLog(line);
+        std::snprintf(line, sizeof(line),
+                      "fault address  = 0x%llX  (exe rva = 0x%llX)\n",
+                      addr, (module_base != 0) ? (addr - module_base) : 0ULL);
+        CrashLog(line);
     }
     // 崩在哪儿：ContextRecord->Rip 是**真正**出错的那条指令（调用空指针时是 0）。
     if (info != nullptr && info->ContextRecord != nullptr) {
         const unsigned long long rip =
             static_cast<unsigned long long>(info->ContextRecord->Rip);
-        std::fprintf(stderr, "rip            = 0x%llX  (exe rva = 0x%llX)\n",
-                     rip, rip - module_base);
+        std::snprintf(line, sizeof(line), "rip            = 0x%llX  (exe rva = 0x%llX)\n",
+                      rip, (module_base != 0) ? (rip - module_base) : 0ULL);
+        CrashLog(line);
         // 栈扫描：CaptureStackBackTrace 只能看到 handler 自己的栈，对崩溃上下文没用
         //（实测帧全是系统 DLL）。没有 dbghelp 符号时，从 Rsp 往上翻「落在本 exe
         // 镜像内、且像返回地址」的值，是最直接能拿到调用点的办法。
@@ -262,7 +282,9 @@ LONG WINAPI JpovUnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
         for (int i = 0; i < 512 && shown < 16; ++i) {
             const unsigned long long v = sp[i];
             if (v >= module_base && v < module_base + mod_size) {
-                std::fprintf(stderr, "  stack[%3d] rva = 0x%llX\n", i, v - module_base);
+                std::snprintf(line, sizeof(line), "  stack[%3d] rva = 0x%llX\n",
+                              i, v - module_base);
+                CrashLog(line);
                 ++shown;
             }
         }
@@ -672,7 +694,6 @@ void JPOV::RunOnceInternal(int64_t frame_count,
         if (fps_stat_.has_result()) {
             debug_.fps = static_cast<float>(fps_stat_.rate_per_second());
         }
-        last_frame_time_ = now;
     }
 
     renderer_->BeginFrame(
@@ -758,7 +779,7 @@ void JPOV::Run() {
         // 睡到「本帧开始 + 目标间隔」这个**绝对时刻**（不是「睡剩余时长」，两者在
         // 有抖动时会越差越多）。
         //
-        // ⚠️ 开了 vsync 时必须**提前约 2ms** 到达 swap：swap 会阻塞到下一个垂直同步，
+        // ⚠️ 开了 vsync 时必须**提前几毫秒**到达 swap（这里取 3ms）：swap 会阻塞到下一个垂直同步，
         // 如果我们正好睡到 16.67ms 才去 swap，就会错过最近的那次刷新、白等到再下
         // 一次 —— 实测把 60Hz 屏上的 60 帧压成 ~46 帧（2026-11-01 真卡）。
         // 关掉 vsync 时则严格睡到 deadline（此时 swap 不阻塞，睡早就是白丢帧）。

@@ -40,6 +40,9 @@ void EnsureLightDataTexture(unsigned int* tex) {
         return;
     }
     glGenTextures(1, tex);
+    GLint prev_active = GL_TEXTURE0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitLightData);
     glBindTexture(GL_TEXTURE_2D, *tex);
     // NEAREST：按整数下标 fetch，任何过滤都只会引入错误；CLAMP：越界下标在本实现里
     // 不会发生（uTotalLights 兜着），但纹理参数的默认值（REPEAT + mipmap 过滤）会
@@ -50,7 +53,7 @@ void EnsureLightDataTexture(unsigned int* tex) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kMaxPointLights, kLightDataRows,
                  0, GL_RGBA, GL_FLOAT, nullptr);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(static_cast<GLenum>(prev_active));
 }
 
 void UploadLightDataTexture(const RenderCommandList& cmds, unsigned int tex) {
@@ -78,10 +81,16 @@ void UploadLightDataTexture(const RenderCommandList& cmds, unsigned int tex) {
         data[row2 + 0] = l.physical_radius;
     }
 
+    // 在**本单元**（kTexUnitLightData）上做上传，并把 active texture 还原：
+    // 直接用"当前 active unit"上传会悄悄把那个单元上别人绑的纹理顶掉
+    //（JPOV 的状态约定是"碰过的自己复原"，调用方后面不会再重新绑定它）。
+    GLint prev_active = GL_TEXTURE0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitLightData);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count, kLightDataRows,
                     GL_RGBA, GL_FLOAT, data.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(static_cast<GLenum>(prev_active));
 }
 
 void BindLightDataTexture(ShaderManager* shader_mgr, unsigned int prog,

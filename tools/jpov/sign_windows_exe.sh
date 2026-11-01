@@ -25,10 +25,13 @@ SIGN_DIR="$PROJECT_DIR/output/signing"
 CERT="$SIGN_DIR/jpov_codesign.crt"
 KEY="$SIGN_DIR/jpov_codesign.key"
 P12="$SIGN_DIR/jpov_codesign.pfx"
+# PFX 口令：只防"误用"，不是机密（证书 + 私钥都在 output/signing/ 里）。
 P12_PASS="jpov-local-sign"
 # 证书 CN = 发布者名字。默认给开发机用；产品/团队发布时用环境变量覆盖：
 #   JPOV_SIGN_CN="Studio XYZ" ./tools/jpov/sign_windows_exe.sh <exe>
 SIGN_CN="${JPOV_SIGN_CN:-JPOV Local Dev}"
+# 签名里的产品名（资源管理器「属性 → 数字签名」显示的就是它）
+SIGN_PRODUCT="${JPOV_SIGN_PRODUCT:-JPOV}"
 
 EXE="${1:-}"
 if [[ -z "$EXE" ]]; then
@@ -46,6 +49,15 @@ fi
 
 mkdir -p "$SIGN_DIR"
 
+if [[ -f "$CERT" ]]; then
+    EXISTING_CN="$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null \
+        | sed -n 's/^subject=.*CN *= *\([^,]*\).*/\1/p')"
+    if [[ -n "$EXISTING_CN" && "$EXISTING_CN" != "$SIGN_CN" ]]; then
+        echo "⚠️ 已存在证书的 CN 是「$EXISTING_CN」，与当前 JPOV_SIGN_CN=「$SIGN_CN」不同；" >&2
+        echo "   继续复用旧证书。要换发布者：删除 $SIGN_DIR 后重跑。" >&2
+    fi
+fi
+
 if [[ ! -f "$CERT" || ! -f "$P12" ]]; then
     echo "==> 生成本地自签名代码签名证书（10 年，仅本机可信）"
     openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
@@ -61,9 +73,17 @@ fi
 
 echo "==> 签名 $(basename "$EXE")"
 TMP_SIGNED="$EXE.signed"
+TMP_STRIPPED="$EXE.unsigned"
+# 重复签名会在 PE 里叠多份签名（osslsigncode 不覆盖旧的）⇒ 先剥掉再签。
+# 未签名的 exe 上执行 remove-signature 会失败，属正常情况，忽略。
+if osslsigncode remove-signature -in "$EXE" -out "$TMP_STRIPPED" >/dev/null 2>&1; then
+    mv "$TMP_STRIPPED" "$EXE"
+else
+    rm -f "$TMP_STRIPPED"
+fi
 osslsigncode sign \
     -pkcs12 "$P12" -pass "$P12_PASS" \
-    -n "JPOV" -i "https://localhost/jpov" \
+    -n "$SIGN_PRODUCT" -i "https://localhost/jpov" \
     -h sha256 -in "$EXE" -out "$TMP_SIGNED" >/dev/null
 mv "$TMP_SIGNED" "$EXE"
 

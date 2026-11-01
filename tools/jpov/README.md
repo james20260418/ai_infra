@@ -95,6 +95,23 @@ GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | …
 另外：从网络复制来的 exe 带 **MOTW**（网络来源标记），即使签名也可能被拦 ——
 右键属性勾「解除锁定」或 `Unblock-File -Path <exe>`。
 
+## 运行日志（Windows 默认落盘）
+
+双击启动的进程没有可看的控制台（已用 `-mwindows` 做成 GUI 子系统），所以
+`JPOV::Init()` 一开始就把 stderr 重定向到文件：
+
+| `Config::log_file` | 行为 |
+|--------------------|------|
+| `nullptr`（默认） | **自动**：Windows → exe 同级 `jpov_YYYYMMDD-HHMMSS_<pid>_log.txt`；其他平台不落盘 |
+| `""` | 彻底关闭日志 |
+| 其他路径 | 写到该路径（相对路径按 **exe 目录**解析） |
+
+- 截断写 + 无缓冲：`LOG(FATAL)` / 崩溃前的最后一行也一定在盘上。
+- exe 目录不可写（例如直接跑在 `\\wsl$` 共享上）→ 自动退到 `%TEMP%\jpov_run_log.txt`，
+  日志第一行会打印真实路径。
+- Windows 另外装了 `SetUnhandledExceptionFilter`：访问违例这类崩溃会写异常码 / RIP /
+  exe 内 rva / 栈扫描结果（没有符号表时定位调用点的唯一办法）。
+
 ## 各 viewer 的 Windows 构建现状
 
 目前已构建出 `.exe` 的（可直接拷到 Windows 跑）：

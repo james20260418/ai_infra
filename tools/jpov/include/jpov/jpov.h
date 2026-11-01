@@ -485,8 +485,6 @@ private:
     // 运行时由 F3 切换。
     bool debug_overlay_visible_ = false;
     // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
-    double last_frame_time_ = 0.0;
-
     // HUD 的 fps 读数：每 0.5 秒统计一次，结果在下一个 0.5 秒内保持不变。
     // 用瞬时帧率（1/相邻两帧间隔）时数字每帧都在跳，屏幕上根本读不出来；
     // 分窗统计还顺带回答了"这半秒到底多少帧"。见 interface/windowed_stat.h。

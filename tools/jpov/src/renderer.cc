@@ -582,6 +582,16 @@ float SrgbToLinear(float c) {
 
 namespace jpov {
 
+// 三处渲染器各自复制了「全局光源上限 255」，而光源数据纹理的宽度由
+// jpov::kMaxPointLights 决定 —— 只改一边会让越界索引静默读到上一帧的旧列
+//（片元里 uTotalLights 只保证 < 各自的常量，不保证 < 纹理宽度）。
+static_assert(Object3DRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "Object3DRenderer::kMaxTotalLights 必须等于 kMaxPointLights（光源纹理宽度）");
+static_assert(InstancedObjectRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "InstancedObjectRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
+static_assert(FireFogRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "FireFogRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
+
 const Color kColorRed         = {1.0f, 0.0f, 0.0f, 1.0f};
 const Color kColorGreen       = {0.0f, 1.0f, 0.0f, 1.0f};
 const Color kColorBlue        = {0.0f, 0.0f, 1.0f, 1.0f};
@@ -1590,20 +1600,25 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
         Primitives3DRenderer::BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
 
+        // ---- 点光源数据纹理（每帧只更新一次，PBR 与体积雾共用）----
+        // 见 src/lights_texture.h：每盏灯 9 个 float 曾经放在 `uniform Light uLights[255]`
+        // 里，NVIDIA 的打包下独占 1020 个**常量寄存器**，而片元级上限只有 1024 ⇒
+        // 真卡上 error C6020 直接链接失败。纹理不吃常量寄存器，且上传从
+        // 「每盏灯 × 5 次 glUniform × 每帧 × 4~8 个 program」降成一次 glTexSubImage2D。
+        //
+        // 位置放在这里（而不是各自的分支里）：PBR 与雾两条路径都要用同一份数据，
+        // 放外面就只有一次上传；Ensure 幂等，没有光源时 Upload 直接返回。
+        EnsureLightDataTexture(&light_data_tex_);
+        UploadLightDataTexture(cmds, light_data_tex_);
+        const int light_count = ClampedPointLightCount(cmds);
+
         // ---- Tile Forward 光照准备 ----
         // 若有 Object3D 需光照（!object_use_default_color）：
-        //   - 总是上传光源 uniform + uTileCulling 开关（uLights[]/uTotalLights）
+        //   - 给每个 PBR program 绑一次光源数据纹理 + uTotalLights + uTileCulling
         //   - 仅当 tile_culling=true 才做 CPU 端 tile 索引构建（写入 tile 纹理）；
         //     tile_culling=false 时跳过，shader 走全光源遍历（无分界线）。
         if (!cmds.object_use_default_color &&
             (!cmds.object3d.empty() || !cmds.instanced_object.empty())) {
-            // 光源数据走**数据纹理**（见 src/lights_texture.h）：每盏灯 9 个 float 曾放在
-            // `uniform Light uLights[255]` 里，NVIDIA 的打包下独占 1020 个常量寄存器，
-            // 而片元级上限只有 1024 → 真卡上 error C6020 直接链接失败。
-            // 现在：更新纹理一次，再给每个 PBR program 绑一次采样器单元 + 光源数。
-            EnsureLightDataTexture(&light_data_tex_);
-            UploadLightDataTexture(cmds, light_data_tex_);
-            const int light_count = ClampedPointLightCount(cmds);
             const unsigned int lit_programs[] = {
                 DrawObject3DProg(),        DrawObject3DProgFull(),
                 DrawObject3DProgCutout(),  DrawObject3DProgFullCutout(),
@@ -1906,11 +1921,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                // 雾的内散射也要点光源数据：与 PBR 共用同一张光源纹理。
-                // Ensure 幂等；Upload 只写前 N 盏灯（PBR 那条分支已上传时这里是一次
-                // 几 KB 的重复写，换来两条分支互不依赖）。
-                EnsureLightDataTexture(&light_data_tex_);
-                UploadLightDataTexture(cmds, light_data_tex_);
+                // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
+                //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
                 fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights,
                                         light_data_tex_, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,

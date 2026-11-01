@@ -555,7 +555,7 @@ int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_P
 }
 
 // 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
-// li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
+// li: 光源在光源数据纹理中的下标（见 src/lights_texture.h）。共用于 tile culling 路径与非 cull 路径。
 // 需传入 base_color / metallic / roughness（片元已解析的材质参数）；
 // 通过 inout total_diffuse / total_specular 累加。
 void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
