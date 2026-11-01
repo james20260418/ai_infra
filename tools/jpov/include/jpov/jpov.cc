@@ -130,13 +130,35 @@ std::string ResolveLogPath(const char* log_file) {
 // 重定向是唯一一处改动、覆盖所有日志来源（含第三方库与崩溃时的 CHECK 输出）。
 // 无缓冲是必须的：LOG(FATAL) 之后进程立刻 abort，缓冲区里没刷出去的行就永远丢了。
 void RedirectStderrToLogFile(const char* log_file) {
-    if (log_file == nullptr || log_file[0] == '\0') {
+#if defined(_WIN32)
+    constexpr const char* kDefaultLogFile = "jpov_run_log.txt";
+#else
+    constexpr const char* kDefaultLogFile = "";
+#endif
+    const char* chosen = (log_file == nullptr) ? kDefaultLogFile : log_file;
+    if (chosen[0] == '\0') {
         return;
     }
-    const std::string path = ResolveLogPath(log_file);
+    std::string path = ResolveLogPath(chosen);
     FILE* file = std::fopen(path.c_str(), "w");
+#if defined(_WIN32)
+    // exe 放在 \\wsl$ / 网络共享 / 只读目录时这里打不开（实测：从 WSL 盘直接运行）
+    // ⇒ 退到 %TEMP%：总比完全没有日志强，实际路径会打在日志第一行。
     if (file == nullptr) {
-        LOG(WARNING) << "Config::log_file 打开失败：" << path << "（日志仍然只写 stderr）";
+        char temp_dir[MAX_PATH] = {0};
+        if (GetTempPathA(MAX_PATH, temp_dir) > 0) {
+            std::string fallback(temp_dir);
+            fallback += "jpov_run_log.txt";
+            FILE* alt = std::fopen(fallback.c_str(), "w");
+            if (alt != nullptr) {
+                path = fallback;
+                file = alt;
+            }
+        }
+    }
+#endif
+    if (file == nullptr) {
+        LOG(WARNING) << "日志文件打开失败：" << path << "（日志仍然只写 stderr）";
         return;
     }
     std::setvbuf(file, nullptr, _IONBF, 0);
@@ -147,6 +169,39 @@ void RedirectStderrToLogFile(const char* log_file) {
 #endif
     LOG(INFO) << "日志已重定向到 " << path;
 }
+
+#if defined(_WIN32)
+// 未捕获异常兜底：把异常码 / 出错地址 / 模块内偏移 / 调用栈写进日志（= 日志文件）。
+//
+// 为什么必需：真正的崩溃（访问违例 / 除零）不是 LOG(FATAL)，一行日志都不会留；
+// 双击运行时控制台窗口又立刻消失 ⇒ 没有这个 handler 就完全无从下手。
+// 输出的 rva（相对 exe 镜像基址的偏移）可以拿二进制反查：
+//   x86_64-w64-mingw32-addr2line -e <exe> -f -C 0x<rva>
+LONG WINAPI JpovUnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* rec = (info != nullptr) ? info->ExceptionRecord : nullptr;
+    const unsigned long long module_base =
+        reinterpret_cast<unsigned long long>(GetModuleHandleA(nullptr));
+    std::fprintf(stderr, "\n*** FATAL: 未捕获异常 ***\n");
+    if (rec != nullptr) {
+        const unsigned long long addr =
+            reinterpret_cast<unsigned long long>(rec->ExceptionAddress);
+        std::fprintf(stderr, "exception code = 0x%08lX\n",
+                     static_cast<unsigned long>(rec->ExceptionCode));
+        std::fprintf(stderr, "fault address  = 0x%llX  (exe rva = 0x%llX)\n",
+                     addr, addr - module_base);
+    }
+    void* frames[32];
+    const USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        const unsigned long long frame =
+            reinterpret_cast<unsigned long long>(frames[i]);
+        std::fprintf(stderr, "  [%2u] 0x%016llX  rva = 0x%llX\n",
+                     static_cast<unsigned>(i), frame, frame - module_base);
+    }
+    std::fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 // 偏好落空时的告警：必须写「为什么 + 怎么办」，否则用户只会看到一个慢得很均匀的
 // 窗口，无从下手。
@@ -204,6 +259,10 @@ void JPOV::Init() {
     // 日志落盘必须排在所有 LOG 之前：Windows 双击运行时没有可看的控制台，
     // 崩溃（LOG(FATAL)/CHECK）时控制台窗口会立刻关闭，后面这些行就是唯一线索。
     RedirectStderrToLogFile(config_.log_file);
+#if defined(_WIN32)
+    // 紧挨着装：Init 内部也可能崩（GL context / 着色器 / 字体）。
+    SetUnhandledExceptionFilter(JpovUnhandledExceptionFilter);
+#endif
     // 非法枚举值（外部 cast 出来的）会让后面的 switch 无从判断，早崩早暴露。
     CHECK(config_.render_preference == jpov::RenderPreference::kAny ||
           config_.render_preference == jpov::RenderPreference::kPreferGpu ||

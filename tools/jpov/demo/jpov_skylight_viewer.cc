@@ -470,9 +470,6 @@ int main(int argc, char** argv) {
     // headless 拍摄**不设**（保持 kAny）：CI / 黄金图本来就跑在 llvmpipe 上，
     // 每次拍摄都刷一条「偏好落空」告警没有意义。
     cfg.render_preference = jpov::RenderPreference::kPreferGpu;
-    // Windows 是双击运行，控制台窗口会随进程退出（崩溃）瞬间关闭 —— 日志落盘到 exe
-    // 旁边的 jpov_run_log.txt，出事时直接把那个 txt 发出来即可。
-    cfg.log_file = "jpov_run_log.txt";
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_skylight_viewer.sh 同构拷贝）。
     cfg.fonts = {
@@ -482,13 +479,21 @@ int main(int argc, char** argv) {
 
     jpov_skylight::SkylightApp app(cfg);
     app.SetShowPanel(true);
-    app.Init();
+    app.Init();                       // 内部：GL context + 全部 shader + 字体
+    LOG(INFO) << "[stage] Init 完成";
     app.InstallTextMeasure();
 
     // ── 场景静态资源（只建一次，不在 OneIteration 里重复构造/上传）──
+    // 每个阶段前后各打一行：真卡上崩在资源加载/首帧时，日志最后一行就是崩在哪一步。
+    LOG(INFO) << "[stage] InstallScene 开始";
     InstallScene(app);
+    LOG(INFO) << "[stage] InstallScene 完成";
+    LOG(INFO) << "[stage] InstallModels 开始（加载 glb + 贴图）";
     InstallModels(app);
+    LOG(INFO) << "[stage] InstallModels 完成";
+    LOG(INFO) << "[stage] InstallPerson 开始（骨骼/实例）";
     InstallPerson(app);
+    LOG(INFO) << "[stage] InstallPerson 完成";
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();
@@ -497,6 +502,7 @@ int main(int argc, char** argv) {
     app.view_.R     = 9.5;
 
     // 交互事件循环（阻塞）。
+    LOG(INFO) << "[stage] 进入事件循环 Run()";
     app.Run();
 
     app.Finalize();
