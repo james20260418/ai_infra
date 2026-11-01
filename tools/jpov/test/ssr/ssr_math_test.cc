@@ -35,11 +35,13 @@ using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
 using jpov::ssr::DerivedParams;
+using jpov::ssr::HitFacesRay;
 using jpov::ssr::kNoHit;
 using jpov::ssr::MarchSegment;
 using jpov::ssr::MarchSlabs;
 using jpov::ssr::MarchWholeRay;
 using jpov::ssr::PosAt;
+using jpov::ssr::UpsampleDepthAccept;
 using jpov::ssr::ReconstructNormal;
 using jpov::ssr::ReflectDir;
 using jpov::ssr::ScreenRay;
@@ -506,6 +508,86 @@ TEST(SsrMath, MinPicksEarliest) {
 
 // ───────────────────────── 7. 派生参数 ─────────────────────────
 
+// ───────────────────────── 7. 命中面朝向（背面命中不算）─────────────────────────
+//
+// 2026-10-30 Danis 实拍发现：体素柱/桌子这种厚物体，镜子里的射线是从它**背面**穿过去的，
+// 旧判据却把**正面**（带高光）的像素当结果 ⇒ 倒影里桌子底下也在发光。
+//
+// 本测试用一个手搭的场景把两类命中分开（不经过相机反构，屏幕空间可控）：
+//   rows  0..39  无几何（空格子，穿过去）
+//   rows 40..59  “桌子顶面” z=20 m，法线**朝上** ⇒ 射线从下往上穿 ⇒ R·N > 0 ⇒ 必须拒
+//   rows 60..79  无几何
+//   rows 80..    “墙” z=20 m，法线**朝相机** ⇒ 射线扎进去 ⇒ R·N < 0 ⇒ 必须命中
+// 三件事一起钉：① 旧行为确实先撞桌子（bug 的存在性）；② 加了朝向判据后跳过桌子、
+// 命中后面的墙；③ 把墙的法线翻过来也必须拒（防"总是接受"的恒真式实现）。
+ScreenRay MakeSyntheticRay() {
+    ScreenRay ray;
+    ray.s0 = Vec2{100.0f, 20.0f};
+    ray.dir = Vec2{0.0f, 1.0f};
+    ray.dir3 = Normalize(Vec3{0.0f, 0.35f, -0.94f});   // 向上 + 远离相机
+    ray.span = 100.0f;
+    ray.w0 = 1.0f / 20.0f;
+    ray.w1 = 1.0f / 24.0f;   // 视深 20 m → 24 m，对 σ 线性（w = 1/d）
+    ray.sigma_enter = 0.0f;
+    ray.sigma_exit = 100.0f;
+    ray.exits_screen = false;
+    return ray;
+}
+
+TEST(SsrMath, BackfaceHitRejected) {
+    const ScreenRay ray = MakeSyntheticRay();
+    // c = 0.18 ⇒ T = 3.6 m（z=20）⇒ 射线在桌子/墙那两段确实落在柱体带内，
+    // 所以"能不能命中"完全取决于朝向判据，不是厚度在挡。
+    const float kThicknessC = 0.18f;
+    const float kMinThickness = 1.0e-4f;
+
+    auto depth_at = [](int /*x*/, int y) -> float {
+        if (y >= 40 && y < 60) {
+            return 20.0f;   // 桌子顶面
+        }
+        if (y >= 80 && y < 120) {
+            return 20.0f;   // 墙
+        }
+        return jpov::ssr::kEmptyCell;
+    };
+    auto facing = [](int /*x*/, int y, const Vec3& d) -> bool {
+        if (y >= 40 && y < 60) {
+            return HitFacesRay(d, Vec3{0.0f, 1.0f, 0.0f});   // 法线朝上
+        }
+        if (y >= 80) {
+            return HitFacesRay(d, Vec3{0.0f, 0.0f, 1.0f});   // 法线朝相机
+        }
+        return true;
+    };
+
+    // ① 旧行为（不判朝向）：先撞上桌子顶面 —— 这就是那个 bug。
+    int old_x = -1;
+    int old_y = -1;
+    const float s_old = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+                                      &old_x, &old_y);
+    ASSERT_LT(s_old, kNoHit) << "旧判据应该在桌子段命中（否则本测试没造出 bug 场景）";
+    EXPECT_GE(old_y, 40);
+    EXPECT_LT(old_y, 60);
+
+    // ② 加朝向判据：桌子段被跳过 ⇒ 命中后面的墙。
+    int new_x = -1;
+    int new_y = -1;
+    const float s_new = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+                                      &new_x, &new_y, facing);
+    ASSERT_LT(s_new, kNoHit) << "墙是正面命中，不应被一起拒掉";
+    EXPECT_GE(new_y, 80) << "背面命中（桌子顶面）没被跳过";
+    EXPECT_GT(s_new, s_old) << "新命中必须比旧命中更远（跳到桌子后面去了）";
+
+    // ③ 防恒真：把墙的法线翻到背面 ⇒ 整条射线应该无命中。
+    auto facing_flipped = [](int /*x*/, int /*y*/, const Vec3& d) -> bool {
+        return HitFacesRay(d, Vec3{0.0f, 0.0f, -1.0f});
+    };
+    EXPECT_GE(MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180, nullptr,
+                            nullptr, facing_flipped),
+              kNoHit)
+        << "法线翻过来仍能命中 ⇒ 朝向判据是恒真的";
+}
+
 TEST(SsrMath, DerivedParams) {
     const Cam cam;
     const DerivedParams d =
@@ -576,6 +658,67 @@ TEST(SsrMath, DegenerateInputs) {
         ScreenRay ray2;
         EXPECT_FALSE(BuildScreenRay(p_far, r_far, 10.0f, cam.tan_half, cam.aspect, cam.width,
                                     cam.height, &ray2));
+    }
+}
+
+
+// ───────── 升采样的深度值域判据（2026-10-31 掠射横向条纹的根因/回归）─────────
+//
+// 背景：低分 A 升到全分辨率时要拒绝"跨表面"的邻格。旧判据 =「本像素 w 与低分格子的 w
+// 比固定百分比 5%」。**掠射平面上这条必然误判**：地平线附近同一平面相邻两行的深度比
+// 就有 1.2 倍以上 ⇒ 每 scale 行里只有"贡献了最小深度"的那一行活着
+// ⇒ 实拍得到 period = 降采样倍率的横向条纹（1:2 → 2、1:4 → 4、1:1 无）。
+
+// 修法：1/z 在任何平面上对屏幕坐标**仿射** ⇒ 用「本像素 w + 屏幕梯度·偏移」预测格子
+// 应有的 w（且要取格内**最大** w，因为降采样取 min 深度），再比残差。
+TEST(SsrMath, UpsampleGrazingPlaneAcceptedAtEveryRow) {
+    // 掠射平面：w 对屏幕行仿射（射影几何恒等式）。相邻行相对变化 ≈24% ≫ 5% 容差。
+    const float w0 = 0.1389f;   // 行 0 的 1/z
+    const float b = 0.0335f;    // 每像素 Δw（向下行更近 ⇒ w 变大）
+    auto w_of = [&](int row) { return w0 + b * static_cast<float>(row); };
+
+    for (int scale : {2, 4}) {
+        for (int r0 = 0; r0 < 8; ++r0) {
+            // 低分格子的值 = 格内**最近**（min 深度 = max w）
+            float w_lo = 0.0f;
+            for (int i = 0; i < scale; ++i) {
+                w_lo = std::max(w_lo, w_of(r0 + i));
+            }
+            for (int r = r0; r < r0 + scale; ++r) {
+                const float w_hi = w_of(r);
+                // 本像素中心 → 低分 texel 中心的偏移（单位：全分辨率像素）
+                const float dp = (static_cast<float>(r0) + 0.5f * static_cast<float>(scale)) -
+                                 (static_cast<float>(r) + 0.5f);
+                EXPECT_TRUE(UpsampleDepthAccept(w_hi, /*gw_x=*/0.0f, /*gw_y=*/b, /*dpx=*/0.0f,
+                                                dp, w_lo, scale, 0.05f))
+                    << "掠射平面 scale=" << scale << " r0=" << r0 << " r=" << r << " 被误拒";
+                // 负向对照：**除了贡献最小深度的那一行**，旧判据（不比梯度）在这里必须拒 ——
+                // 这正是「每 scale 行只活一行」的来源。最近那一行 w_lo == w_hi，旧判据本来就过，
+                // 所以只对 w_hi < w_lo 的行断言。
+                if (w_hi < w_lo) {
+                    EXPECT_GT(std::fabs(w_lo - w_hi) / w_hi, 0.05f)
+                        << "旧判据在 scale=" << scale << " r=" << r << " 竟然通过 ⇒ 场景不够掠射";
+                }
+            }
+        }
+    }
+}
+
+TEST(SsrMath, UpsampleSilhouetteRejected) {
+    // 低分格子取到了**另一个表面**（w 大 250 倍）⇒ 必须拒。这正是深度值域项存在的理由，
+    // 修法不能把它一起废掉。
+    EXPECT_FALSE(UpsampleDepthAccept(0.002f, 0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 2, 0.05f));
+    // 同表面、无梯度 ⇒ 过。
+    EXPECT_TRUE(UpsampleDepthAccept(0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 2, 0.05f));
+}
+
+TEST(SsrMath, UpsampleScaleOneIsIdenticalToOldRule) {
+    // 1:1 时 dpx=dpy=0 且扩展量 (scale−1)=0 ⇒ 判据与旧规则**逐位等价**（1:1 不许有行为变化）。
+    const float w_hi = 0.2f;
+    for (float w_lo : {0.05f, 0.19f, 0.2f, 0.21f, 0.5f}) {
+        const bool old_ok = std::fabs(w_hi - w_lo) / w_hi <= 0.05f;
+        const bool new_ok = UpsampleDepthAccept(w_hi, 0.0f, 0.0f, 0.0f, 0.0f, w_lo, 1, 0.05f);
+        EXPECT_EQ(old_ok, new_ok) << "w_lo=" << w_lo;
     }
 }
 

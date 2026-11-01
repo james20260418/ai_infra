@@ -667,6 +667,101 @@ struct EnvSpecular {
     float sky_scale = 1.0f;
 };
 
+// ==================== 屏幕空间反射（SSR）====================
+//
+// 用法：`cmds.ssr = SsrConfig{...};`（同时必须有 `cmds.env_specular`）。
+// 语义：**SSR 不是"再加一层反射"，而是把 EnvSpecular 那一项的估计器换掉**。
+//   屏幕里有数据的地方用 SSR 算出的辐亮度；拿不到的地方（类型不是 kHit）原样退回
+//   EnvSpecularTerm ⇒ A=0 的像素与"没开 SSR"**逐字节相同**（单调改进，不引入新失败模式）。
+//
+// ── 运行机理（一趟四步，全在 GPU 上）──
+//   ① 属性 pass：把**所有**不透明物体再画一遍（不写深度），输出
+//        rgb = 视空间法线、a = 掩码（1 反射体 / 0.5 有法线非反射体 / 0 无数据）。
+//        遮挡物的法线也要，因为射线会撞到它们；镂空材质走带 discard 的变体。
+//   ② 降采样（SsrDownsample）：N×N 组里取**窗口深度最小**的 texel，color/depth/normal
+//        三张图必须同源 ⇒ SSR 分辨率的三张输入。
+//   ③ 反射求交（SsrRenderer）：每个镜面像素沿反射方向在**屏幕空间**逐格 DDA 前进，
+//        命中判据 = 射线段的深度区间与该格柱体 [z, z+T] 相交（T = 厚度，补偿"深度缓冲
+//        只存最近表面"）。输出三样：命中颜色 / ray_ratio / 类型（命中·天空·出屏·预算耗尽）。
+//   ④ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
+//        全分辨率，然后**替换**环境镜面项：
+//          out = hdr + mask·A·ao·(ssr_L·weight − env_term)
+//
+// ── 成本 ──
+//   成本 ∝ 屏幕面积 × 射线预算。唯一的成本旋钮是 `resolution_scale`（1/N）；
+//   `max_ray_pixels` 决定反射能"看多远"，也直接是每像素的最大步数。
+//
+// ── Pre-condition ──
+//   · 必须同时设置 `env_specular`（SSR 要重算"被替换掉的那一份"，没有 env 就无从替换，
+//     Renderer 会 LOG(FATAL)）；
+//   · 只有 `ssr_reflector = true` 的物体参与反射（其余像素照常走 env，A=0）；
+//   · 本版反射体**共用一套材质**（见下面的 base_color/metallic/roughness/ao）。
+struct SsrConfig {
+    // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
+    bool enabled = false;
+
+    // SSR 的**降采样倍率**（1/N）：N ∈ {1,2,3,4}，用 resolution_scale = 1/N 表达
+    // （1.0 / 0.5 / 0.3333 / 0.25，其它值直接 FATAL）。
+    // 这是**唯一的成本旋钮**：成本 ∝ 面积，画面损失只是反射的锐度。
+    // N=3 不是 2 的幂：降采样与升采样都是"整数格 + 双线性/加权"，与 2 的幂无关。
+    float resolution_scale = 0.5f;
+
+    // 厚度：T = max(N_px · θ_px · d, min_thickness_m)，单位是 **SSR 像素**（θ_px 按 SSR 分辨率算）。
+    // 半分辨率下同一个 N_px 对应的世界厚度会自动翻倍（见设计文档 §9.3），观感基本一致。
+    float thickness_pixels = 6.0f;
+    float min_thickness_m = 1.0e-4f;
+
+    // 射线长度上限：米（物理）与 **SSR 像素**（屏幕预算 = 覆盖范围 = 成本）。
+    float max_distance_m = 1000.0f;
+    int max_ray_pixels = 220;
+
+    // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
+    // 搭配口诀：T² ≤ max_ray_pixels/4。
+    int tile_size = 2;
+
+    // ── 升采样的值域项（2026-10-31 改成**连续软权**，见 docs 与像素对照）──
+    //
+    // 旧版是两个**硬阈值**（超了直接权重 0）。硬阈值在阈值附近必然跳变：只要画面里
+    // 存在跨阈值的连续梯度（掠射最典型），就会沿等值线整行/整片现形 —— 实测就是
+    // "周期 = 降采样倍率的横向条纹" 与 "贴地平线 8/27 行黑带"。
+    // 业界两份可查源码的实现都是**软权 + 下限**：
+    //   · INSIDE（Playdead, loopit.dk rendering_inside.pdf p.39）：w = 1/(|Δdepth| + 1e-5)，
+    //     作者原话"bad pixels still contribute, just a lot less"
+    //   · Unity postprocessing v1 的 SSR（Mara/McGuire 版）：法线用 clamp(dot,0,1)、
+    //     粗糙度用 1−|Δr|^0.25，且 `a = max(a, 0.001)` 保证分母不为 0；**完全不判深度**
+    //
+    // 所以这里给两个模式，面板可切，用来看差别：
+    //   0 = 软权：rel 相对残差 → wr = 1/(rel + soft_scale)，rel > hard_cut 才硬拒
+    //   1 = 不判深度（Unity 式）：深度只用于 march，升采样只看法线（软）+ 下限
+    int upsample_depth_mode = 0;
+
+    // upsample_depth_tolerance：**软权尺度**（rel 等于它时权重约减半），不再是硬阈值。
+    float upsample_depth_tolerance = 0.02f;
+
+    // rel 超过它 ⇒ 硬拒。数量级不同的深度差只能是"真跨表面"（剪影），留着它挡串色。
+    float upsample_hard_cut = 0.5f;
+
+    // 权重下限（相对空间权）：保证 Σw > 0，永不出现"整片黑"的孔洞。
+    float upsample_weight_floor = 1.0e-3f;
+
+    // 反射层材质（本版**全场景一套**；升级点 = 逐像素 F0/roughness 进属性纹理）。
+    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换：
+    //   weight   = F0·AB.x + AB.y,  F0 = mix(0.04, base_color, metallic)
+    //   env_term = EnvSpecularTerm(n, V, roughness, metallic, base_color)
+    // ⚠️ 金属的 F0 就是 base_color 本身：给 0.02 会得到一块黑（只有 2% 反射）。
+    Vec3f base_color = {0.02f, 0.02f, 0.02f};
+    float metallic = 1.0f;
+    float roughness = 0.02f;
+    float ao = 1.0f;
+
+    // 调试视图（关 = 0）：
+    //   1 = A 覆盖率灰度（看洞/漏在哪）
+    //   2 = 直通（只出 hdr 副本，等价于"没开 SSR"）
+    //   3 = SSR 采到的辐亮度（不经材质/环境项）
+    //   4 = ray_ratio 灰度（命中点用了多少屏幕预算；越亮越接近预算上限）
+    int debug_coverage = 0;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -1846,6 +1941,13 @@ struct Object3DCommand {
     //   不同风向/相位/强度。仅当 mesh 带 kWind（烘焙过风数据）时生效；无风数据的
     //   mesh 设了也无效。未设（默认）= 本物体零风、零开销。见 WindCommand。
     std::optional<WindCommand> wind;
+
+    // 是否是 SSR 的**反射体**（镜面地板 / 金属球…）。为 true 时：
+    //   · 属性 pass 会把它再画一遍（写视空间法线 + mask），供 SSR 用；
+    //   · 合成阶段只在这些像素上替换环境镜面项。
+    // 未设置 RenderCommandList::ssr 时该字段零意义（属性 pass 不跑）。
+    // Pre-condition: mesh 必须带法线（kNormal）。
+    bool ssr_reflector = false;
 };
 
 // 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
@@ -1994,6 +2096,9 @@ struct SkinnedMeshCommand {
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
     bool highlight = false;
+    // 是否是 SSR 的反射体（2026-10-31）：蒙皮网格也能被屏幕空间反射（曲面镜面测试用）。
+    // 为 true 时属性 pass 会把它再画一遍（视空间法线 + mask），合成层才在这些像素上叠 SSR。
+    bool ssr_reflector = false;
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
@@ -2219,6 +2324,12 @@ struct RenderCommandList {
     // 默认消费天光 —— 见 EnvSpecular 与 docs/jpov_env_specular_design.md。
     // Pre-condition: 设置时必须同时设置 sky（否则 Renderer LOG(FATAL)）。
     std::optional<EnvSpecular> env_specular;
+
+    // 屏幕空间反射（SSR）：有值且 enabled 时，在不透明 3D 之后、半透明之前插入
+    //   「属性 pass → 降采样 → SSR → 合成」四步，用屏幕数据替换环境镜面项。
+    // 未设置 / enabled=false ⇒ 一次都不跑，零开销零回归。
+    // Pre-condition: 必须同时设置 env_specular（合成要重算并替换那一项）。
+    std::optional<SsrConfig> ssr;
 
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
@@ -2511,13 +2622,16 @@ struct RenderCommandList {
     // Pre-condition: up 与 front 均非零向量，且不平行
     // 参数顺序刻意：把常用/先设的放前（scale 在 highlight/picking_id 前），
     // 最不常用的 picking_id 放最后。调用处按 cpp-dev-rules 约定加 /*形参名=*/ 注释避免错传。
+    // ssr_reflector：本物体是否是 SSR 的反射体（见 Object3DCommand::ssr_reflector）。
+    // 未设置 RenderCommandList::ssr 时该参数无意义。
     void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front,
                       float scale = 1.0f,
                       bool highlight = false,
                       uint32_t picking_id = 0,
-                      const std::optional<WindCommand>& wind = std::nullopt);
+                      const std::optional<WindCommand>& wind = std::nullopt,
+                      bool ssr_reflector = false);
 
     // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
     //
@@ -2574,11 +2688,13 @@ struct RenderCommandList {
     //   tools/jpov/docs/jpov_instance_attr_lag_design.md）。
     //
     // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
+    // ssr_reflector：本批蒙皮是否是 SSR 的反射体（见 SkinnedMeshCommand::ssr_reflector）。
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,
                               std::vector<SkinnedInstanceState> instances,
-                              bool highlight = false);
+                              bool highlight = false,
+                              bool ssr_reflector = false);
 
     // DrawParticles：追加一批广告牌粒子（见 ParticleRenderCommand）。
     // 只是把命令推入 particles 列表；粒子在 3D 不透明内容之后的独立 pass 渲染。

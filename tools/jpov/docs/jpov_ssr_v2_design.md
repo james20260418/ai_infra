@@ -588,3 +588,58 @@ SSR 的全部输入就是三张纹理 —— 造一张假的深度图就能喂�
 4. **法线 MRT 属性 pass**：目前 `normal_tex` 由调用方提供（测试里是合成的），
    真管线需要一次属性 pass 写反射体视空间法线。
 5. **镜面地板场景的截图 gold**：接进管线之后做，只做一张（锁"接法对不对"，§14 三条硬约束）。
+
+---
+
+## 17. 2026-11-01 落地：模块拆分 + 输出契约 + 正式进 JPOV
+
+### 17.1 拆成四块（各自可独立替换 / 测试）
+
+| 文件 | 角色 | 说明 |
+|---|---|---|
+| `src/ssr/ssr_downsample.{h,cc}` | **输入准备** | 全分辨率 (color,depth,attr) → SSR 分辨率 (color,depth,normal)，N×N 选点。纯数学（`IsValidScale` / `DownsampleTargetSize` / `PickSourceTexel`）GL-free，单测 `test/ssr:ssr_downsample_test` |
+| `src/ssr/ssr_renderer.{h,cc}` | **算法** | 纯模块：同分辨率进/出，march + resolve |
+| `src/ssr/ssr_fusion.{h,cc}` | **融合** | A 预乘双边升采样 + **替换**环境镜面项（不是叠加） |
+| `src/ssr/ssr_integration.{h,cc}` | **编排** | HDR 副本 blit → 调上面三者；属性 pass 的 program 也在这里 |
+
+`ssr_shader.h` 单独成了一个 target（三个使用方都要 include 它，但都不该链接整份实现）。
+
+### 17.2 输出契约（三样，紧凑排列）
+
+| 附件 | 格式 | 内容 |
+|---|---|---|
+| location 0 | RGBA16F | `rgb` = 命中颜色辐亮度，`a` = **ray_ratio** = `s_hit / max_ray_pixels` |
+| location 1 | R8UI | **类型**：0=None 1=Hit 2=Sky 3=Offscreen 4=Exhausted |
+| location 2（`SSR_DEBUG`） | R32F | 命中位置 `s`（像素弧长），仅供测试/探针 |
+
+要点：
+- **A 不再占通道**：`A = (type == kHit)`，由类型图派生；
+- **ray_ratio 的分母是常量预算**，不是 `span`。语义 = "用掉了多少屏幕预算"。提前结束的射线
+  （出屏 / 超 `max_distance` / 命中近处）比值天然小 ⇒ 不会被误判成"快到极限要淡出"
+  （地平线附近 `span` 只有十几像素，用 `s/span` 会误伤——实测见 memory/2026-11-01.md）；
+- **分类只看灭点**（`project(R)`），不看 `ray.exits`：旧版把"朝上飞出画面（真天空）"记成
+  Offscreen、"被预算截断在画面内"记成 Sky，语义是反的。新判据：
+  灭点在屏内且该处无深度 ⇒ Sky；灭点在屏外或无灭点（`R.z ≥ 0`）⇒ Offscreen；
+  灭点在屏内但有几何 ⇒ Exhausted（漏检/预算不够）。
+
+### 17.3 属性 pass 的两处修正
+
+1. **背面法线翻转**：`double_sided` 材质会关背面剔除，此时 `gl_FrontFacing == false`。
+   主 pass（object3d / skeleton）都做了 `N = -N`，属性 pass 之前**没做** ⇒ 写进属性纹理的是
+   背离相机的法线，`SsrHitFacing` 的 `dot(R,N)` 与着色结论相反。已按同一约定补上。
+2. **镂空变体**：`alpha_mode == kMask` 的材质在主 pass 靠 `discard` 才没写颜色/深度；
+   属性 pass 若不 discard，会在**被丢弃的透明区域**也写一遍法线（`LEQUAL` 会放行更近的片元），
+   把那片不存在的几何喂给朝向判据。已新增 `kSsrAttrCutout{Vs,Fs}` + 独立 program。
+
+### 17.4 正式入口
+
+`RenderCommandList::ssr`（`std::optional<SsrConfig>`）已是正式开关：设置且 `enabled` 时才跑，
+未设置 = 零开销零回归。参数定义与运行机理写在 `interface/render_command.h` 的 SsrConfig 上方。
+Pre-condition：必须同时设置 `env_specular`（SSR 是那一项的**替换估计器**）。
+
+### 17.5 顺带记下"不要踩"的两条
+
+- **正反面判据不要换成纯深度**（`d_in < z` / `d_min < z`）：会让厚度带 `T` 失效，
+  掠射下掉命中、反射出现水平梳齿/点阵（实测 std 4.5%、graze 1.5% 像素变化，行间差 0.375→0.593）。
+  根因：深度缓冲每像素只存最近表面，斜面/曲面上的合法命中确实"在后面"，`T` 就是为它存在的。
+- **`r_back`（同格内深度比）不做颜色过渡**：体素化会把一票"侧面"暴露到正面上，掠射时不可信。

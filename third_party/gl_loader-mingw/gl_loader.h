@@ -27,6 +27,8 @@ typedef void (*GL_DeleteProgram)(unsigned int);
 typedef void (*GL_UseProgram)(unsigned int);
 typedef int (*GL_GetUniformLocation)(unsigned int, const char*);
 typedef void (*GL_Uniform2f)(int, float, float);
+// glUniform2i：ivec2 uniform（SSR 的 uFullRes / uSsrRes）用；MinGW 的 GL 1.1 没有
+typedef void (*GL_Uniform2i)(int, int, int);
 typedef void (*GL_Uniform4f)(int, float, float, float, float);
 typedef void (*GL_GenFramebuffers)(int, unsigned int*);
 typedef void (*GL_DeleteFramebuffers)(int, const unsigned int*);
@@ -61,6 +63,8 @@ typedef void (*GL_Uniform1fv)(int, int, const float*);
 typedef void (*GL_Uniform3f)(int, float, float, float);
 typedef void (*GL_ActiveTexture)(unsigned int);
 typedef void (*GL_UniformMatrix4fv)(int, int, unsigned char, const float*);
+// glUniformMatrix3fv：mat3 uniform（SSR 属性 pass 的 uWorldToView）用。
+typedef void (*GL_UniformMatrix3fv)(int, int, unsigned char, const float*);
 typedef void (*GL_GenVertexArrays)(int, unsigned int*);
 typedef void (*GL_DeleteVertexArrays)(int, const unsigned int*);
 typedef void (*GL_BindVertexArray)(unsigned int);
@@ -101,6 +105,7 @@ extern GL_DeleteProgram          gl_DeleteProgram;
 extern GL_UseProgram             gl_UseProgram;
 extern GL_GetUniformLocation     gl_GetUniformLocation;
 extern GL_Uniform2f              gl_Uniform2f;
+extern GL_Uniform2i              gl_Uniform2i;
 extern GL_Uniform4f              gl_Uniform4f;
 extern GL_GenFramebuffers        gl_GenFramebuffers;
 extern GL_DeleteFramebuffers     gl_DeleteFramebuffers;
@@ -134,6 +139,7 @@ extern GL_Uniform1fv             gl_Uniform1fv;
 extern GL_Uniform3f              gl_Uniform3f;
 extern GL_ActiveTexture          gl_ActiveTexture;
 extern GL_UniformMatrix4fv       gl_UniformMatrix4fv;
+extern GL_UniformMatrix3fv       gl_UniformMatrix3fv;
 extern GL_GenVertexArrays        gl_GenVertexArrays;
 extern GL_DeleteVertexArrays     gl_DeleteVertexArrays;
 extern GL_BindVertexArray        gl_BindVertexArray;
@@ -227,12 +233,14 @@ int gl_loader_init(void);
 #define glTexParameteri          gl_TexParameteri
 #define glGenerateMipmap         gl_GenerateMipmap
 #define glUniform1i              gl_Uniform1i
+#define glUniform2i              gl_Uniform2i
 #define glUniform1f              gl_Uniform1f
 #define glUniform1fv             gl_Uniform1fv
 #define glUniform3f              gl_Uniform3f
 #define glUniform2f              gl_Uniform2f
 #define glUniform4f              gl_Uniform4f
 #define glUniformMatrix4fv       gl_UniformMatrix4fv
+#define glUniformMatrix3fv       gl_UniformMatrix3fv
 #define glUseProgram             gl_UseProgram
 #define glVertexAttribIPointer   gl_VertexAttribIPointer
 #define glVertexAttribPointer    gl_VertexAttribPointer

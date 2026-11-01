@@ -13,6 +13,7 @@
 //   5. 空 GL 字符串显示占位符（不出现空白的 "vendor  |" 这种断裂格式）
 
 #include <cstdint>
+#include <cstdio>   // std::sscanf：机位行的 float round-trip 断言用
 #include <string>
 
 #include <glog/logging.h>
@@ -81,12 +82,35 @@ TEST(DebugInfo, FieldsAppearInText) {
     EXPECT_NE(s.find("1280x720"), std::string::npos) << s;
     EXPECT_NE(s.find("frame 42"), std::string::npos) << s;
     EXPECT_NE(s.find("fps 59.5"), std::string::npos) << s;
-    EXPECT_NE(s.find("(1.25, -2.50, 3.00)"), std::string::npos) << s;
-    EXPECT_NE(s.find("(4.00, 5.00, 6.00)"), std::string::npos) << s;
-    EXPECT_NE(s.find("fov 45.0"), std::string::npos) << s;
-    EXPECT_NE(s.find("near 0.50"), std::string::npos) << s;
-    EXPECT_NE(s.find("far 250.00"), std::string::npos) << s;
+    EXPECT_NE(s.find("(1.25, -2.5, 3)"), std::string::npos) << s;
+    EXPECT_NE(s.find("(4, 5, 6)"), std::string::npos) << s;
+    EXPECT_NE(s.find("fov 45"), std::string::npos) << s;
+    EXPECT_NE(s.find("near 0.5"), std::string::npos) << s;
+    EXPECT_NE(s.find("far 250"), std::string::npos) << s;
     EXPECT_TRUE(IsRenderableAscii(s)) << s;
+}
+
+// 机位行必须是 **float round-trip** 精度（%.9g）：把打印出来的数字原样 scanf 回去，
+// 必须得到**同一个 float**。这是「看 HUD 就能复现别人那台相机」的唯一依据，
+// 也是 %.2f 时代做不到的事（0.04214537 → "0.04"，掠射角根本复现不出来）。
+TEST(DebugInfo, CameraLineRoundTripsFloats) {
+    jpov::DebugInfo info;
+    info.camera.position = {0.042145371f, -2.5000001f, 3.0000002f};
+    info.camera.target = {0.0f, 0.0f, 0.0f};
+    info.camera.up = {0.0f, 1.0f, 0.0f};
+    info.camera.fov = 60.0f;
+    info.camera.near = 0.05f;
+    info.camera.far = 1000.0f;
+    const std::string s = info.DebugString();
+
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    const std::size_t at = s.find("CAM  pos");
+    ASSERT_NE(at, std::string::npos) << "输出里没有机位行：\n" << s;
+    ASSERT_EQ(std::sscanf(s.c_str() + at, "CAM  pos (%f, %f, %f)", &px, &py, &pz), 3)
+        << "机位行解析失败，实际输出：\n" << s;
+    EXPECT_EQ(px, info.camera.position.x());
+    EXPECT_EQ(py, info.camera.position.y());
+    EXPECT_EQ(pz, info.camera.position.z());
 }
 
 TEST(DebugInfo, NoTrailingNewlineAndNoControlChars) {
