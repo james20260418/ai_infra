@@ -2624,16 +2624,25 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     // 2026-10-30 起本 pass 画**所有** object3d（不只反射体）：SSR 的命中面朝向判据需要
     // **遮挡物**的视空间法线（桌子/柱子不是反射体，但射线会撞到它们），而 .a 只用来告诉
     // 合成层"这一格要不要叠 SSR"。
+    //
+    // 镂空材质（alpha_mode == kMask）走**带 discard 的变体**：否则属性 pass 会在被主 pass
+    // 丢掉的透明区域也写一遍法线（深度 LEQUAL 会放行更近的片元），把那片不存在的几何
+    // 写进朝向判据的输入里（2026-11-01）。
+    const unsigned int prog_cutout = ssr_integration_.attr_cutout_program();
+    glUniformMatrix3fv(glGetUniformLocation(prog_cutout, "uWorldToView"), 1, GL_FALSE,
+                       world_to_view);
     const GLint loc_is_reflector = glGetUniformLocation(prog, "uAttrIsReflector");
-    float last_is_reflector = -1.0f;   // 无效值：保证第一件物体一定上传一次
+    const GLint loc_is_reflector_cutout = glGetUniformLocation(prog_cutout, "uAttrIsReflector");
     for (const Object3DCommand& o : cmds.object3d) {
+        const bool cutout = (o.material.alpha_mode == AlphaMode::kMask);
+        const unsigned int target = cutout ? prog_cutout : prog;
         const float is_reflector = o.ssr_reflector ? 1.0f : 0.0f;
-        if (is_reflector != last_is_reflector) {
-            glUniform1f(loc_is_reflector, is_reflector);
-            last_is_reflector = is_reflector;
-        }
-        // 与主 pass 用同一个 mvp（含 model），只换 FS：写 (法线.xy, 1, 是否反射体)。
-        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_, prog, prog,
+        glUseProgram(target);
+        glUniformMatrix3fv(glGetUniformLocation(target, "uWorldToView"), 1, GL_FALSE,
+                           world_to_view);
+        glUniform1f(cutout ? loc_is_reflector_cutout : loc_is_reflector, is_reflector);
+        // 与主 pass 用同一个 mvp（含 model），只换 FS：写法线 + 掩码。
+        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_, target, target,
                                                /*pick_id_map=*/nullptr);
     }
 

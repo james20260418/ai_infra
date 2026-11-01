@@ -142,9 +142,11 @@ void SsrRenderer::DestroyTargets() {
         glDeleteTextures(1, &outputs_.radiance_tex);
         outputs_.radiance_tex = 0;
     }
-    if (outputs_.reason_tex != 0) {
-        glDeleteTextures(1, &outputs_.reason_tex);
-        outputs_.reason_tex = 0;
+    // ⚠️ reason_tex 是 type_tex 的别名，**不能**在这里再删一次（会 double-free 同一张纹理）。
+    outputs_.reason_tex = 0;
+    if (outputs_.type_tex != 0) {
+        glDeleteTextures(1, &outputs_.type_tex);
+        outputs_.type_tex = 0;
     }
     if (outputs_.hit_s_tex != 0) {
         glDeleteTextures(1, &outputs_.hit_s_tex);
@@ -182,22 +184,24 @@ void SsrRenderer::EnsureTargets(int w, int h, int tile, bool debug) {
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR slice FBO 不完整（" << sw << "×" << sh << "，R32F）";
 
-    // ② resolve 目标：radiance（+ 调试附件）。
+    // ② resolve 目标：radiance（rgb + ray_ratio）+ **总是**输出的类型图（+ 调试用的 hit_s）。
     MakeTexture(&outputs_.radiance_tex, w, h, GL_RGBA16F, GL_RGBA, GL_FLOAT);
     glGenFramebuffers(1, &fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            outputs_.radiance_tex, 0);
-    std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0};
+    // R8UI：一个纹素一个字节，正好装一个 SsrResult（枚举值 0..4）。
+    MakeTexture(&outputs_.type_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
+                           outputs_.type_tex, 0);
+    // reason_tex 是 type_tex 的**别名**（同一张纹理）：老测试按 reason_tex 断言分类，
+    // 不再单独分配第二张（分类本来就只有一份数据）。
+    outputs_.reason_tex = outputs_.type_tex;
+    std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     if (debug) {
-        // R8UI：一个纹素一个字节，正好装一个 SsrResult（枚举值 0..3）。
-        MakeTexture(&outputs_.reason_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                               outputs_.reason_tex, 0);
         MakeTexture(&outputs_.hit_s_tex, w, h, GL_R32F, GL_RED, GL_FLOAT);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
                                outputs_.hit_s_tex, 0);
-        bufs.push_back(GL_COLOR_ATTACHMENT1);
         bufs.push_back(GL_COLOR_ATTACHMENT2);
     }
     glDrawBuffers(static_cast<GLsizei>(bufs.size()), bufs.data());
@@ -336,6 +340,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1i(prog, "uTile", in.tile_size);
         set1f(prog, "uSlabPixels", derived.slab_pixels);
         set1i(prog, "uStepsPerLane", derived.steps_per_lane);
+        set1f(prog, "uMaxRayPixels", static_cast<float>(in.max_ray_pixels));
     };
     upload_common(prog_march_);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchDepth);

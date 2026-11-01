@@ -172,6 +172,12 @@ struct SsrInputs {
     //   · 非反射体像素的法线**有意义且必须写**：命中面朝向判据要的就是遮挡物的法线。
     unsigned int normal_tex = 0;
 
+    // 反射层材质的粗糙度（[0,1]）。**本模块当前不使用**（march/resolve 与材质无关），
+    // 这里只是把"这一帧用的是什么材质"随输入传进来，供融合层（SsrFusion）与将来的
+    // 逐像素材质升级使用 —— 升级点：属性纹理多一个附件存 F0/roughness，
+    // 融合层按像素取，而不是用 SsrConfig 的一套 uniform。
+    float roughness = 0.0f;
+
     // ---- 分辨率（§2.1 契约 1：输入什么分辨率，输出什么分辨率）----
     int width = 0;   // > 0
     int height = 0;  // > 0
@@ -241,11 +247,19 @@ struct SsrInputs {
 struct SsrOutputs {
     // RGBA16F，与输入同分辨率、逐像素 1:1（不可重采样）。
     //   rgb = 镜面方向命中那一格的颜色（HDR、未加雾、未 tonemap、**纯辐亮度**）
-    //   a   = A ∈ {0,1}：1 = "这个答案来自屏幕数据"；0 = "拿不到"（§6）
+    //   a   = **ray_ratio** = s_hit / max_ray_pixels ∈ [0,1]：本次命中用掉了多少屏幕预算。
+    //         这是"预算占用率"，**不是**射线进度：分母恒为 max_ray_pixels（= SSR 像素弧长），
+    //         所以提前结束的射线（出屏 / max_distance / 命中近处）比值天然很小，
+    //         不会误触发"快到极限了要退回 fallback"的淡出。未命中写 0。
+    //         A 不再放在这里 —— 由 type_tex 派生（type == kHit ⇒ A = 1）。
     unsigned int radiance_tex = 0;
 
-    // R8UI（仅 debug_reason == true 时非 0）：每像素写一个 SsrResult 的数值。
-    // 供 §11.2-5 的"A 三态"测试断言分类，不进任何生产路径。
+    // R8UI，**总是输出**：每像素一个 SsrResultType（见下）。
+    //   kHit 之外的取值 = "为什么没有可用结果"，供融合层选择 fallback（env / sky / 跳过）。
+    unsigned int type_tex = 0;
+
+    // R8UI（仅 debug_reason == true 时非 0）：与 type_tex 同值的调试副本。
+    // 保留它是为了让既有测试（§11.2-5 的"A 三态"）不用改断言目标。
     unsigned int reason_tex = 0;
 
     // R32F（仅 debug_reason == true 时非 0）：每像素写整条射线的碰撞位置 s（像素弧长，
@@ -254,18 +268,20 @@ struct SsrOutputs {
     unsigned int hit_s_tex = 0;
 };
 
-// 像素级结算结果。**只用于调试/测试**（写进 reason_tex），不参与渲染（§5.4）。
+// 像素级结算结果。写进 type_tex（总是输出），融合层据此选退路。
+//
+// 分类只看**灭点**（= 反射方向在屏幕上的收敛点），不看 "射线有没有出屏"：
+//   · 灭点在屏内 且 该处无深度数据 ⇒ 反射方向真的指向天空 ⇒ kSky
+//   · 灭点在屏外（或 R.z ≥ 0，朝相机的反射方向没有灭点）⇒ kOffscreen
+//   · 灭点在屏内 但那儿有几何 ⇒ 说明我们漏检/预算不够 ⇒ kExhausted
+// 旧版的 SKY/OFFSCREEN 是反的（`ray.exits ? Offscreen : Sky`：朝上飞出画面正是"天空"，
+// 却被记成 Offscreen；被预算截断在画面内反而记成 Sky），2026-11-01 按灭点重写。
 enum class SsrResult : std::uint8_t {
-    // 某格的区间重叠 ⇒ rgb = 该格颜色, A = 1
-    kHit = 0,
-    // 全程留在屏内、没碰到任何柱子 ⇒ A = 0。**交给 composite 的环境镜面项**：
-    // 模块不持有天空探针，而 EnvSpecularTerm 对"真的什么都没有"恰好是正确值（§5.4 ★）。
-    kSky = 1,
-    // 射线出屏 / 出视锥 / 起点贴边 ⇒ A = 0（显式：没有数据，不是"没有东西"）
-    kOffscreen = 2,
-    // 可用射线长度 ≈ 0（起点已在 far 平面）或超出 max_ray_pixels 预算 ⇒ A = 0
-    // （超预算算"不知道"而不是"没命中"：覆盖率掉、正确性不掉）
-    kTooShort = 3,
+    kNone = 0,       // 本像素不是反射候选（镜面像素自身没有深度数据）
+    kHit = 1,        // 命中：rgb = 该格颜色；a = ray_ratio
+    kSky = 2,        // 灭点在屏内且是背景（真正的"天空"）
+    kOffscreen = 3,  // 灭点在屏外 / 无灭点（R.z ≥ 0）
+    kExhausted = 4,  // 灭点在屏内但有几何 ⇒ 预算用尽或漏检
 };
 
 // ==================== 渲染器 ====================

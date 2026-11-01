@@ -669,16 +669,33 @@ struct EnvSpecular {
 
 // ==================== 屏幕空间反射（SSR）====================
 //
-// **SSR 不是加一项，是替换 EnvSpecular 那一项的估计器**（见 docs/jpov_ssr_v2_design.md）：
-//   有屏幕数据的地方用它算出来的辐亮度，没有的地方原样退回 EnvSpecularTerm ⇒
-//   A=0 时画面与"没开 SSR"**逐字节相同**（单调改进，不引入新的失败模式）。
+// 用法：`cmds.ssr = SsrConfig{...};`（同时必须有 `cmds.env_specular`）。
+// 语义：**SSR 不是"再加一层反射"，而是把 EnvSpecular 那一项的估计器换掉**。
+//   屏幕里有数据的地方用 SSR 算出的辐亮度；拿不到的地方（类型不是 kHit）原样退回
+//   EnvSpecularTerm ⇒ A=0 的像素与"没开 SSR"**逐字节相同**（单调改进，不引入新失败模式）。
 //
-// 管线位置：不透明 3D 之后、半透明（strip/粒子/雾）之前。内部四步：
-//   属性 pass（只画 ssr_reflector 的物体，写视空间法线）→ 降采样（2×2 选点）→
-//   SsrRenderer（半分辨率）→ 合成（A 预乘双边升采样 + 替换环境镜面项）。
+// ── 运行机理（一趟四步，全在 GPU 上）──
+//   ① 属性 pass：把**所有**不透明物体再画一遍（不写深度），输出
+//        rgb = 视空间法线、a = 掩码（1 反射体 / 0.5 有法线非反射体 / 0 无数据）。
+//        遮挡物的法线也要，因为射线会撞到它们；镂空材质走带 discard 的变体。
+//   ② 降采样（SsrDownsample）：N×N 组里取**窗口深度最小**的 texel，color/depth/normal
+//        三张图必须同源 ⇒ SSR 分辨率的三张输入。
+//   ③ 反射求交（SsrRenderer）：每个镜面像素沿反射方向在**屏幕空间**逐格 DDA 前进，
+//        命中判据 = 射线段的深度区间与该格柱体 [z, z+T] 相交（T = 厚度，补偿"深度缓冲
+//        只存最近表面"）。输出三样：命中颜色 / ray_ratio / 类型（命中·天空·出屏·预算耗尽）。
+//   ④ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
+//        全分辨率，然后**替换**环境镜面项：
+//          out = hdr + mask·A·ao·(ssr_L·weight − env_term)
 //
-// Pre-condition: 必须同时设置 `env_specular`（SSR 需要那张天空 cubemap 来算"被替换掉的
-//   那一份"；没有 env 时光照模型本身就缺一半，SSR 无从替换）。
+// ── 成本 ──
+//   成本 ∝ 屏幕面积 × 射线预算。唯一的成本旋钮是 `resolution_scale`（1/N）；
+//   `max_ray_pixels` 决定反射能"看多远"，也直接是每像素的最大步数。
+//
+// ── Pre-condition ──
+//   · 必须同时设置 `env_specular`（SSR 要重算"被替换掉的那一份"，没有 env 就无从替换，
+//     Renderer 会 LOG(FATAL)）；
+//   · 只有 `ssr_reflector = true` 的物体参与反射（其余像素照常走 env，A=0）；
+//   · 本版反射体**共用一套材质**（见下面的 base_color/metallic/roughness/ao）。
 struct SsrConfig {
     // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
     bool enabled = false;
@@ -727,8 +744,11 @@ struct SsrConfig {
     // 权重下限（相对空间权）：保证 Σw > 0，永不出现"整片黑"的孔洞。
     float upsample_weight_floor = 1.0e-3f;
 
-    // 反射层材质（本版**全场景一套**，见 ssr_integration.h 的"已知限制"）。
-    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换。
+    // 反射层材质（本版**全场景一套**；升级点 = 逐像素 F0/roughness 进属性纹理）。
+    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换：
+    //   weight   = F0·AB.x + AB.y,  F0 = mix(0.04, base_color, metallic)
+    //   env_term = EnvSpecularTerm(n, V, roughness, metallic, base_color)
+    // ⚠️ 金属的 F0 就是 base_color 本身：给 0.02 会得到一块黑（只有 2% 反射）。
     Vec3f base_color = {0.02f, 0.02f, 0.02f};
     float metallic = 1.0f;
     float roughness = 0.02f;

@@ -30,3 +30,15 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# SSR 输入准备（降采样）的纯数学单测：倍率校验、目标尺寸、N×N 选点规则。
+cc_test(
+    name = "ssr_downsample_test",
+    srcs = ["ssr_downsample_test.cc"],
+    deps = [
+        "//tools/jpov/src/ssr:ssr_downsample",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

@@ -203,8 +203,6 @@ public:
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_roughness_ = 0.02f;   // 反射层材质（本版全场景一套）
     int   ssr_debug_ = 0;
-    bool  no_tonemap_ = false;   // TEMP：关掉 tone map，便于读线性值
-    float ssr_bc_ = 0.03f;      // TEMP：合成层用的 base_color（查"单一材质"假设）           // 0 正常 / 1 A 覆盖率 / 2 直通
     void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -244,7 +242,7 @@ public:
         cmds->sky     = nl.sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
-        cmds->tone_mapping = !no_tonemap_;
+        cmds->tone_mapping = true;
 
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
@@ -341,7 +339,7 @@ public:
             sc.thickness_pixels = ssr_thickness_px_;
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness = ssr_roughness_;
-            sc.base_color = {ssr_bc_, ssr_bc_, ssr_bc_};
+            sc.base_color = {0.03f, 0.03f, 0.03f};
             sc.metallic = 1.0f;
             sc.upsample_depth_mode = ssr_depth_mode_;
             sc.debug_coverage = ssr_debug_;

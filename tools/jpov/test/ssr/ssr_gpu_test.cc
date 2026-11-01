@@ -328,7 +328,8 @@ TEST(SsrGpu, MatchesCpuReference) {
             const DerivedParams derived =
                 DeriveParams(tile, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
             const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
-
+            // A 不再是 radiance.a（那里现在是 ray_ratio）：命中与否由类型图给出。
+            const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
             const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
 
             int sky_pixels = 0;
@@ -342,7 +343,7 @@ TEST(SsrGpu, MatchesCpuReference) {
                 for (int x = 0; x < kWidth; ++x) {
                     const size_t i = static_cast<size_t>(y) * kWidth + x;
                     const CpuResult cpu = MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m);
-                    const bool gpu_hit = rad[i * 4 + 3] > 0.5f;
+                    const bool gpu_hit = type[i] == static_cast<unsigned char>(SsrResult::kHit);
                     ++compared;
                     if (!HasDepthData(f.scene.window_depth[i])) {
                         ++sky_pixels;
@@ -355,7 +356,7 @@ TEST(SsrGpu, MatchesCpuReference) {
                         if (hit_mismatch < 4) {
                             ADD_FAILURE() << "tile=" << tile << " two_layers=" << two_layers
                                           << " 像素(" << x << "," << y << ") CPU hit=" << cpu.hit
-                                          << " GPU a=" << rad[i * 4 + 3];
+                                          << " GPU type=" << static_cast<int>(type[i]);
                         }
                         continue;
                     }
@@ -387,7 +388,7 @@ TEST(SsrGpu, MatchesCpuReference) {
             }
             EXPECT_GT(compared, 5000);
             EXPECT_GT(sky_pixels, 300) << "场景里没有天空像素 ⇒ HasDepthData 那条分支没被覆盖";
-            EXPECT_EQ(sky_with_alpha, 0) << "天空像素（无深度数据）必须是 a=0";
+            EXPECT_EQ(sky_with_alpha, 0) << "天空像素（无深度数据）必须是 type=None（不是命中）";
             EXPECT_EQ(hit_mismatch, 0) << "tile=" << tile
                                        << "：CPU 与 GPU 的命中/未命中判定不一致"
                                           "（着色器与 ssr_math.h 走样了）";
@@ -428,7 +429,7 @@ TEST(SsrGpu, HitPatternFollowsReflectedDirection) {
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
             const size_t i = static_cast<size_t>(y) * kWidth + x;
-            const bool hit = rad[i * 4 + 3] > 0.5f;
+            const bool hit = reason[i] == static_cast<unsigned char>(SsrResult::kHit);
             const bool is_interior = x >= kMargin && x < kWidth - kMargin && y >= kMargin &&
                                      y < kHeight - kMargin;
             if (is_interior) {
@@ -536,19 +537,19 @@ TEST(SsrGpu, CoverageStates) {
         f.in.debug_reason = true;
         const SsrOutputs& out = f.ssr.Render(f.in);
         const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
-        const std::vector<unsigned char> reason = ReadTexUInt8(out.reason_tex, kWidth, kHeight);
+        const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
         int nonzero_a = 0;
         int wrong_reason = 0;
         for (int i = 0; i < kWidth * kHeight; ++i) {
             if (rad[static_cast<size_t>(i) * 4 + 3] != 0.0f) {
                 ++nonzero_a;
             }
-            if (reason[i] != static_cast<unsigned char>(SsrResult::kTooShort)) {
+            if (reason[i] != static_cast<unsigned char>(SsrResult::kNone)) {
                 ++wrong_reason;
             }
         }
-        EXPECT_EQ(nonzero_a, 0) << "无深度数据时 a 必须全 0";
-        EXPECT_EQ(wrong_reason, 0) << "无深度数据时 reason 必须是 kTooShort";
+        EXPECT_EQ(nonzero_a, 0) << "无深度数据时 ray_ratio 必须全 0";
+        EXPECT_EQ(wrong_reason, 0) << "无深度数据时 type 必须是 kNone";
     }
     // 全命中：均匀深度墙的下半屏 ⇒ a=1 且颜色是某一格的颜色（不是全黑）。
     {
@@ -556,12 +557,13 @@ TEST(SsrGpu, CoverageStates) {
         f.Setup(MakeScene(/*two_layers=*/false), /*tile=*/2, /*max_ray_pixels=*/160);
         const SsrOutputs& out = f.ssr.Render(f.in);
         const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+        const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
         int lit = 0;
         int black_but_hit = 0;
         for (int y = 0; y < kHeight / 4; ++y) {
             for (int x = 0; x < kWidth; ++x) {
                 const size_t i = static_cast<size_t>(y) * kWidth + x;
-                if (rad[i * 4 + 3] > 0.5f) {
+                if (type[i] == static_cast<unsigned char>(SsrResult::kHit)) {
                     ++lit;
                     if (rad[i * 4 + 0] == 0.0f && rad[i * 4 + 1] == 0.0f) {
                         ++black_but_hit;
@@ -622,24 +624,35 @@ TEST(SsrGpu, HugeBudgetIsHarmless) {
     modest.Setup(sc, /*tile=*/1, /*max_ray_pixels=*/1000);
     const SsrOutputs& a = modest.ssr.Render(modest.in);
     const std::vector<float> rad_a = ReadTexFloat(a.radiance_tex, kWidth, kHeight, GL_RGBA);
+    const std::vector<unsigned char> type_a = ReadTexUInt8(a.type_tex, kWidth, kHeight);
 
     Fixture huge;
     huge.Setup(sc, /*tile=*/1, /*max_ray_pixels=*/1000000);
     const SsrOutputs& b = huge.ssr.Render(huge.in);
     const std::vector<float> rad_b = ReadTexFloat(b.radiance_tex, kWidth, kHeight, GL_RGBA);
+    const std::vector<unsigned char> type_b = ReadTexUInt8(b.type_tex, kWidth, kHeight);
 
     int bad = 0;
-    int diff = 0;
+    int diff_rgb = 0;
+    int diff_type = 0;
     for (size_t i = 0; i < rad_b.size(); ++i) {
         if (!std::isfinite(rad_b[i])) {
             ++bad;
         }
-        if (rad_a[i] != rad_b[i]) {
-            ++diff;
+        // 只比 rgb：a 是 **ray_ratio = s / max_ray_pixels**，预算变了它本来就该变
+        // （分母就是预算本身），这不属于"改了画面"。
+        if ((i % 4) != 3 && rad_a[i] != rad_b[i]) {
+            ++diff_rgb;
+        }
+    }
+    for (size_t i = 0; i < type_b.size(); ++i) {
+        if (type_a[i] != type_b[i]) {
+            ++diff_type;
         }
     }
     EXPECT_EQ(bad, 0) << "超大预算产出了 NaN/inf";
-    EXPECT_EQ(diff, 0) << "预算超过屏幕对角线竟然改了画面（" << diff << " 个分量不同）";
+    EXPECT_EQ(diff_rgb, 0) << "预算超过屏幕对角线竟然改了命中颜色（" << diff_rgb << " 个分量不同）";
+    EXPECT_EQ(diff_type, 0) << "预算变化改了命中/逃逸分类（" << diff_type << " 个像素不同）";
 }
 
 // ⑥ 决定论：同输入跑两次逐字节相同
@@ -734,6 +747,7 @@ TEST(SsrGpu, BackfaceHitsRejected) {
     const DerivedParams derived =
         DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+    const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
 
     int hit_mismatch = 0;
     int cell_mismatch = 0;
@@ -747,7 +761,7 @@ TEST(SsrGpu, BackfaceHitsRejected) {
                 MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/false);
             const CpuResult cpu =
                 MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/true);
-            const bool gpu_hit = rad[i * 4 + 3] > 0.5f;
+            const bool gpu_hit = type[i] == static_cast<unsigned char>(SsrResult::kHit);
 
             // 只统计"地板像素射出去的射线"：桌子/墙自己的像素也会发射线（那属于它们自己的
             // 镜面，跟这条 bug 无关）。
@@ -771,7 +785,7 @@ TEST(SsrGpu, BackfaceHitsRejected) {
                 ++hit_mismatch;
                 if (hit_mismatch < 4) {
                     ADD_FAILURE() << "像素(" << x << "," << y << ") CPU hit=" << cpu.hit
-                                  << " GPU a=" << rad[i * 4 + 3];
+                                  << " GPU type=" << static_cast<int>(type[i]);
                 }
                 continue;
             }
