@@ -36,6 +36,9 @@
 #ifndef GL_LINK_STATUS
 #define GL_LINK_STATUS 0x8B82
 #endif
+#ifndef GL_INFO_LOG_LENGTH
+#define GL_INFO_LOG_LENGTH 0x8B84
+#endif
 #endif
 
 #include <glog/logging.h>
@@ -44,27 +47,57 @@ namespace jpov {
 
 namespace {
 
+// 取 shader / program 的 info log **全文**。
+//
+// 为什么不能再用固定 1024 字节缓冲：NVIDIA 的编译器会给每个「可能未初始化」的
+// 局部变量单独发一条警告（C7050）—— 本仓库的 tile 光照 shader 一次就能刷十几条，
+// 1KB 刚好**被警告填满，真正的 error 行被截掉**。2026-11-01 Windows 真卡上首次
+// 出现的链接失败就因此只剩 “Program link error: Fragment info …warning…” ，最关键
+// 的失败原因看不见（Mesa/llvmpipe 编译得过，所以本地一直没暴露）。
+std::string ShaderInfoLog(unsigned int shader) {
+    GLint len = 0;
+    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
+    if (len <= 1) {
+        return "(empty info log)";
+    }
+    std::vector<char> buf(static_cast<size_t>(len));
+    glGetShaderInfoLog(shader, len, nullptr, buf.data());
+    return std::string(buf.data());
+}
+
+std::string ProgramInfoLog(unsigned int program) {
+    GLint len = 0;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
+    if (len <= 1) {
+        return "(empty info log)";
+    }
+    std::vector<char> buf(static_cast<size_t>(len));
+    glGetProgramInfoLog(program, len, nullptr, buf.data());
+    return std::string(buf.data());
+}
+
 // 编译单个 shader（vertex / fragment）。
 // 编译失败 → LOG(FATAL) crash。
-unsigned int CompileShader(GLenum type, const char* source) {
-    CHECK(source != nullptr) << "ShaderManager: null shader source";
+// name 只用于日志定位（同一个 shader 源可能被多个 program 复用）。
+unsigned int CompileShader(GLenum type, const char* source, const std::string& name) {
+    CHECK(source != nullptr) << "ShaderManager: null shader source, name=" << name;
     unsigned int shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
     glCompileShader(shader);
     GLint ok = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
     if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
         const char* tn = (type == GL_VERTEX_SHADER) ? "VS" : "FS";
-        LOG(FATAL) << "Shader compile error [" << tn << "]: " << log;
+        LOG(FATAL) << "Shader compile error [" << tn << "] name=" << name << ":\n"
+                   << ShaderInfoLog(shader);
     }
     return shader;
 }
 
 // 链接 vertex + fragment 为 program。
-// 链接失败 → LOG(FATAL) crash。
-unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
+// 链接失败 → LOG(FATAL) crash，日志带 program 名（不同驱动的报错文本差异很大，
+// 带名字才能一眼定位是哪个 shader）。
+unsigned int LinkProgram(unsigned int vs, unsigned int fs, const std::string& name) {
     unsigned int prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
@@ -72,9 +105,8 @@ unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
     GLint ok = 0;
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        LOG(FATAL) << "Program link error: " << log;
+        LOG(FATAL) << "Program link error name=" << name << ":\n"
+                   << ProgramInfoLog(prog);
     }
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -131,9 +163,13 @@ unsigned int ShaderManager::GetOrCreate(const std::string& name,
 
     const std::string vs_src = InjectDefines(source.vertex, source.defines);
     const std::string fs_src = InjectDefines(source.fragment, source.defines);
-    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vs_src.c_str());
-    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fs_src.c_str());
-    unsigned int prog = LinkProgram(vs, fs);
+    // 编译前先打一行：「最后一条日志停在哪个 program」是崩溃定位最快的线索
+    //（编译/链接之外也可能崩，那时候只有这行能告诉我们是哪个 shader）。
+    LOG(INFO) << "ShaderManager: compiling program " << name
+              << " (vs=" << vs_src.size() << "B, fs=" << fs_src.size() << "B)";
+    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vs_src.c_str(), name);
+    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fs_src.c_str(), name);
+    unsigned int prog = LinkProgram(vs, fs, name);
     CHECK_NE(prog, 0u) << "ShaderManager: link failed, name=" << name;
 
     ShaderProgram entry;
