@@ -85,6 +85,11 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_VertexAttribPointer,    "glVertexAttribPointer");
     LOAD_FUNC(gl_VertexAttribIPointer,   "glVertexAttribIPointer");
     LOAD_FUNC(gl_Uniform1i,              "glUniform1i");
+    // glUniformMatrix4fv：曾经只 DEFINE_PTR 没有 LOAD_FUNC ⇒ 指针恒为 NULL，
+    // 真卡上第一次上传矩阵（阴影 pass）就跳地址 0 → 0xC0000005（2026-11-01 实测）。
+    // 以后加 GL 入口请同时加 LOAD_FUNC；gl_loader_init 返回非 0 时调用方会 CHECK 崩，
+    // 而「漏加 LOAD_FUNC」这种错误不会有任何提示，只能靠这条注释提醒。
+    LOAD_FUNC(gl_UniformMatrix4fv,       "glUniformMatrix4fv");
     LOAD_FUNC(gl_ActiveTexture,          "glActiveTexture");
     LOAD_FUNC(gl_GenVertexArrays,        "glGenVertexArrays");
     LOAD_FUNC(gl_DeleteVertexArrays,     "glDeleteVertexArrays");

@@ -190,13 +190,34 @@ LONG WINAPI JpovUnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
         std::fprintf(stderr, "fault address  = 0x%llX  (exe rva = 0x%llX)\n",
                      addr, addr - module_base);
     }
-    void* frames[32];
-    const USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
-    for (USHORT i = 0; i < count; ++i) {
-        const unsigned long long frame =
-            reinterpret_cast<unsigned long long>(frames[i]);
-        std::fprintf(stderr, "  [%2u] 0x%016llX  rva = 0x%llX\n",
-                     static_cast<unsigned>(i), frame, frame - module_base);
+    // 崩在哪儿：ContextRecord->Rip 是**真正**出错的那条指令（调用空指针时是 0）。
+    if (info != nullptr && info->ContextRecord != nullptr) {
+        const unsigned long long rip =
+            static_cast<unsigned long long>(info->ContextRecord->Rip);
+        std::fprintf(stderr, "rip            = 0x%llX  (exe rva = 0x%llX)\n",
+                     rip, rip - module_base);
+        // 栈扫描：CaptureStackBackTrace 只能看到 handler 自己的栈，对崩溃上下文没用
+        //（实测帧全是系统 DLL）。没有 dbghelp 符号时，从 Rsp 往上翻「落在本 exe
+        // 镜像内、且像返回地址」的值，是最直接能拿到调用点的办法。
+        const unsigned char* mod = reinterpret_cast<const unsigned char*>(
+            GetModuleHandleA(nullptr));
+        unsigned long long mod_size = 0;
+        if (mod != nullptr) {
+            const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(mod);
+            const IMAGE_NT_HEADERS64* nt =
+                reinterpret_cast<const IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+            mod_size = nt->OptionalHeader.SizeOfImage;
+        }
+        const unsigned long long* sp =
+            reinterpret_cast<const unsigned long long*>(info->ContextRecord->Rsp);
+        int shown = 0;
+        for (int i = 0; i < 512 && shown < 16; ++i) {
+            const unsigned long long v = sp[i];
+            if (v >= module_base && v < module_base + mod_size) {
+                std::fprintf(stderr, "  stack[%3d] rva = 0x%llX\n", i, v - module_base);
+                ++shown;
+            }
+        }
     }
     std::fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
