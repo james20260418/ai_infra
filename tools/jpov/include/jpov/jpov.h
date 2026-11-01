@@ -18,6 +18,7 @@
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/render_preference.h"
+#include "tools/jpov/interface/windowed_stat.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/renderer.h"
 
@@ -409,6 +410,13 @@ public:
     void SetDebugOverlayVisible(bool visible) { debug_overlay_visible_ = visible; }
 
 private:
+    // 启动画面：窗口 + 渲染器就绪后立刻出一帧（纯 2D：深灰底 + 一行提示）并 Present。
+    //
+    // 为什么要它：应用接下来要加载 glb / 4K 贴图（几百毫秒到几秒），这期间窗口
+    // 什么都不画就是一片空白。先画一帧静态内容再返回，加载期间窗口就停在这一帧上。
+    // Pre-condition: renderer_ / window_ 已创建；仅 windowed 模式调用
+    void DrawSplashFrame(int width, int height);
+
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //
     // 1. 调用 OneIteration → cmds
@@ -470,6 +478,11 @@ private:
     bool debug_overlay_visible_ = false;
     // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
     double last_frame_time_ = 0.0;
+
+    // HUD 的 fps 读数：每 0.5 秒统计一次，结果在下一个 0.5 秒内保持不变。
+    // 用瞬时帧率（1/相邻两帧间隔）时数字每帧都在跳，屏幕上根本读不出来；
+    // 分窗统计还顺带回答了"这半秒到底多少帧"。见 interface/windowed_stat.h。
+    jpov::WindowedStat fps_stat_{0.5};
     pid_t xvfb_pid_    = 0;
     bool  started_xvfb_ = false;
     bool  initialized_  = false;

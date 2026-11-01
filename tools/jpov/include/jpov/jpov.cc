@@ -29,6 +29,11 @@
 #endif
 #include <windows.h>
 #include <io.h>
+// winuser.h 把 DrawText 定义成 DrawTextA（Win32 GDI 的绘制文本 API），会撞上
+// RenderCommandList::DrawText。本文件不用 GDI 画字，撤掉这个宏。
+#ifdef DrawText
+#undef DrawText
+#endif
 #endif
 
 #include <glog/logging.h>
@@ -130,12 +135,26 @@ std::string ResolveLogPath(const char* log_file) {
 // 重定向是唯一一处改动、覆盖所有日志来源（含第三方库与崩溃时的 CHECK 输出）。
 // 无缓冲是必须的：LOG(FATAL) 之后进程立刻 abort，缓冲区里没刷出去的行就永远丢了。
 void RedirectStderrToLogFile(const char* log_file) {
+    // 默认名带时间戳：双击跑好几次也不会互相覆盖（出事时拿最近那份就是）。
+    std::string auto_name;
+    const char* chosen = log_file;
 #if defined(_WIN32)
-    constexpr const char* kDefaultLogFile = "jpov_run_log.txt";
+    if (chosen == nullptr) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char name[64];
+        std::snprintf(name, sizeof(name), "jpov_%04u%02u%02u-%02u%02u%02u_log.txt",
+                      static_cast<unsigned>(st.wYear), static_cast<unsigned>(st.wMonth),
+                      static_cast<unsigned>(st.wDay), static_cast<unsigned>(st.wHour),
+                      static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond));
+        auto_name = name;
+        chosen = auto_name.c_str();
+    }
 #else
-    constexpr const char* kDefaultLogFile = "";
+    if (chosen == nullptr) {
+        return;   // 其他平台默认不落盘（CI 不该到处留文件）
+    }
 #endif
-    const char* chosen = (log_file == nullptr) ? kDefaultLogFile : log_file;
     if (chosen[0] == '\0') {
         return;
     }
@@ -408,6 +427,11 @@ void JPOV::Init() {
     // 偏好核对：用 glGetString 的真话判定；不满足只告警（“偏好”不是“要求”）。
     ReportRenderPreference(config_.render_preference, debug_.gpu);
 
+    // 先把窗口变成"有内容"再返回：应用随后要加载模型/贴图，期间窗口停在这一帧。
+    if (!config_.headless) {
+        DrawSplashFrame(win_w, win_h);
+    }
+
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
@@ -597,12 +621,12 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     debug_.height      = winfo.height;
     debug_.frame_count = frame_count;
     {
-        // 瞬时 fps = 1 / 相邻两帧的墙钟间隔（含渲染耗时，因此是真帧率）。
-        // 首帧没有上一帧参照 ⇒ 保持 0。
+        // fps：每 0.5 秒统计一次，结果保持到下一个统计窗口结束（读得出来、可比）。
+        // 首个窗口结束前 has_result() 为 false ⇒ 读数保持 0。
         const double now = glfwGetTime();
-        if (last_frame_time_ > 0.0) {
-            const double dt = now - last_frame_time_;
-            debug_.fps = (dt > 0.0) ? static_cast<float>(1.0 / dt) : 0.0f;
+        fps_stat_.Tick(now);
+        if (fps_stat_.has_result()) {
+            debug_.fps = static_cast<float>(fps_stat_.rate_per_second());
         }
         last_frame_time_ = now;
     }
@@ -617,6 +641,36 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     if (debug_overlay_visible_) {
         renderer_->DrawDebugOverlay(debug_.DebugString(), debug_overlay_scale_);
     }
+}
+
+
+void JPOV::DrawSplashFrame(int width, int height) {
+    CHECK(renderer_ != nullptr);
+    CHECK(window_ != nullptr);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+
+    jpov::RenderCommandList cmds;
+    cmds.Clear();
+    // 深灰底：比纯黑更像"已经起来了"，也不会被误认成白屏/花屏故障。
+    const jpov::Color background = {0.10f, 0.11f, 0.13f, 1.0f};
+    cmds.DrawRect({0.0f, 0.0f},
+                  {static_cast<float>(width), static_cast<float>(height)}, background);
+    if (!config_.fonts.empty()) {
+        // 只画 ASCII：任何注册字体都含 ASCII 字形，而 CJK 字体不一定被注册。
+        const char* kSplashText = "JPOV - starting...";
+        const float font_size = 20.0f;
+        cmds.DrawText(kSplashText,
+                      {static_cast<float>(width) * 0.5f, static_cast<float>(height) * 0.5f},
+                      font_size, jpov::kColorWhite,
+                      /*alignment=*/jpov::TextAlignment::kCenter,
+                      /*font_alias=*/config_.fonts.front().alias);
+    }
+    const jpov::WindowInfo winfo = {static_cast<float>(width), static_cast<float>(height)};
+    renderer_->BeginFrame(width, height);
+    renderer_->Render(cmds, winfo);
+    renderer_->Present(window_, width, height);
+    LOG(INFO) << "启动画面已绘制（加载资源期间窗口保持这一帧）";
 }
 
 // ========== 运行模式 ==========

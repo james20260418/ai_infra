@@ -205,6 +205,9 @@ cc_binary(
         "//tools/jpov/src:gltf_loader",
         "//tools/common:utils",
     ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -283,6 +286,9 @@ cc_binary(
     name = "jpov_demo.exe",
     srcs = ["demo/jpov_demo.cc"],
     deps = ["//tools/jpov/include/jpov:jpov"],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -314,6 +320,9 @@ cc_binary(
         "//tools/jpov:ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -357,6 +366,9 @@ cc_binary(
         "//tools/jpov:sp_ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
+    # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
+    # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",

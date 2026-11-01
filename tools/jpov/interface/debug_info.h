@@ -36,7 +36,8 @@ namespace jpov {
 //   * camera       —— 每帧取自用户填的 RenderCommandList::camera
 //   * width/height —— 每帧的渲染分辨率（= BeginFrame 使用的尺寸）
 //   * frame_count  —— 每帧的帧号（Run() 自增；RunOnce() 由调用方给）
-//   * fps          —— 最近一帧的**瞬时**帧率（1 / 相邻两帧墙钟间隔），不是平滑平均
+//   * fps          —— 最近一个 0.5s 统计窗口的帧率（窗口结束后**保持** 0.5s，见
+//                     interface/windowed_stat.h）；不是瞬时值，也不是滑动平均
 struct DebugInfo {
     GpuInfo gpu;
 

@@ -437,6 +437,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# WindowedStat — 「每 N 秒定格一次」的稳定读数（帧率 / 耗时 / 事件率，纯 CPU）。
+cc_library(
+    name = "windowed_stat",
+    srcs = ["windowed_stat.cc"],
+    hdrs = ["windowed_stat.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@glog_static//:glog"],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "windowed_stat_test",
+    srcs = ["windowed_stat_test.cc"],
+    deps = [
+        ":windowed_stat",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_test(
     name = "gpu_info_test",
     srcs = ["gpu_info_test.cc"],
