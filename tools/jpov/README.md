@@ -71,6 +71,30 @@ GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | …
 
 或按 `F3` 打开 debug HUD（左上角显示 `gpu:` 一行）。
 
+## Windows 分发：代码签名 / SmartScreen（谁负责什么）
+
+**证书归发布者，工具归引擎。** 私钥一旦进了引擎仓库就等于公开（任何人都能签出
+"官方"exe），而且签名表达的是「谁发布」，所以：
+
+- **JPOV 提供工具**：`tools/jpov/sign_windows_exe.sh`（构建脚本已自动调用）——
+  生成自签名代码签名证书（10 年，`output/signing/`，私钥不进 git）→ 用
+  `osslsigncode` 签名并校验 → 往产物目录放 `jpov_codesign.crt` +
+  `install_cert.bat` / `uninstall_cert.bat`（一键装进「受信任的根证书颁发机构 +
+  受信任的发布者」，需管理员，只需一次）。
+- **发布者自己持有证书**：默认 CN 是 `JPOV Local Dev`（开发机够用），产品或团队
+  发布时用 `JPOV_SIGN_CN="Studio XYZ"` 覆盖；**不要**把某个人的证书/私钥提交进仓库。
+
+边界（别指望它解决一切）：
+
+| 场景 | 自签名证书够吗 | 说明 |
+|------|---------------|------|
+| 自己的开发机 / 内网工具 | ✅ | 装一次证书即可，不再弹「未查到此应用的发布信息」 |
+| 发给同事的机器 | ✅ | 对方跑一次 `install_cert.bat` |
+| 对外公开发布 | ❌ | 需要 CA 代码签名证书（OV/EV）或 MSIX / 商店分发；自签名在别人机器上仍是未知发布者 |
+
+另外：从网络复制来的 exe 带 **MOTW**（网络来源标记），即使签名也可能被拦 ——
+右键属性勾「解除锁定」或 `Unblock-File -Path <exe>`。
+
 ## 各 viewer 的 Windows 构建现状
 
 目前已构建出 `.exe` 的（可直接拷到 Windows 跑）：
