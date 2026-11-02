@@ -53,11 +53,12 @@ public:
     // ── 场景静态资源（Init() 后装配一次，不在 OneIteration 里重复构造/上传）──
     uint32_t box_mesh_ = 0;              // 1×1×1 方块（三块共用）
     uint32_t ground_mesh_ = 0;           // 40×40 地面 quad
+    // 材质阶梯用的长条（20×200）：四段沿 X 并排，见 skylight_scene.h 的 kLadder*。
+    uint32_t ground_strip_mesh_ = 0;
     jpov::PBRMaterial mat_low_;          // 低反（rough=1.0, metal=0）
     jpov::PBRMaterial mat_high_;         // 高光（rough=0.05, metal=0）
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
-    jpov::PBRMaterial mat_mirror_;       // 镜面地板（metallic=1, roughness=0.02）—— SSR 场景
     jpov::PBRMaterial mat_clutter_;      // 镜子上方随机模型（粗糙灰）
     jpov::PBRMaterial mat_mirror_skin_;  // 镜面皮肤（曲面 SSR 反射体：人）
 
@@ -151,6 +152,20 @@ public:
     // 交互窗口是否绘制光照面板（headless 拍摄=false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
 
+    // 档位 → 地面材质（0..3；四段拼接由调用方按 kLadderMaterial 逐段取）。
+    static jpov::PBRMaterial FloorMaterialOf(int preset) {
+        switch (preset) {
+            case 0:
+                return jpov_skylight::FloorMirrorMaterial();
+            case 1:
+                return jpov_skylight::FloorMetalMaterial();
+            case 2:
+                return jpov_skylight::FloorStoneMaterial();
+            default:
+                return jpov_skylight::FloorRockMaterial();
+        }
+    }
+
     // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”时置 false，
     // 排除方块遮挡与受光干扰，只留天光背景。
     void SetShowScene(bool show) { show_scene_ = show; }
@@ -196,12 +211,15 @@ public:
     // 只对 ssr_reflector 的物体生效（镜面地板）；**必须同时开环境镜面**（合成要重算并替换
     // 那一项，没有 env 就没有可替换的对象）。关掉时整条链路零开销。
     bool  ssr_on_ = false;
+    // 地面材质档位（镜面 / 金属 / 石砖 / 岩石 / 四段拼接）。见 skylight_scene.h 的预设。
+    int   floor_preset_ = 0;
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     int   ssr_depth_mode_ = 0;      // 0 = 软权 1/(rel+ε)+真剪影硬拒；1 = 不判深度（Unity 式）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
-    float ssr_roughness_ = 0.02f;   // 反射层材质（本版全场景一套）
+    float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
+    float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
     int   ssr_debug_ = 0;
     void SetSsr(bool on) { ssr_on_ = on; }
 
@@ -284,14 +302,30 @@ public:
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
         if (draw_scene && scene_index_ == 1) {
-            // 镜面地板：ground_mesh_ 是 40×40 的 quad（顶点 y=0），scale=5 ⇒ 200×200 m。
-            // ssr_reflector=true 时属性 pass 会把它再画一遍写视空间法线。
-            cmds->DrawObject3D(ground_mesh_, mat_mirror_,
-                               /*center*/ {0.0f, 0.0f, 0.0f},
-                               /*up*/     {0.0f, 1.0f, 0.0f},
-                               /*front*/  {0.0f, 0.0f, 1.0f},
-                               /*scale*/ 5.0f, /*highlight*/ false, /*picking_id*/ 0,
-                               /*wind*/ std::nullopt, /*ssr_reflector*/ true);
+            // 地面：按档位选材质。四段拼接时每段各画一遍（材质不同 ⇒ 必须是不同命令；
+            // 属性 pass 会逐物体上传该段的 F0/roughness，合成层逐像素取 —— 这正是
+            // 2026-11-02 那两条修正要验证的东西）。
+            if (floor_preset_ == jpov_skylight::kFloorLadder) {
+                for (int i = 0; i < jpov_skylight::kLadderSegments; ++i) {
+                    const jpov::PBRMaterial mat = FloorMaterialOf(
+                        jpov_skylight::kLadderMaterial[i]);
+                    const float x = jpov_skylight::kLadderCenterX(i);
+                    cmds->DrawObject3D(ground_strip_mesh_, mat,
+                                       /*center*/ {x, 0.0f, 0.0f},
+                                       /*up*/     {0.0f, 1.0f, 0.0f},
+                                       /*front*/  {0.0f, 0.0f, 1.0f},
+                                       /*scale*/  1.0f, /*highlight*/ false, /*picking_id*/ 0,
+                                       /*wind*/ std::nullopt, /*ssr_reflector*/ true);
+                }
+            } else {
+                // 整块地面：ground_mesh_ 是 40×40 的 quad（顶点 y=0），scale=5 ⇒ 200×200 m。
+                cmds->DrawObject3D(ground_mesh_, FloorMaterialOf(floor_preset_),
+                                   /*center*/ {0.0f, 0.0f, 0.0f},
+                                   /*up*/     {0.0f, 1.0f, 0.0f},
+                                   /*front*/  {0.0f, 0.0f, 1.0f},
+                                   /*scale*/ 5.0f, /*highlight*/ false, /*picking_id*/ 0,
+                                   /*wind*/ std::nullopt, /*ssr_reflector*/ true);
+            }
             for (const Clutter& c : clutter_) {
                 cmds->DrawObject3D(box_mesh_, mat_clutter_, c.center,
                                    {0.0f, 1.0f, 0.0f}, c.front, c.scale);
@@ -338,9 +372,8 @@ public:
             sc.resolution_scale = ssr_scale_;
             sc.thickness_pixels = ssr_thickness_px_;
             sc.max_ray_pixels = ssr_max_ray_px_;
-            sc.roughness = ssr_roughness_;
-            sc.base_color = {0.03f, 0.03f, 0.03f};
-            sc.metallic = 1.0f;
+            sc.roughness_to_lod = ssr_rough_to_lod_;
+            sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.upsample_depth_mode = ssr_depth_mode_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
@@ -446,11 +479,21 @@ private:
         // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
         ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
 
-        // ── 右列 9..12：SSR 的分辨率 / 厚度 / 预算 / 粗糙度 ──
+        // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
         {
+            // 地面材质下拉（2026-11-02）：镜面 / 金属 / 光滑石砖 / 粗糙岩石 / 四段拼接。
+            // 材质**逐物体**进属性纹理 ⇒ 四段拼接里每一段各用各的 F0/roughness，
+            // 这是"同屏多反射材质"这条通路的唯一验收手段。
+            std::vector<const char*> floors(jpov_skylight::kFloorPresetNames,
+                                            jpov_skylight::kFloorPresetNames
+                                                + jpov_skylight::kFloorPresetCount);
+            int fp = floor_preset_;
+            if (ui_.Combo("地面材质", &fp, floors, row(1, 9))) {
+                floor_preset_ = fp;
+            }
             // 降采样倍率滑条 N（1..4）：分辨率 = 1/N。N=3 也能跑（整数格 + 加权，不要求 2 的幂）。
             float n_f = static_cast<float>(ssr_downscale_n_);
-            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 9), 1.0f, 4.0f, 0)) {
+            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 10), 1.0f, 4.0f, 0)) {
                 ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
@@ -458,15 +501,20 @@ private:
             const std::vector<const char*> depth_modes = {"升采样深度：软权 1/(rel+ε)",
                                                           "升采样深度：不判（Unity 式）"};
             int dm = ssr_depth_mode_;
-            if (ui_.Combo("升采样深度判据", &dm, depth_modes, row(1, 13))) {
+            if (ui_.Combo("升采样深度判据", &dm, depth_modes, row(1, 11))) {
                 ssr_depth_mode_ = dm;
             }
-            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 10), 1.0f, 24.0f, 1);
+            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
-            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 11), 40.0f, 800.0f, 0)) {
+            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
                 ssr_max_ray_px_ = static_cast<int>(mrp);
             }
-            ui_.SliderFloat("SSR 反射体 roughness", &ssr_roughness_, row(1, 12), 0.0f, 0.4f, 3);
+            // 磨砂强度：roughness² × 该值 = 采样的 mip 级。0 = 永远锐利（旧行为）。
+            ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 14),
+                            0.0f, 8.0f, 2);
+            // 发射线门槛：超过它的粗糙度直接用 env（省射线，且本来也糊得看不出形状）。
+            ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 15),
+                            0.2f, 1.0f, 2);
         }
         // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
         {

@@ -48,6 +48,7 @@ void SsrIntegration::Init(ShaderManager* shader_mgr) {
         shader_mgr_->GetOrCreate("ssr_attr_skinned", {kSkinnedVs, kSsrAttrSkinnedFs, {}});
 
     downsample_.Init(shader_mgr_);
+    filter_.Init(shader_mgr_);
     fusion_.Init(shader_mgr_);
     ssr_.Init(shader_mgr_);
     initialized_ = true;
@@ -59,6 +60,7 @@ void SsrIntegration::Finalize() {
     }
     ssr_.Finalize();
     fusion_.Finalize();
+    filter_.Finalize();
     downsample_.Finalize();
 
     if (copy_fbo_ != 0) {
@@ -175,8 +177,8 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
     // ── ② 输入准备（降采样）：全分辨率 → SSR 分辨率 ──
-    downsample_.Run(in.hdr_color_tex, in.scene_depth_tex, in.attr_tex, in.full_w, in.full_h,
-                    scale);
+    downsample_.Run(in.hdr_color_tex, in.scene_depth_tex, in.attr_tex, in.attr_mat_tex,
+                    in.full_w, in.full_h, scale);
 
     // ── ③ 算法（模块）：SSR 分辨率 → radiance + ray_ratio + 类型 ──
     SsrInputs si;
@@ -194,14 +196,21 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.max_distance_m = in.cfg.max_distance_m;
     si.max_ray_pixels = in.cfg.max_ray_pixels;
     si.tile_size = in.cfg.tile_size;
-    si.roughness = in.cfg.roughness;   // 随输入传下去（模块本版不用，融合/升级点用）
+    si.rough_tex = downsample_.rough_tex();       // 逐像素 roughness（发射线截止用）
+    si.roughness_cutoff = in.cfg.roughness_cutoff;
     si.debug_reason = false;
     const SsrOutputs& outs = ssr_.Render(si);
 
-    // ── ④ 融合：升采样 + 替换环境镜面项，写回 3D FBO 颜色 ──
+    // ── ④ 粗糙度预滤波：A 预乘 mip 链（决定了"磨砂"的模糊量）──
+    filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height());
+
+    // ── ⑤ 融合：升采样 + 替换环境镜面项，写回 3D FBO 颜色 ──
     SsrFusionInputs fi;
     fi.hdr_copy_tex = copy_tex_;
     fi.attr_tex = in.attr_tex;
+    fi.attr_mat_tex = in.attr_mat_tex;
+    fi.ssr_mip_tex = filter_.mip_tex();
+    fi.ssr_mip_levels = filter_.level_count();
     fi.scene_depth_tex = in.scene_depth_tex;
     fi.full_w = in.full_w;
     fi.full_h = in.full_h;

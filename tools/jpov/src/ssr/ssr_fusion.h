@@ -5,17 +5,23 @@
 //
 //   out = hdr + mask · A · ao · (ssr_L · weight − env_term)
 //
-//   mask     = 反射体（属性纹理 .a > 0.75）
-//   A        = 本像素 SSR 是否有可用结果（0 ⇒ 整项抵消，与"没开 SSR"逐字节相同）
+//   mask     = 反射体（属性纹理附件0的 .a > 0.75）
+//   A        = 预滤波 mip 链里**该 roughness 对应的那一级**的覆盖率（0 ⇒ 整项抵消，
+//              与"没开 SSR"逐字节相同）
+//   ssr_L    = 同一级的覆盖率加权平均辐亮度
 //   weight   = F0·AB.x + AB.y（EnvBrdfApprox）
-//   env_term = EnvSpecularTerm(...)（与 3D pass 同一份实现，见 env_specular.h）
+//   env_term = EnvSpecularTermF0(...)（与 3D pass 同一份实现，见 env_specular.h）
+//
+// 2026-11-02：材质与模糊都改成**逐像素** ——
+//   · F0/roughness 来自属性纹理**附件 1**（rgb = F0，a = roughness），不再用一套 uniform
+//     材质（旧做法的直接后果：同屏两种反射材质必然算错，10-31 铬人腰部蓝光）。
+//   · ssr_L/A 来自 `SsrFilter` 的 A 预乘 mip 链，LOD = roughness² · roughness_to_lod：
+//     粗糙度连续变化 ⇒ 反射连续变糊（"逐渐磨砂"），并且在覆盖率掉光处自然交回 env。
 //
 // 已知限制（本版，写清楚免得当成 bug）：
-//   · **反射体只支持"全场景一套材质"**（base_color/metallic/roughness/ao 是 uniform）。
-//     属性纹理只写视空间法线，不写逐像素材质。升级点：把 F0/roughness 放进属性纹理的
-//     额外附件即可，接口不变（现在故意不做）。
-//   · **AO 不逐像素**（用 uniform，默认 1）。
-//   · **粗糙度不做 LOD**：只对 roughness ≈ 0 的反射体语义正确。
+//   · **AO 不逐像素**（用 uniform，默认 1；本管线没有 SSAO）。
+//   · **模糊半径不随距离补偿**：屏幕空间 mip 的角分辨率在远处偏大（远景倒影糊得比
+//     物理上该有的更多）。要修需要"到反射面的距离"，那要 SSR 输出额外的命中距离图。
 //
 // 升采样的值域项见 SsrConfig 的 upsample_* 注释：连续软权 + 权重下限，
 // 外加"1/z 对屏幕坐标仿射"的预测式深度判据（根治掠射条纹）。
@@ -34,6 +40,7 @@ struct SsrFusionInputs {
     // 全分辨率
     unsigned int hdr_copy_tex = 0;     // RGBA16F：3D 不透明 pass 的颜色副本
     unsigned int attr_tex = 0;         // RGBA16F：rgb = 视空间法线，a = 掩码编码
+    unsigned int attr_mat_tex = 0;     // RGBA16F：rgb = F0，a = roughness（逐像素材质）
     unsigned int scene_depth_tex = 0;  // R32F：MRT#1 的窗口深度
     int full_w = 0;
     int full_h = 0;
@@ -43,6 +50,9 @@ struct SsrFusionInputs {
     unsigned int ssr_type_tex = 0;      // R8UI：命中/逃逸类型（见 ssr_renderer.h）
     unsigned int down_depth_tex = 0;    // R32F
     unsigned int down_normal_tex = 0;   // RGBA16F
+    // 粗糙度预滤波结果（SsrFilter::mip_tex()）：RGBA16F + 完整 mip 链。
+    unsigned int ssr_mip_tex = 0;
+    int ssr_mip_levels = 0;
     int ssr_w = 0;
     int ssr_h = 0;
     int scale = 1;                      // = 1 / resolution_scale（1..4）

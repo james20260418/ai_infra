@@ -101,18 +101,22 @@ inline constexpr float kPersonTargetHeight = 1.7f;   // 归一后的世界身高
 inline constexpr float kGroundY     = 0.0f;    // 地面高度（方块底面所在平面）
 inline constexpr float kGroundHalf  = 20.0f;   // 40×40 米
 
-inline jpov::MeshData MakeGroundQuad() {
+// 地面 quad。默认 40×40（老调用点不变）；材质阶梯用的是 20×200 的长条。
+// 参数是**半**尺寸（与 kGroundHalf 同语义）。
+inline jpov::MeshData MakeGroundQuad(float half_x = kGroundHalf,
+                                     float half_z = kGroundHalf) {
     jpov::MeshData mesh;
     mesh.flags = static_cast<jpov::MeshVertexFlags>(
         static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
         static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
     const float y = kGroundY;
-    const float h = kGroundHalf;
+    const float hx = half_x;
+    const float hz = half_z;
     mesh.positions = {
-        {-h, y,  h},  // 0
-        { h, y,  h},  // 1
-        { h, y, -h},  // 2
-        {-h, y, -h},  // 3
+        {-hx, y,  hz},  // 0
+        { hx, y,  hz},  // 1
+        { hx, y, -hz},  // 2
+        {-hx, y, -hz},  // 3
     };
     mesh.normals = {
         {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
@@ -128,16 +132,6 @@ inline jpov::PBRMaterial GroundMaterial() {
         /*color*/ {0.35f, 0.35f, 0.35f, 1.0f},
         /*metallic*/ 0.0f,
         /*roughness*/ 1.0f);
-}
-
-// SSR 验收场景用的材质：**大镜子**（metallic=1、roughness≈0）。
-// 颜色压很暗：纯金属没有漫反射，画面亮度几乎全来自环境/SSR 反射，
-// 这样"倒影对不对"一眼可见（底色不会盖住反射）。
-inline jpov::PBRMaterial MirrorMaterial() {
-    return jpov::PBRMaterial::SolidColorMR(
-        /*color*/ {0.03f, 0.03f, 0.03f, 1.0f},
-        /*metallic*/ 1.0f,
-        /*roughness*/ 0.02f);
 }
 
 // 镜面皮肤的蓝人（2026-10-31）：曲面的 SSR 反射体（"铬人"）。
@@ -159,6 +153,58 @@ inline jpov::PBRMaterial MirrorClutterMaterial() {
         /*metallic*/ 0.0f,
         /*roughness*/ 0.6f);
 }
+
+// ── 反射地面材质阶梯（2026-11-02，SSR 粗糙度验收用）──
+//
+// 四段刻意只差 metallic / roughness（albedo 各自取该材质的常识值），用来回答一个问题：
+// "镜面项在各类材质上表现是否合理"。期望观感（低机位掠射）：
+//   镜面  metal=1 r=0.02 → 100% 反射、锐利，能数清倒影里的物体
+//   金属  metal=1 r=0.30 → 100% 反射但明显发糊，颜色被金属 F0 染成暖金
+//   石砖  metal=0 r=0.20 → 只有 4% 反射（近处几乎看不到倒影），**远处掠射变亮**
+//   岩石  metal=0 r=0.85 → 反射糊成一层很淡的整体天光，看不出形状
+// ⚠️ 远处变亮（掠射菲涅尔 → 1）是**正确**行为，不是 bug；区别在近处。
+inline jpov::PBRMaterial FloorMirrorMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.90f, 0.90f, 0.90f, 1.0f},
+                                           /*metallic*/ 1.0f, /*roughness*/ 0.02f);
+}
+inline jpov::PBRMaterial FloorMetalMaterial() {
+    // 暖金：金属的 F0 就是 base_color，所以"金色"来自这一行而不是高光颜色。
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.95f, 0.76f, 0.42f, 1.0f},
+                                           /*metallic*/ 1.0f, /*roughness*/ 0.30f);
+}
+inline jpov::PBRMaterial FloorStoneMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.46f, 0.46f, 0.44f, 1.0f},
+                                           /*metallic*/ 0.0f, /*roughness*/ 0.20f);
+}
+inline jpov::PBRMaterial FloorRockMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.40f, 0.38f, 0.35f, 1.0f},
+                                           /*metallic*/ 0.0f, /*roughness*/ 0.85f);
+}
+
+// 地面材质档位（面板 / headless 拍摄共用；索引即下拉顺序）。
+//   0..3 = 整块地面一种材质；4 = **四段拼接**（从近到远：镜面→金属→石砖→岩石）。
+inline constexpr int kFloorLadder = 4;
+inline constexpr int kFloorPresetCount = 5;
+inline const char* const kFloorPresetNames[kFloorPresetCount] = {
+    "镜面 (metal=1, r=0.02)", "金属 (metal=1, r=0.30)", "光滑石砖 (metal=0, r=0.20)",
+    "粗糙岩石 (metal=0, r=0.85)", "四段拼接（近→远）"};
+
+// 四段拼接：**沿 X 并排**（左→右 = 镜面/金属/石砖/岩石），每段 20 m 宽、200 m 深。
+//
+// 为什么不是沿 Z 从近到远排（第一版就是那样，已否掉）：沿 Z 排时四段的**掠射角**不同，
+// 而掠射角对镜面强度的影响（菲涅尔）比 roughness 还大 ⇒ 四段之间的差别混着两个变量，
+// 根本判断不了"这个 roughness 做得对不对"。沿 X 并排则四段到相机的距离/仰角几乎相同，
+// 唯一的差别就是材质本身 —— 这才是验收该有的对照。
+//
+// 深度给 200 m 是为了让场景里原有的散布方块（r ≤ 30）全部落在这四条带上。
+inline constexpr int kLadderSegments = 4;
+inline constexpr float kLadderStripHalfWidth = 10.0f;   // 20 m 宽
+inline constexpr float kLadderStripHalfDepth = 100.0f;  // 200 m 深
+// 第 i 段的中心 x（-30 / -10 / +10 / +30 ⇒ 合起来正好 ±40 m）。
+inline constexpr float kLadderCenterX(int i) {
+    return -30.0f + 20.0f * static_cast<float>(i);
+}
+inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左→右
 
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //

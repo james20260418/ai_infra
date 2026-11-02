@@ -42,3 +42,18 @@ cc_test(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# SSR 粗糙度预滤波（A 预乘 mip 链）的 GPU 单测：覆盖率加权 / 空像素填充 / 覆盖率随 mip 下降。
+cc_test(
+    name = "ssr_filter_test",
+    srcs = ["ssr_filter_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/ssr:ssr_filter",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

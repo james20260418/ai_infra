@@ -97,11 +97,15 @@ public:
     // 跑一趟。scale = 1/N（用 IsValidScale 校验）。
     // 返回后 color_tex()/depth_tex()/normal_tex() 为本帧结果，尺寸见 width()/height()。
     void Run(unsigned int full_color_tex, unsigned int full_depth_tex,
-             unsigned int full_attr_tex, int full_w, int full_h, int scale);
+             unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
+             int full_w, int full_h, int scale);
 
     unsigned int color_tex() const { return color_tex_; }    // RGBA16F，命中源色
     unsigned int depth_tex() const { return depth_tex_; }    // R32F，窗口深度
     unsigned int normal_tex() const { return normal_tex_; }  // RGBA16F，rgb=视空间法线, a=掩码
+    // R16F：反射层**逐像素** roughness（属性纹理附件 1 的 .a）。
+    // 只用于 march/resolve 的"太粗糙就不发射线"截止；材质本身（F0）由合成层在全分辨率读。
+    unsigned int rough_tex() const { return rough_tex_; }
     int width() const { return width_; }
     int height() const { return height_; }
 
@@ -115,6 +119,7 @@ private:
     unsigned int color_tex_ = 0;
     unsigned int depth_tex_ = 0;
     unsigned int normal_tex_ = 0;
+    unsigned int rough_tex_ = 0;
     int width_ = 0;
     int height_ = 0;
 };

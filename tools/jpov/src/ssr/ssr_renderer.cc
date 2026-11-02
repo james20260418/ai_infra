@@ -41,11 +41,13 @@ namespace {
 //    ⇒ **每个像素都被判成命中**。这一条是 CPU/GPU 对拍当场抓出来的（2026-10-29）。
 constexpr int kTexUnitMarchDepth = 0;
 constexpr int kTexUnitMarchNormal = 1;
+constexpr int kTexUnitMarchRough = 2;
 constexpr int kTexUnitResolveSlice = 0;
 constexpr int kTexUnitResolveDepth = 1;
 constexpr int kTexUnitResolveNormal = 2;
 constexpr int kTexUnitResolveColor = 3;
-constexpr int kTexUnitSize = 4;
+constexpr int kTexUnitResolveRough = 4;
+constexpr int kTexUnitSize = 5;
 
 bool IsValidTile(int tile) {
     return tile == 1 || tile == 2 || tile == 4 || tile == 8;
@@ -216,6 +218,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK_NE(in.color_tex, 0u) << "SsrInputs::color_tex 未设置";
     CHECK_NE(in.depth_tex, 0u) << "SsrInputs::depth_tex 未设置";
     CHECK_NE(in.normal_tex, 0u) << "SsrInputs::normal_tex 未设置";
+    CHECK_NE(in.rough_tex, 0u) << "SsrInputs::rough_tex 未设置（逐像素 roughness）";
     CHECK_GT(in.width, 0) << "SsrInputs::width 未设置";
     CHECK_GT(in.height, 0) << "SsrInputs::height 未设置";
     CHECK_GT(in.near_plane, 0.0f) << "SsrInputs::near_plane 未设置";
@@ -290,7 +293,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
     prev_cull = glIsEnabled(GL_CULL_FACE);
     prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0};
+    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0, 0};
     for (int u = 0; u < kTexUnitSize; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind[u]);
@@ -341,14 +344,18 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uSlabPixels", derived.slab_pixels);
         set1i(prog, "uStepsPerLane", derived.steps_per_lane);
         set1f(prog, "uMaxRayPixels", static_cast<float>(in.max_ray_pixels));
+        set1f(prog, "uRoughnessCutoff", in.roughness_cutoff);
     };
     upload_common(prog_march_);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchDepth);
     glBindTexture(GL_TEXTURE_2D, in.depth_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchNormal);
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
+    glBindTexture(GL_TEXTURE_2D, in.rough_tex);
     set1i(prog_march_, "uDepth", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
+    set1i(prog_march_, "uRough", kTexUnitMarchRough);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──
@@ -369,6 +376,9 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     set1i(prog_resolve, "uDepth", kTexUnitResolveDepth);
     set1i(prog_resolve, "uNormal", kTexUnitResolveNormal);
     set1i(prog_resolve, "uColor", kTexUnitResolveColor);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveRough);
+    glBindTexture(GL_TEXTURE_2D, in.rough_tex);
+    set1i(prog_resolve, "uRough", kTexUnitResolveRough);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── 恢复调用方的状态 ──

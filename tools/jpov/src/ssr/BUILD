@@ -62,6 +62,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# SSR 粗糙度预滤波：A 预乘 mip 链（覆盖率加权 + 空像素填充）。
+# 它决定了"磨砂"到底有多糊：合成层按逐像素 roughness 采 textureLod。
+cc_library(
+    name = "ssr_filter",
+    srcs = ["ssr_filter.cc"],
+    hdrs = ["ssr_filter.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ssr_shader",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # SSR 融合：升采样 + 用 SSR 结果替换环境镜面项。
 cc_library(
     name = "ssr_fusion",
@@ -92,6 +113,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":ssr_downsample",
+        ":ssr_filter",
         ":ssr_fusion",
         ":ssr_renderer",
         ":ssr_shader",

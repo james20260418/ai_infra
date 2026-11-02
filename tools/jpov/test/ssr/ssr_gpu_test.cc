@@ -253,6 +253,7 @@ struct Fixture {
     unsigned int depth_tex = 0;
     unsigned int normal_tex = 0;
     unsigned int color_tex = 0;
+    unsigned int rough_tex = 0;
     SsrInputs in;
 
     void Setup(const Scene& sc, int tile, int max_ray_pixels) {
@@ -282,10 +283,18 @@ struct Fixture {
             normal_tex = UploadFloatTexture(rgba, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
         }
         color_tex = UploadFloatTexture(scene.color, kWidth, kHeight, GL_RGBA16F, GL_RGBA);
+        // 逐像素 roughness（2026-11-02 起是必需输入）。本文件测的是**几何/取色**，
+        // 与材质无关 ⇒ 全 0 + cutoff=1（永不跳过），等价于旧行为、不改变任何断言。
+        {
+            std::vector<float> ones(static_cast<size_t>(kWidth) * kHeight, 0.0f);
+            rough_tex = UploadFloatTexture(ones, kWidth, kHeight, GL_R16F, GL_RED);
+        }
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
         in.depth_tex = depth_tex;
         in.normal_tex = normal_tex;
+        in.rough_tex = rough_tex;
+        in.roughness_cutoff = 1.0f;
         in.width = kWidth;
         in.height = kHeight;
         in.near_plane = kNear;
@@ -310,6 +319,9 @@ struct Fixture {
         }
         if (color_tex != 0) {
             glDeleteTextures(1, &color_tex);
+        }
+        if (rough_tex != 0) {
+            glDeleteTextures(1, &rough_tex);
         }
     }
 };

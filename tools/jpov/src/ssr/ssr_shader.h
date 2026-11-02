@@ -36,6 +36,10 @@ inline constexpr const char* kSsrGlslVersion = "#version 330 core\n";
 inline constexpr const char* kSsrCommonGlsl = R"glsl(
 uniform sampler2D uDepth;     // R32F：MRT#1 的 gl_FragCoord.z
 uniform sampler2D uNormal;    // 反射体视空间法线 .xy（z 由 sqrt 重建）
+// 反射层**逐像素** roughness（R16F，降采样后）。2026-11-02 起材质进属性纹理，
+// 不再有"全场景一套粗糙度"；这里只用于一件事：超过 uRoughnessCutoff 的像素**不发射线**。
+uniform sampler2D uRough;
+uniform float uRoughnessCutoff;   // [0,1]；1 = 永不跳过（等价于旧行为）
 uniform vec2  uRes;           // 镜面像素栅格 (W, H)
 uniform float uNear;
 uniform float uFar;
@@ -78,6 +82,13 @@ bool SsrHasDepth(float depth) {
 // 约 1 米、命中错像素。存三分量后单分量 fp16 误差 5e-4 ⇒ 方向误差 ~0.03°（差 60 倍）。
 vec3 SsrNormalOf(vec4 attr) {
     return normalize(attr.xyz);
+}
+
+// 该镜面像素的 roughness（逐像素材质）。> uRoughnessCutoff ⇒ 本像素不发射线：
+// 粗糙表面的真实答案是一个**宽积分**，单条镜面射线对它没有意义（业界做法同：
+// FidelityFX SSSR 的 tile classification 直接不给高粗糙像素发射线，交回 env 探针）。
+float SsrRoughnessAt(ivec2 mir) {
+    return texelFetch(uRough, mir, 0).r;
 }
 
 // 窗口深度 → 视距（米）。ssr_math.h::DepthFromWindowDepth（含 NaN 守卫）。
@@ -241,6 +252,10 @@ void main() {
     if (!SsrHasDepth(texelFetch(uDepth, mir, 0).r)) {
         return;
     }
+    // 太粗糙 ⇒ 不发射线（预算省下来）：单条镜面射线表达不了宽反射瓣，交给 env 的 mip。
+    if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
+        return;
+    }
     SsrRay ray;
     if (!SsrBuildRay(mir, ray)) {
         return;
@@ -379,6 +394,8 @@ void main() {
     bool have_hit = best < uSentinel * 0.5;
     if (!SsrHasDepth(texelFetch(uDepth, mir, 0).r)) {
         type = 0u;                         // kNone：本像素不是反射候选
+    } else if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
+        type = 0u;                         // kNone：太粗糙，本像素没有发射线
     } else {
         SsrRay ray;
         if (!SsrBuildRay(mir, ray)) {
@@ -387,9 +404,11 @@ void main() {
             // s 是**命中格内的中点** ⇒ floor 回去一定是那个命中格（ssr_math.h::CellAtSigma）。
             float s = clamp(best, ray.enter, ray.exit);
             vec2 pos = ray.s0 + ray.dir * s;
-            ivec2 cell = ivec2(floor(pos));
-            cell = clamp(cell, ivec2(0), ivec2(int(uRes.x) - 1, int(uRes.y) - 1));
-            rgb = texelFetch(uColor, cell, 0).rgb;
+            // 双线性取色（2026-11-02，替换原来的 texelFetch 最近邻）：
+            // pos 是**连续**的屏幕坐标（像素单位，texel 中心 = +0.5），所以 uv = pos / uRes
+            // 正好落在正确的双线性位置。最近邻会让倒影边缘逐像素跳一格 —— 这正是"反射
+            // 锯齿"的主要内容（斜面/球面上尤其明显），改成线性后免费好一大截。
+            rgb = texture(uColor, pos / uRes).rgb;
             // 预算占用率：分母是**常量**预算（不是 span）。提前结束的射线比值天然小 ⇒ 不误淡出。
             ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
             hit_s = s;
@@ -418,9 +437,15 @@ void main() {
 // ── 属性 pass（接入层用；不属于模块契约）──
 // 画**所有** object3d（不只反射体）：SSR 的命中面朝向判据需要**遮挡物**的视空间法线，
 // 而遮挡物不是反射体。只测不写深度 ⇒ 仍然只写"真正可见的那一层"。
-// 输出：rgb = **完整三维**视空间法线；a = 掩码（1 反射体 / 0.5 有法线非反射体 / 0 无数据）。
+// 输出（**两个附件**，MRT）：
+//   location 0  rgb = **完整三维**视空间法线；a = 掩码（1 反射体 / 0.5 有法线非反射体 / 0 无数据）
+//   location 1  rgb = **F0**（= mix(0.04, base_color, metallic)）；a = **roughness**
 // 合成层只对 a > 0.75（= 反射体）的像素叠 SSR；模块自己**不读** .a。
-// **不写材质**（本版融合层用一套 uniform，见 ssr_fusion.h 的"已知限制"）。
+//
+// 为什么材质要进属性纹理（2026-11-02）：合成层原来用 `SsrConfig` 里的**一套** F0/roughness，
+// 同屏只要有两种反射材质就必然算错（10-31 已实测：铬人腰部一圈蓝光，因为地板 F0=0.03 被
+// 拿来重算了人的 env 项）。F0 是 per-material、roughness 是"要糊多少"的输入，两者都必须
+// 逐像素。ao 仍是全局（本管线没有 SSAO，材质 ao 常量对场景无意义）。
 //
 // 法线在 VS 里算完再传：`mat3(uModel)` 把物体法线转到世界，`uWorldToView` 再转到视空间。
 // 两个矩阵都是 per-object / per-frame 的 uniform，由 Renderer 上传。
@@ -448,7 +473,11 @@ inline constexpr const char* kSsrAttrSkinnedFs = R"glsl(
 in vec3 vWorldNormal;
 uniform mat3  uWorldToView;
 uniform float uAttrIsReflector;
+uniform vec3  uAttrBaseColor;
+uniform float uAttrMetallic;
+uniform float uAttrRoughness;
 out vec4 FragAttr;
+out vec4 FragMat;
 void main() {
     vec3 n_view = normalize(uWorldToView * normalize(vWorldNormal));
     // 双面渲染：背面法线翻转 —— 与主 pass（skeleton_renderer.h 的 gl_FrontFacing 段）同一约定。
@@ -456,6 +485,7 @@ void main() {
     // 命中面朝向判据 dot(R,N) 会给出与着色相反的结论（2026-11-01）。
     if (!gl_FrontFacing) n_view = -n_view;
     FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);   // 同 kSsrAttrFs
+    FragMat = vec4(mix(vec3(0.04), uAttrBaseColor, uAttrMetallic), uAttrRoughness);
 }
 )glsl";
 
@@ -488,17 +518,29 @@ inline constexpr const char* kSsrAttrCutoutFs = R"glsl(
 in vec3 vNormalView;
 in vec2 vTexCoord;
 uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
+uniform vec3  uAttrBaseColor;     // 无纹理时 F0 的来源（有纹理时用采到的 rgb）
+uniform float uAttrMetallic;
+uniform float uAttrRoughness;
 uniform sampler2D uBaseColorTex;  // 由 DrawObject3DSelected 的 cutout 分支上传/绑定
 uniform int   uHasBaseColorTex;
 uniform float uAlphaCutoff;
 out vec4 FragAttr;
+out vec4 FragMat;
 void main() {
-    if (uHasBaseColorTex == 1 && texture(uBaseColorTex, vTexCoord).a < uAlphaCutoff) {
-        discard;   // 与主 pass 的 JPOV_ALPHA_CUTOUT 分支同一判据
+    // 有纹理就连 F0 一起用纹理色 —— 这是本 pass 唯一能拿到逐像素 baseColor 的地方
+    //（非镂空变体没有 UV，只能用材质常量）。
+    vec3 base = uAttrBaseColor;
+    if (uHasBaseColorTex == 1) {
+        vec4 texel = texture(uBaseColorTex, vTexCoord);
+        if (texel.a < uAlphaCutoff) {
+            discard;   // 与主 pass 的 JPOV_ALPHA_CUTOUT 分支同一判据
+        }
+        base = texel.rgb;
     }
     vec3 n_view = vNormalView;
     if (!gl_FrontFacing) n_view = -n_view;   // 同 kSsrAttrFs
     FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);
+    FragMat = vec4(mix(vec3(0.04), base, uAttrMetallic), uAttrRoughness);
 }
 )glsl";
 
@@ -506,9 +548,19 @@ inline constexpr const char* kSsrAttrFs = R"glsl(
 #version 330 core
 in vec3 vNormalView;
 uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
+// 逐像素材质（per-object uniform）：主 pass 用的同一份 PBRMaterial 常量。
+// base_color 若来自纹理，这里用的是材质常量（见 ssr_shader.h 顶部"已知偏差"）。
+uniform vec3  uAttrBaseColor;
+uniform float uAttrMetallic;
+uniform float uAttrRoughness;
 // rgb = **完整三维视空间法线**（不再只存 .xy 重建 z，见 SsrNormalOf 的注释）；
 // a   = 掩码编码：1.0 = 反射体，0.5 = 有法线但不反射，0 = 无数据（未绘制/清屏）
 out vec4 FragAttr;
+out vec4 FragMat;    // rgb = F0；a = roughness
+// F0 的唯一出处（与 env_specular.h 的 EnvSpecularTerm 同一式）：
+vec3 SsrF0(vec3 base_color, float metallic) {
+    return mix(vec3(0.04), base_color, metallic);
+}
 // ⚠️ 双面材质（`double_sided` 会关背面剔除）**必须**在这里翻转法线，与主 pass
 //    object3d_renderer.h 的 `if (!gl_FrontFacing) N = -N;` 保持同一约定。
 //    2026-11-01 修：此前属性 pass 不翻 ⇒ 背面可见的薄片（叶卡/布片/条带）写进
@@ -518,6 +570,7 @@ void main() {
     vec3 n_view = vNormalView;
     if (!gl_FrontFacing) n_view = -n_view;
     FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);
+    FragMat = vec4(SsrF0(uAttrBaseColor, uAttrMetallic), uAttrRoughness);
 }
 )glsl";
 

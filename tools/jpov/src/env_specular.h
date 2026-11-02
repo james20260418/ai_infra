@@ -43,8 +43,9 @@ vec2 EnvBrdfApprox(float roughness, float NoV) {
     return vec2(-1.04, 1.04) * a004 + r.zw;
 }
 
-// N = 世界空间法线（已含法线贴图扰动）、V = 片元指向相机。
-vec3 EnvSpecularTerm(vec3 N, vec3 V, float roughness, float metallic, vec3 base_color) {
+// F0 版本：调用方已经知道该像素的 F0（逐像素材质场景，例如 SSR 合成层从属性纹理
+// 读到的 (F0, roughness)）。算式与下面的 vec3 版本逐字相同 —— 后者只是先算 F0 再转调。
+vec3 EnvSpecularTermF0(vec3 N, vec3 V, float roughness, vec3 F0) {
     if (uEnvEnabled == 0) {
         return vec3(0.0);
     }
@@ -57,8 +58,12 @@ vec3 EnvSpecularTerm(vec3 N, vec3 V, float roughness, float metallic, vec3 base_
     // 天空是极低频的渐变，两级 mip 的差别肉眼不可见，故不做 PMREM。
     vec3 prefiltered = textureLod(uEnvCube, R, r * uEnvMaxLod).rgb;
     vec2 AB = EnvBrdfApprox(r, NoV);
-    vec3 F0 = mix(vec3(0.04), base_color, metallic);
     return prefiltered * (F0 * AB.x + AB.y) * uEnvSkyScale;
+}
+
+// N = 世界空间法线（已含法线贴图扰动）、V = 片元指向相机。
+vec3 EnvSpecularTerm(vec3 N, vec3 V, float roughness, float metallic, vec3 base_color) {
+    return EnvSpecularTermF0(N, V, roughness, mix(vec3(0.04), base_color, metallic));
 }
 )glsl";
 

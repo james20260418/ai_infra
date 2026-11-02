@@ -683,7 +683,9 @@ struct EnvSpecular {
 //   ③ 反射求交（SsrRenderer）：每个镜面像素沿反射方向在**屏幕空间**逐格 DDA 前进，
 //        命中判据 = 射线段的深度区间与该格柱体 [z, z+T] 相交（T = 厚度，补偿"深度缓冲
 //        只存最近表面"）。输出三样：命中颜色 / ray_ratio / 类型（命中·天空·出屏·预算耗尽）。
-//   ④ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
+//   ④ 预滤波（SsrFilter）：把 SSR 结果做成**覆盖率加权的 mip 链**（空像素填充 + A 跟着降）
+//        —— 粗糙度越高采的 mip 级越大，倒影就越糊；这是"磨砂感"的唯一来源。
+//   ⑤ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
 //        全分辨率，然后**替换**环境镜面项：
 //          out = hdr + mask·A·ao·(ssr_L·weight − env_term)
 //
@@ -695,7 +697,7 @@ struct EnvSpecular {
 //   · 必须同时设置 `env_specular`（SSR 要重算"被替换掉的那一份"，没有 env 就无从替换，
 //     Renderer 会 LOG(FATAL)）；
 //   · 只有 `ssr_reflector = true` 的物体参与反射（其余像素照常走 env，A=0）；
-//   · 本版反射体**共用一套材质**（见下面的 base_color/metallic/roughness/ao）。
+//   · 反射体材质**逐像素**（属性纹理附件 1：F0 + roughness），同屏可以混搭。
 struct SsrConfig {
     // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
     bool enabled = false;
@@ -744,15 +746,28 @@ struct SsrConfig {
     // 权重下限（相对空间权）：保证 Σw > 0，永不出现"整片黑"的孔洞。
     float upsample_weight_floor = 1.0e-3f;
 
-    // 反射层材质（本版**全场景一套**；升级点 = 逐像素 F0/roughness 进属性纹理）。
-    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换：
-    //   weight   = F0·AB.x + AB.y,  F0 = mix(0.04, base_color, metallic)
-    //   env_term = EnvSpecularTerm(n, V, roughness, metallic, base_color)
-    // ⚠️ 金属的 F0 就是 base_color 本身：给 0.02 会得到一块黑（只有 2% 反射）。
-    Vec3f base_color = {0.02f, 0.02f, 0.02f};
-    float metallic = 1.0f;
-    float roughness = 0.02f;
+    // 全局 AO（本管线没有 SSAO；逐物体的材质 ao 常量对场景无意义，故只留一个旋钮）。
     float ao = 1.0f;
+
+    // ── 粗糙度（2026-11-02 起**逐像素**，来自属性纹理附件 1）──
+    //
+    // 这里不再有 base_color/metallic/roughness：合成层读逐像素 (F0, roughness)。
+    // 旧做法（一套材质）在同屏两种反射材质时必然算错，是 10-31 "铬人腰部蓝光"的根因。
+    //
+    // 两个**全局**旋钮（与材质无关，属于算法/成本）：
+    //
+    // roughness_cutoff：粗糙度**超过它就不发射线**（直接交回 env 的 mip 天空）。
+    //   粗糙表面的正确答案是一个宽积分，单条镜面射线表达不了；FidelityFX SSSR 的
+    //   tile classification 用的是同一条规则。1.0 = 从不跳过（旧行为）。
+    //   建议 0.55~0.7：再高的话 mip 链本身也已经糊到看不出形状，射线纯属浪费。
+    float roughness_cutoff = 0.6f;
+
+    // roughness_to_lod：roughness → mip 级数的斜率（"磨砂"强度）。
+    //   lod = clamp(roughness × 该值, 0, 级数−1)；0 = 永远锐利（旧行为）。
+    //   mip 级在 SSR 分辨率上 ⇒ 「1 级 = 2^LOD 个 SSR 像素」的方框平均（1:2 时 ×2 到屏幕像素）。
+    //   默认 8：0.15→LOD1.2（刚起糊）、0.30→LOD2.4（明显磨砂）、0.55→LOD4.4（近乎无形状）。
+    //   线性而非 r²：理由见 ssr_fusion.cc 里那段注释（r² 会让 0.2~0.4 这段几乎不糊）。
+    float roughness_to_lod = 8.0f;
 
     // 调试视图（关 = 0）：
     //   1 = A 覆盖率灰度（看洞/漏在哪）

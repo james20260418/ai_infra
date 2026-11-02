@@ -173,11 +173,15 @@ struct SsrInputs {
     //   · 非反射体像素的法线**有意义且必须写**：命中面朝向判据要的就是遮挡物的法线。
     unsigned int normal_tex = 0;
 
-    // 反射层材质的粗糙度（[0,1]）。**本模块当前不使用**（march/resolve 与材质无关），
-    // 这里只是把"这一帧用的是什么材质"随输入传进来，供融合层（SsrFusion）与将来的
-    // 逐像素材质升级使用 —— 升级点：属性纹理多一个附件存 F0/roughness，
-    // 融合层按像素取，而不是用 SsrConfig 的一套 uniform。
-    float roughness = 0.0f;
+    // 反射层**逐像素** roughness（R16F，与其它三张同分辨率、同一选点）。
+    // 本模块只用它做一件事：> roughness_cutoff 的像素**不发射线**（成本与质量一起省，
+    // 粗糙表面的正确结果是宽积分，单条镜面射线表达不了）。
+    unsigned int rough_tex = 0;
+
+    // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。
+    // 业界同口径：FidelityFX SSSR 的 tile classification 对高粗糙像素直接不发射线，
+    // 交回预滤波的 environment probe。
+    float roughness_cutoff = 1.0f;
 
     // ---- 分辨率（§2.1 契约 1：输入什么分辨率，输出什么分辨率）----
     int width = 0;   // > 0
