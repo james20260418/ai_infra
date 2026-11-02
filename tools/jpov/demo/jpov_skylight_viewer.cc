@@ -510,6 +510,13 @@ int RunCaptureMaterials(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/metal_lod0_sharp.png").c_str());
     app.ssr_rough_to_lod_ = saved_lod_slope;
 
+    // 镜面 + SMAA：回答"最终帧的 SMAA 能不能救倒影的锯齿"（因为倒影是在 1:2 分辨率上
+    // 追踪、再双边升采样回全分辨率，锯齿的步长是 2 屏幕像素）。
+    app.floor_preset_ = 0;
+    app.SetSmaa(true, 0.1f);
+    app.RunOnce(input, winfo, (out_dir + "/mirror_smaa_on.png").c_str());
+    app.SetSmaa(false, 0.1f);
+
     // 四段拼接：开 / 关 SSR 两张（关 SSR = 纯 env 基线）。
     // 相机拉远一点：四段沿 X 并排（±40 m），要让四条都完整入画。
     app.view_.phi   = 0.26;
