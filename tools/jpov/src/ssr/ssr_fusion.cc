@@ -48,7 +48,7 @@ uniform sampler2D uSsr;         // SSR 分辨率 RGBA16F（rgb 辐亮度，a = r
 uniform sampler2D uSsrMip;
 uniform float uMipMaxLod;       // 最大可用 LOD（= 级数 − 1）
 uniform float uRoughToLod;      // roughness → LOD 的斜率（面板可调）
-uniform sampler2D uDownDepth;   // SSR 分辨率 R32F
+uniform sampler2D uDownW;       // SSR 分辨率 R32F：**w = 1/z**（0 = 空）
 uniform sampler2D uDownNormal;  // SSR 分辨率 RG16F
 uniform ivec2 uFullRes;
 uniform vec2  uSsrRes;
@@ -180,13 +180,13 @@ void main() {
             ivec2 q = clamp(q0 + ivec2(i, j), ivec2(0), ivec2(uSsrRes) - 1);
             float ws = (i == 0 ? 1.0 - t.x : t.x) * (j == 0 ? 1.0 - t.y : t.y);
 
-            float z_lo = ZView(texelFetch(uDownDepth, q, 0).r);
+            // 低分深度已经是 w = 1/z（降采样时换算过）⇒ 这里的值域比较**不需要除法**。
+            float w_lo = texelFetch(uDownW, q, 0).r;
             // ⚠️ 必须读**完整三维**法线：属性纹理自 2026-10-31 起存 rgb = 视空间法线。
             //    以前这里只取 .xy 并把 z 补 0（当时的约定是"z 由 sqrt 重建"），改存三分量后
             //    那段没跟着改 ⇒ 升采样的法线值域项拿的是 (x,y,0) 这个**平面内**的假法线，
             //    斜面上 dot(n_hi,n_lo) 系统性偏小 ⇒ 边缘权重被压、倒影边缘变暗/出洞。
             vec3 n_lo = NormalFromAttr(texelFetch(uDownNormal, q, 0));
-            float w_lo = 1.0 / max(z_lo, 1.0e-4);
 
             // ── 值域项：深度 + 法线的**联合软权**（2026-11-02 只剩这一套）──
             //
@@ -299,7 +299,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     CHECK_NE(in.attr_mat_tex, 0u) << "缺属性纹理的材质附件（F0/roughness）";
     CHECK_NE(in.ssr_mip_tex, 0u) << "缺 SSR 预滤波 mip 链（SsrFilter 的输出）";
     CHECK_GE(in.ssr_mip_levels, 1);
-    CHECK_NE(in.down_depth_tex, 0u);
+    CHECK_NE(in.down_w_tex, 0u);
     CHECK_NE(in.down_normal_tex, 0u);
     CHECK_NE(in.dst_fbo, 0u);
     CHECK_GT(in.full_w, 0);
@@ -357,7 +357,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glActiveTexture(GL_TEXTURE0 + kTexUnitIn3);
     glBindTexture(GL_TEXTURE_2D, in.ssr_radiance_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitIn4);
-    glBindTexture(GL_TEXTURE_2D, in.down_depth_tex);
+    glBindTexture(GL_TEXTURE_2D, in.down_w_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitIn5);
     glBindTexture(GL_TEXTURE_2D, in.down_normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitAttrMat);
@@ -369,7 +369,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttr"), kTexUnitIn1);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uSceneDepth"), kTexUnitIn2);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uSsr"), kTexUnitIn3);
-    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownDepth"), kTexUnitIn4);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownW"), kTexUnitIn4);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uDownNormal"), kTexUnitIn5);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttrMat"), kTexUnitAttrMat);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uSsrMip"), kTexUnitSsrMip);

@@ -752,9 +752,9 @@ roughness 选 mip 的业界实现（如 UE 的 `ComputeReflectionCaptureMipFromR
 ~240 次 ALU（且是标量、可并行）。带宽比 ALU 贵，1080p 下这是每帧几百 MB 的额外流量。
 **结论：不划算**，除非是移动端那种"ALU 富余、带宽紧张"的反过来的情形。
 
-#### 真正值得做的（还没做，需要改契约 + 对拍）
+#### 已做：w 空间重构（2026-11-02，本 PR）
 
-**让 SSR 分辨率的深度纹理直接存 `w = 1/z_view`，把格判据改写成 w 空间**：
+**SSR 分辨率的深度纹理直接存 `w = 1/z_view`（0 = 空），格判据改写进 w 空间**：
 
 ```
 现在： z = ZView(depth)           // 1 除法
@@ -770,12 +770,39 @@ roughness 选 mip 的业界实现（如 UE 的 `ComputeReflectionCaptureMipFromR
 `T = c·z`（`c = N_px·θ_px`）在正常相机下恒成立，所以 `1/(z+T) = w/(1+c)` 是一次乘法。
 净效果：**内层 3 除法 → 0**，也就是上表 ~85% 的那一块基本清零。
 
-代价与风险：
-- 降采样纹理的语义从"窗口深度"变成"w"，`SsrBuildRay` / `SsrHasDepth`（远平面判据改成
-  `w > 1/far`）/ 融合的 tap 全部跟着改；
-- CPU 参照实现（`ssr_math.h::CellHit` / `MarchSlabs` 的 `depth_at` 回调）必须同步改，
-  否则 GPU↔CPU 对拍会红 —— 这正是"两边各写一遍"那套约束在保护我们，也意味着改动必须成对；
-- 舍入会变（1/(z+T) vs z+T），像素可能有 1 LSB 级别的差；SSR 没有 gold 图，只有对拍，
-  可以接受。
+**改了什么**：
+- 降采样时把窗口深度换成 w（`WFromWindowDepth`，天空/远平面写成 **0**，"空"从此只有一个
+  表示，CPU 与着色器不会在"far 处是天空还是墙"上分叉）；
+- `SsrInputs::depth_tex` → **`w_tex`**；`SsrFusionInputs::down_depth_tex` → `down_w_tex`；
+- `CellHit` 与 `SsrCellHit` 逐字同式：两条比较 + 一次乘法，**没有除法**
+  （`w_min ≤ w_cell`、`w_max·(1+c) ≥ w_cell`）；厚度下限（`c·z < min_thickness`）
+  的极近分支保留精确式，正常相机永不进入；
+- CPU 参照（`ssr_math.h`）的 `MarchSegment/MarchWholeRay/MarchSlabs` 回调语义改成
+  "返回 w，0 = 空"，与对着色器的要求一致。
 
-估算：一个中等 PR（~150 行，含对拍与 tile 等价性重跑），收益是内层循环的主要开销。
+**验收**（这就是 §18.8 那 5 张 gold 存在的理由）：重构前后**逐组合比对 5 张 gold** ——
+`graze_mirror` / `ladder_high` max_diff = **0**，`mirror_1x` / `metal_mid` /
+`dawn_metal_third` max_diff = **1 LSB**，显著变化像素 **0%**，ROI 均值差 ≤ 0.008。
+CPU↔GPU 对拍（8 个用例）与 tile 等价性（1/2/4/8）全绿。
+
+**剩下的除法**：`SsrBuildRay` 每像素 1 次（`z = 1/w`）—— 那是必需的，不是每格。
+
+### 18.8 端到端 gold（5 组合）
+
+`test/ssr/jpov_ssr_gold_{common.h,generator.cc,test.cc}` + `ssr_gold_*_1280x720.png`。
+
+SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并发粒度），**没有整帧基线** ——
+于是"数学等价但舍入不同"的改动（正是 §18.7 的 w 空间重构）既不该让画面变，也无从证明。
+5 个组合各自盯一个失效面：
+
+| 组合 | 机位/参数 | 盯什么 |
+|---|---|---|
+| `graze_mirror` | 离地 6 cm / 45 m | 极掠射：深度精度、条纹/黑带的老病灶 |
+| `mirror_1x` | 1:1 追踪 | 反射最锐：命中/取色错一格立刻可见 |
+| `metal_mid` | 金属 r=0.30，中等俯角 | 磨砂 mip 链（LOD > 0） |
+| `ladder_high` | 四段拼接，高俯角 | 同屏四种材质（逐像素 F0/roughness） |
+| `dawn_metal_third` | 低太阳，1:3 降采样 | 非 2 的幂分辨率 + 长影子 |
+
+闸门与仓库其它光照 gold 一致（8×8 ROI 均值 ≤ 25、逐像素显著变化 ≤ 0.05%）。
+改 SSR 的观感/算法时先跑 `--capture-materials` 看图，确认是有意的改动再重跑
+`jpov_ssr_gold_generator` 更新 gold；**不要为了让 red 变绿去放宽闸门**。

@@ -175,12 +175,12 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
 
     // ── ② 输入准备（降采样）：全分辨率 → SSR 分辨率 ──
     downsample_.Run(in.hdr_color_tex, in.scene_depth_tex, in.attr_tex, in.attr_mat_tex,
-                    in.full_w, in.full_h, scale);
+                    in.full_w, in.full_h, scale, in.near_plane, in.far_plane);
 
     // ── ③ 算法（模块）：SSR 分辨率 → radiance + ray_ratio + 类型 ──
     SsrInputs si;
     si.color_tex = downsample_.color_tex();
-    si.depth_tex = downsample_.depth_tex();
+    si.w_tex = downsample_.w_tex();
     si.normal_tex = downsample_.normal_tex();
     si.width = downsample_.width();
     si.height = downsample_.height();
@@ -212,7 +212,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     fi.full_w = in.full_w;
     fi.full_h = in.full_h;
     fi.ssr_radiance_tex = outs.radiance_tex;
-    fi.down_depth_tex = downsample_.depth_tex();
+    fi.down_w_tex = downsample_.w_tex();
     fi.down_normal_tex = downsample_.normal_tex();
     fi.ssr_w = downsample_.width();
     fi.ssr_h = downsample_.height();

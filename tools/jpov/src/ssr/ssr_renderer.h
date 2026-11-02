@@ -158,9 +158,11 @@ struct SsrInputs {
     // **必须**是"半透明/粒子/雾/Bloom 之前、且未加雾"的那一份（见文件头"管线位置"）。
     unsigned int color_tex = 0;
 
-    // 场景深度：MRT#1 的 gl_FragCoord.z（R32F，∈[0,1]，1.0 = 远平面/背景）。
+    // 场景深度，**已换成 w = 1/z_view**（R32F，0 = 天空/无几何）。
     // 必须是**与 color_tex 同一次光栅化**写出的那张，逐像素 1:1 对齐。
-    unsigned int depth_tex = 0;
+    // 为什么不是窗口深度：判据全部是"1/d 落在哪个区间"，用 w 表达时每格零除法
+    // （见 ssr_math.h::CellHit）；换算是降采样一步做的，每 SSR 像素只付一次。
+    unsigned int w_tex = 0;
 
     // 视空间法线（RGBA 浮点：RG16F/RG32F/RGBA16F 都行，多余分量忽略）。
     //   · .rgb = **完整三维法线**（2026-10-31 起；此前只存 .xy 并重建 z，在极点附近病态）。
