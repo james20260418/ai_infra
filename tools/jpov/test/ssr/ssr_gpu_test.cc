@@ -214,12 +214,10 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
     if (!BuildScreenRay(p, r, len, kTanHalf, kAspect, kWidth, kHeight, &ray)) {
         return out;
     }
+    // 回调返回 **w = 1/z**（0 = 空），与着色器读的降采样纹理同一种形式。
     auto depth_at = [&](int x, int y) -> float {
         const size_t k = static_cast<size_t>(y) * kWidth + x;
-        if (!HasDepthData(sc.window_depth[k])) {
-            return jpov::ssr::kEmptyCell;   // 天空格没有柱子（与着色器同一条规则）
-        }
-        return jpov::ssr::DepthFromWindowDepth(sc.window_depth[k], kNear, kFar);
+        return jpov::ssr::WFromWindowDepth(sc.window_depth[k], kNear, kFar);
     };
     int cx = -1;
     int cy = -1;
@@ -250,15 +248,23 @@ struct Fixture {
     SsrRenderer ssr;
     jpov::ShaderManager shader_mgr;
     Scene scene;
-    unsigned int depth_tex = 0;
+    unsigned int w_tex = 0;
     unsigned int normal_tex = 0;
     unsigned int color_tex = 0;
+    unsigned int rough_tex = 0;
     SsrInputs in;
 
     void Setup(const Scene& sc, int tile, int max_ray_pixels) {
         GlEnv::Get().Ensure();
         scene = sc;
-        depth_tex = UploadFloatTexture(scene.window_depth, kWidth, kHeight, GL_R32F, GL_RED);
+        // 上传 **w = 1/z**（2026-11-02 起 SSR 模块内部的深度形式；0 = 天空）。
+        {
+            std::vector<float> ws(scene.window_depth.size());
+            for (size_t i = 0; i < ws.size(); ++i) {
+                ws[i] = jpov::ssr::WFromWindowDepth(scene.window_depth[i], kNear, kFar);
+            }
+            w_tex = UploadFloatTexture(ws, kWidth, kHeight, GL_R32F, GL_RED);
+        }
         // 法线用 RG32F（**不是** RG16F）：fp16 会把 ny=0.95 量化成 0.95019，
         // CPU 参考拿到的却是 0.95 —— 逐像素对拍时这点差异会在柱子边缘把命中格推走一格。
         // 真实管线用 fp16 也没问题（模块只做归一化与反射），只是**对拍**必须两边同值。
@@ -282,10 +288,18 @@ struct Fixture {
             normal_tex = UploadFloatTexture(rgba, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
         }
         color_tex = UploadFloatTexture(scene.color, kWidth, kHeight, GL_RGBA16F, GL_RGBA);
+        // 逐像素 roughness（2026-11-02 起是必需输入）。本文件测的是**几何/取色**，
+        // 与材质无关 ⇒ 全 0 + cutoff=1（永不跳过），等价于旧行为、不改变任何断言。
+        {
+            std::vector<float> ones(static_cast<size_t>(kWidth) * kHeight, 0.0f);
+            rough_tex = UploadFloatTexture(ones, kWidth, kHeight, GL_R16F, GL_RED);
+        }
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
-        in.depth_tex = depth_tex;
+        in.w_tex = w_tex;
         in.normal_tex = normal_tex;
+        in.rough_tex = rough_tex;
+        in.roughness_cutoff = 1.0f;
         in.width = kWidth;
         in.height = kHeight;
         in.near_plane = kNear;
@@ -302,14 +316,17 @@ struct Fixture {
 
     ~Fixture() {
         ssr.Finalize();
-        if (depth_tex != 0) {
-            glDeleteTextures(1, &depth_tex);
+        if (w_tex != 0) {
+            glDeleteTextures(1, &w_tex);
         }
         if (normal_tex != 0) {
             glDeleteTextures(1, &normal_tex);
         }
         if (color_tex != 0) {
             glDeleteTextures(1, &color_tex);
+        }
+        if (rough_tex != 0) {
+            glDeleteTextures(1, &rough_tex);
         }
     }
 };
@@ -415,7 +432,7 @@ TEST(SsrGpu, HitPatternFollowsReflectedDirection) {
     const SsrOutputs& out = f.ssr.Render(f.in);
 
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
-    const std::vector<unsigned char> reason = ReadTexUInt8(out.reason_tex, kWidth, kHeight);
+    const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
     const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
 
     constexpr int kMargin = 3;

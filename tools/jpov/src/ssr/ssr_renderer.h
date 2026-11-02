@@ -158,9 +158,11 @@ struct SsrInputs {
     // **必须**是"半透明/粒子/雾/Bloom 之前、且未加雾"的那一份（见文件头"管线位置"）。
     unsigned int color_tex = 0;
 
-    // 场景深度：MRT#1 的 gl_FragCoord.z（R32F，∈[0,1]，1.0 = 远平面/背景）。
+    // 场景深度，**已换成 w = 1/z_view**（R32F，0 = 天空/无几何）。
     // 必须是**与 color_tex 同一次光栅化**写出的那张，逐像素 1:1 对齐。
-    unsigned int depth_tex = 0;
+    // 为什么不是窗口深度：判据全部是"1/d 落在哪个区间"，用 w 表达时每格零除法
+    // （见 ssr_math.h::CellHit）；换算是降采样一步做的，每 SSR 像素只付一次。
+    unsigned int w_tex = 0;
 
     // 视空间法线（RGBA 浮点：RG16F/RG32F/RGBA16F 都行，多余分量忽略）。
     //   · .rgb = **完整三维法线**（2026-10-31 起；此前只存 .xy 并重建 z，在极点附近病态）。
@@ -173,11 +175,15 @@ struct SsrInputs {
     //   · 非反射体像素的法线**有意义且必须写**：命中面朝向判据要的就是遮挡物的法线。
     unsigned int normal_tex = 0;
 
-    // 反射层材质的粗糙度（[0,1]）。**本模块当前不使用**（march/resolve 与材质无关），
-    // 这里只是把"这一帧用的是什么材质"随输入传进来，供融合层（SsrFusion）与将来的
-    // 逐像素材质升级使用 —— 升级点：属性纹理多一个附件存 F0/roughness，
-    // 融合层按像素取，而不是用 SsrConfig 的一套 uniform。
-    float roughness = 0.0f;
+    // 反射层**逐像素** roughness（R16F，与其它三张同分辨率、同一选点）。
+    // 本模块只用它做一件事：> roughness_cutoff 的像素**不发射线**（成本与质量一起省，
+    // 粗糙表面的正确结果是宽积分，单条镜面射线表达不了）。
+    unsigned int rough_tex = 0;
+
+    // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。
+    // 业界同口径：FidelityFX SSSR 的 tile classification 对高粗糙像素直接不发射线，
+    // 交回预滤波的 environment probe。
+    float roughness_cutoff = 1.0f;
 
     // ---- 分辨率（§2.1 契约 1：输入什么分辨率，输出什么分辨率）----
     int width = 0;   // > 0
@@ -259,10 +265,6 @@ struct SsrOutputs {
     // R8UI，**总是输出**：每像素一个 SsrResultType（见下）。
     //   kHit 之外的取值 = "为什么没有可用结果"，供融合层选择 fallback（env / sky / 跳过）。
     unsigned int type_tex = 0;
-
-    // **type_tex 的别名**（同一张纹理、同一个句柄）：为兼容既有测试的字段名而保留，
-    // 不要当成"第二份数据"，也不要单独释放（DestroyTargets 里已注明）。
-    unsigned int reason_tex = 0;
 
     // R32F（仅 debug_reason == true 时非 0）：每像素写整条射线的碰撞位置 s（像素弧长，
     // 无命中写哨兵 +1e30）。§11.2-3 的"命中格与解析解一致"最自然的断言对象就是它

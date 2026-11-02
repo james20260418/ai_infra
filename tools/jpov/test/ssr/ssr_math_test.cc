@@ -30,7 +30,6 @@ namespace {
 using jpov::ssr::BuildScreenRay;
 using jpov::ssr::CellAtSigma;
 using jpov::ssr::CellHit;
-using jpov::ssr::CellThickness;
 using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
@@ -156,8 +155,9 @@ TEST(SsrMath, VoxelPredicate) {
     //     这正是 §4.2 的决定性证据：双线性判据（是否"留在"厚度带内）会判成"穿过"。
     {
         const float z = 200.0f;
-        const float t = 0.5f;
-        EXPECT_TRUE(CellHit(1.0f / 199.8f, 1.0f / 201.0f, z, t))
+        const float t = 0.5f;                       // = c·z ⇒ c = t/z = 0.0025
+        const float c = t / z;
+        EXPECT_TRUE(CellHit(1.0f / 199.8f, 1.0f / 201.0f, 1.0f / z, c, 1.0e-4f))
             << "区间 [199.8,201.0] ∩ [200,200.5] 非空，必须命中";
         const float g_exit = 201.0f - 200.0f;   // 每格穿透量 1.0 m
         EXPECT_GT(g_exit, t) << "双线性那套判据在同输入下会判'穿过'——这就是放弃它的理由";
@@ -165,10 +165,11 @@ TEST(SsrMath, VoxelPredicate) {
     // (b) 薄栏杆：射线整段在柱子后方 ⇒ 必须放行（负向：首次跨越即命中会误判）。
     {
         const float z = 50.0f;
-        const float t = 0.5f;
+        const float t = 0.5f;                       // = c·z ⇒ c = 0.01
         const float w_in = 1.0f / 60.0f;
         const float w_out = 1.0f / 61.0f;
-        EXPECT_FALSE(CellHit(w_in, w_out, z, t)) << "整段在柱子后方必须放行";
+        EXPECT_FALSE(CellHit(w_in, w_out, 1.0f / z, t / z, 1.0e-4f))
+            << "整段在柱子后方必须放行";
         const bool naive_hit = (1.0f / std::min(w_in, w_out)) >= z;
         EXPECT_TRUE(naive_hit) << "负向对照失效：'首次跨越即命中'在这里居然也判对了";
     }
@@ -176,21 +177,28 @@ TEST(SsrMath, VoxelPredicate) {
     {
         const float w_in = 1.0f / 1.00f;
         const float w_out = 1.0f / 1.05f;
-        EXPECT_TRUE(CellHit(w_in, w_out, /*z=*/1.0f, /*t=*/0.02f));
-        EXPECT_FALSE(CellHit(w_in, w_out, /*z=*/1000.0f, /*t=*/10.0f));
+        EXPECT_TRUE(CellHit(w_in, w_out, /*w_cell=*/1.0f / 1.0f, /*c=*/0.02f, 1.0e-4f));
+        EXPECT_FALSE(CellHit(w_in, w_out, /*w_cell=*/1.0f / 1000.0f, /*c=*/0.01f, 1.0e-4f));
     }
     // (d) 边界闭区间：d_hi == z、d_lo == z+T 都算命中（≥/≤ 而非 >/<）。
     {
-        EXPECT_TRUE(CellHit(1.0f / 1.0f, 1.0f / 2.0f, /*z=*/2.0f, /*t=*/0.0f))
+        // z = 2 m，T = 1 m ⇒ c = 0.5。w_cell = 1/2。
+        EXPECT_TRUE(CellHit(1.0f / 1.0f, 1.0f / 2.0f, /*w_cell=*/0.5f, /*c=*/0.0f, 1.0e-4f))
             << "射线恰好抵达前表面应算命中";
-        EXPECT_TRUE(CellHit(1.0f / 3.0f, 1.0f / 4.0f, /*z=*/2.0f, /*t=*/1.0f))
+        EXPECT_TRUE(CellHit(1.0f / 3.0f, 1.0f / 4.0f, /*w_cell=*/0.5f, /*c=*/0.5f, 1.0e-4f))
             << "射线恰好触及后表面应算命中";
     }
-    // (e) 厚度随本格深度，且被 min_thickness 兜住。
+    // (e) 厚度下限分支：z 极近（c·z < min_thickness）时必须走精确式而不是 c·z 近似。
+    //     z = 0.001 m、c = 0.01 ⇒ c·z = 1e-5 < 1e-4 ⇒ 走退化分支；此时
+    //     d_lo 恰好等于 z + min_thickness 应当算命中（闭区间）。
     {
         const float c = 0.01f;
-        EXPECT_FLOAT_EQ(CellThickness(200.0f, c, 1.0e-4f), 2.0f);
-        EXPECT_FLOAT_EQ(CellThickness(0.001f, c, 1.0e-4f), 1.0e-4f) << "min_thickness 必须生效";
+        const float z = 0.001f;
+        const float t = 0.0001f;      // = min_thickness（下限生效）
+        EXPECT_TRUE(CellHit(1.0f / (z + t), 1.0f / (z + t), 1.0f / z, c, t))
+            << "退化分支（min_thickness）的闭区间边界应算命中";
+        EXPECT_FALSE(CellHit(1.0f / (z + 2.0f * t), 1.0f / (z + 3.0f * t), 1.0f / z, c, t))
+            << "退化分支里明显在柱子后方的一段必须放行";
     }
 }
 
@@ -229,9 +237,9 @@ TEST(SsrMath, SlabCoversWholeSlab) {
                 const Vec2 tail = PosAt(s.ray, tail_sigma);
                 const int tx = static_cast<int>(std::floor(tail.x));
                 const int ty = static_cast<int>(std::floor(tail.y));
+                // 回调语义（2026-11-02 起）：返回 **w = 1/z**，0 = 没有几何。
                 auto depth_at = [&](int x, int y) -> float {
-                    return (x == tx && y == ty) ? (1.0f / WAt(s.ray, tail_sigma))
-                                                : cam.far_plane;
+                    return (x == tx && y == ty) ? WAt(s.ray, tail_sigma) : 0.0f;
                 };
                 const float hit =
                     MarchSegment(s.ray, begin, end, d.steps_per_lane,
@@ -268,7 +276,7 @@ TEST(SsrMath, SlabCoversWholeSlab) {
             const int tx = static_cast<int>(std::floor(tail.x));
             const int ty = static_cast<int>(std::floor(tail.y));
             auto depth_at = [&](int x, int y) -> float {
-                return (x == tx && y == ty) ? (1.0f / WAt(s.ray, tail_sigma)) : cam.far_plane;
+                return (x == tx && y == ty) ? WAt(s.ray, tail_sigma) : 0.0f;
             };
             if (MarchSegment(s.ray, begin, end, d.steps_per_lane, begin <= 0.0f,
                              d.thickness_coefficient, kMinThickness, depth_at, cam.width,
@@ -327,14 +335,15 @@ TEST(SsrMath, S_MidLandsInHitCell) {
     std::mt19937 rng(99u);
     std::uniform_real_distribution<float> uni(0.0f, 1.0f);
 
+    // 回调返回 **w = 1/z**（2026-11-02 起）。
     auto field_flat = [&](int x, int y) -> float {
         (void)x;
         (void)y;
-        return 20.0f;
+        return 1.0f / 20.0f;
     };
     auto field_two_layers = [&](int x, int y) -> float {
         (void)x;
-        return (y >= cam.height / 2) ? 600.0f : 20.0f;
+        return (y >= cam.height / 2) ? (1.0f / 600.0f) : (1.0f / 20.0f);
     };
 
     int checked = 0;
@@ -405,15 +414,16 @@ TEST(SsrMath, SlabsEqualSingleThread) {
     for (int x = 0; x < cam.width; x += 17) {
         columns.emplace_back(x, 3.0f + 400.0f * uni(rng));
     }
+    // 返回 w = 1/z；没有墙的列返回 0（= 空）。
     auto depth_at = [&](int x, int y) -> float {
         (void)y;
-        float z = cam.far_plane;
+        float z = 0.0f;
         for (const std::pair<int, float>& c : columns) {
             if (x >= c.first && x < c.first + 17) {
                 z = c.second;
             }
         }
-        return z;
+        return (z > 0.0f) ? (1.0f / z) : 0.0f;
     };
 
     int compared = 0;
@@ -460,14 +470,14 @@ TEST(SsrMath, MinPicksEarliest) {
     ray.w1 = ray.w0;
     ray.sigma_enter = 0.0f;
     ray.sigma_exit = 100.0f;
-    ray.exits_screen = false;
 
+    // 返回 w = 1/z：x=20/60 处是 10 m 的柱子，其余是 1000 m 的远墙（有几何，w≠0）。
     auto depth_at = [](int x, int y) -> float {
         (void)y;
         if (x == 20 || x == 60) {
-            return 10.0f;
+            return 1.0f / 10.0f;
         }
-        return 1000.0f;
+        return 1.0f / 1000.0f;
     };
 
     int hx = -1;
@@ -530,7 +540,6 @@ ScreenRay MakeSyntheticRay() {
     ray.w1 = 1.0f / 24.0f;   // 视深 20 m → 24 m，对 σ 线性（w = 1/d）
     ray.sigma_enter = 0.0f;
     ray.sigma_exit = 100.0f;
-    ray.exits_screen = false;
     return ray;
 }
 
@@ -543,12 +552,12 @@ TEST(SsrMath, BackfaceHitRejected) {
 
     auto depth_at = [](int /*x*/, int y) -> float {
         if (y >= 40 && y < 60) {
-            return 20.0f;   // 桌子顶面
+            return 1.0f / 20.0f;   // 桌子顶面（w = 1/z）
         }
         if (y >= 80 && y < 120) {
-            return 20.0f;   // 墙
+            return 1.0f / 20.0f;   // 墙
         }
-        return jpov::ssr::kEmptyCell;
+        return 0.0f;               // 空
     };
     auto facing = [](int /*x*/, int y, const Vec3& d) -> bool {
         if (y >= 40 && y < 60) {

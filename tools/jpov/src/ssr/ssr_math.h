@@ -27,11 +27,14 @@ namespace ssr {
 // 且远大于任何合理 s（像素）。**不要用 inf** —— 某些驱动把它规整掉。
 constexpr float kNoHit = 1.0e30f;
 
-// `depth_at(x,y)` 返回这个值 = 该格**没有几何**（窗口深度是清空值 1.0，天空/背景）。
+// `w_at(x,y)` 返回 ≤ 0 = 该格**没有几何**（天空/背景；降采样时天空写成 0）。
 // 语义是"这里没有柱子"，march 直接穿过去 —— **不是**"far 处有一堵墙"。
 // 反例（2026-10-30 实拍踩到）：把天空格当成 z=far、T=c·far 的柱子 ⇒ 掠射射线在 near-horizon
 // 处扫到它 ⇒ 返回天空像素的颜色、A=1 ⇒ 画面上出现一大片假的高光带。
-constexpr float kEmptyCell = -1.0f;
+//
+// 2026-11-02 起"空"统一用 **0** 表示（降采样把天空/远平面写成 0），所以这个哨兵只作为
+// "调用方想显式表达空"的可选写法；判定一律是 `!(w > 0)`。
+constexpr float kEmptyCell = 0.0f;
 
 // ─────────────────────────── 极简向量（本文件不依赖 geom）───────────────────────────
 // 只有这个 header 用到，且必须能在没有 glog/protobuf 的最小环境里编译（CPU 单测）。
@@ -85,11 +88,31 @@ inline float DepthFromWindowDepth(float depth, float near_plane, float far_plane
     return (2.0f * near_plane * far_plane) / denom;
 }
 
+// 窗口深度 → w = 1/z_view（SSR 内部**唯一**使用的深度形式，2026-11-02 起）。
+//
+// 为什么 SSR 链路内部改用 w 而不是窗口深度：
+//   判据全部是"1/d 落在哪个区间"，而 1/d 对屏幕坐标是**仿射**的 —— 用 w 表达时
+//   每格的判据只剩两次比较（见 CellHit），不再每格做 3 次除法。窗口深度的
+//   ndc→z 映射每格都要做一次除法，纯属白花。
+//   降采样时把窗口深度换成 w 的代价是每 SSR 像素 1 次除法（而不是每格一次）。
+//
+// 约定：**w = 0 表示没有深度数据（天空/背景）**。远平面值 z=far 在降采样时也写成 0，
+// 这样"空"只有一个表示，着色器与 CPU 参考不会分叉（旧版靠 `window_depth < 1` 判空）。
+inline float WFromWindowDepth(float depth, float near_plane, float far_plane) {
+    if (!(depth < 1.0f)) {
+        return 0.0f;   // 清空值 ⇒ 天空 ⇒ 约定为 0
+    }
+    return 1.0f / DepthFromWindowDepth(depth, near_plane, far_plane);
+}
+
 // 该像素有没有深度数据。窗口深度 1.0 = 远平面清空值 ⇒ 天空/背景，**不发射线**。
 //
 // 为什么把这句收成函数：着色器与 CPU 参考必须用同一条规则。少了它，天空像素上两边就会
 // 分叉 —— 射线从 far 朝远处走，而"柱子"也在 far（z=far, T=c·far），区间必然重叠 ⇒
 // CPU 报命中、GPU 报 a=0。这种分叉只在有天空的场景里出现（也就是真实场景里必然出现）。
+//
+// SSR 链路内部用的是 w 形式（`WFromWindowDepth` 已把天空写成 0），这个函数留给
+// 全分辨率的窗口深度（融合层/测试构造输入）。
 inline bool HasDepthData(float window_depth) { return window_depth < 1.0f; }
 
 // 像素中心 uv（∈(0,1)）→ 视空间点，给定该点的视距 d。
@@ -152,7 +175,6 @@ struct ScreenRay {
     float sigma_exit = 0.0f;
     // true = 射线在 sigma_exit 处撞到屏幕边界（或近平面裁剪）；false = 走完了整段。
     // 只用于调试原因位（kSky vs kOffscreen），不参与取色。
-    bool exits_screen = false;
 };
 
 // 由视空间起点 P（**已做卫生偏移**）与单位方向 R 构造屏幕参数化。
@@ -171,11 +193,14 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     if (!(d1 > 1.0e-6f)) {
         return false;   // 理论上被 ClipRayLength 挡掉；防御式再拦一次
     }
-    const float tan_x = aspect * tan_half_fov_y;
     const float tan_y = tan_half_fov_y;
 
-    const Vec2 np{p.x / (d0 * tan_x), p.y / (d0 * tan_y)};
-    const Vec2 nq{q.x / (d1 * tan_x), q.y / (d1 * tan_y)};
+    // 每点只做 1 次除法（原来两个分量各除一次；uAspect 与 tan_half 可以提出来）。
+    // 与着色器 SsrBuildRay 同一形式。
+    const float inv0 = 1.0f / (d0 * tan_y);
+    const float inv1 = 1.0f / (d1 * tan_y);
+    const Vec2 np{p.x / aspect * inv0, p.y * inv0};
+    const Vec2 nq{q.x / aspect * inv1, q.y * inv1};
     const float w = static_cast<float>(width);
     const float h = static_cast<float>(height);
 
@@ -190,7 +215,8 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
         return false;   // 长度退化：整条射线在屏幕上是一个点，没有可采样的格
     }
     out->dir = delta * (1.0f / out->span);
-    out->dir3 = Normalize(r);   // 朝向判据用（着色器里同一行）
+    // r 已经是单位向量（ReflectDir 的两个入参都归一过）⇒ 不再 Normalize。
+    out->dir3 = r;   // 朝向判据用（着色器里同一行）
 
     // 矩形裁剪（Liang–Barsky），结果用 σ 表示（像素弧长）。
     float t0 = 0.0f;
@@ -219,7 +245,6 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     }
     out->sigma_enter = t0;
     out->sigma_exit = t1;
-    out->exits_screen = t1 < out->span - 1.0e-4f;
     return true;
 }
 
@@ -236,32 +261,31 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────
 
-// 厚度：T = max(c · z_cell, min_thickness)。§9.2：z 必须是**本格**深度，
-// 不是反射体的、也不是格内平均值（轮廓格内 d_surf 可以差 50 倍）。
-inline float CellThickness(float z_cell, float thickness_coefficient, float min_thickness_m) {
-    return std::max(thickness_coefficient * z_cell, min_thickness_m);
-}
-
 // 每格三行判据（§5.1）：射线在本格内的**视深区间** [d_lo, d_hi] 与本格柱体
-// [z, z+T] 是否有交集。w_in/w_out 是 1/d 端点，顺序无所谓。
+// [z, z+T] 是否有交集。w_in/w_out 是 1/d 端点，顺序无所谓；w_cell 是本格的 1/z（>0）。
 //
-// 注意这不是"是否留在厚度带内"（双线性深度面的旧判据，依赖每格穿透量）——
-// 那是放弃双线性的真正原因（§4.2 的墙/栏杆对照）。
-inline bool CellHit(float w_in, float w_out, float z_cell, float thickness) {
+// ⚠️ 2026-11-02 改成 **w 空间**：判据里不再出现任何除法（近平面退化分支除外）。
+//    d_hi ≥ z      ⟺  w_min ≤ w_cell
+//    d_lo ≤ z + T  ⟺  w_max ≥ 1/(z+T)；T = c·z ⇒ 1/(z+T) = w_cell/(1+c)
+//                    ⇒ 两边乘 (1+c)：w_max·(1+c) ≥ w_cell
+//    （c·z ≥ min_thickness 恒成立时；极近像素走下面的退化分支）
+// 着色器 SsrCellHit 逐字同一形式 —— 改这里必须同步改那边（对拍会红）。
+inline bool CellHit(float w_in, float w_out, float w_cell,
+                    float thickness_coefficient, float min_thickness_m) {
     const float w_min = std::min(w_in, w_out);
     const float w_max = std::max(w_in, w_out);
-    if (!(w_min > 0.0f)) {
-        return false;   // 防御：w ≤ 0 表示 d ≤ 0（理论上已被裁剪挡住）
+    if (!(w_min > 0.0f) || !(w_cell > 0.0f)) {
+        return false;   // 防御：w ≤ 0 表示 d ≤ 0 / 空格（理论上已被前面挡掉）
     }
-    const float d_lo = 1.0f / w_max;
-    const float d_hi = 1.0f / w_min;
-    if (d_hi < z_cell) {
+    if (w_min > w_cell) {
         return false;   // 整段在柱子前方（水面最常见）
     }
-    if (d_lo > z_cell + thickness) {
-        return false;   // 整段在柱子后方（穿过去了）
+    // 退化分支：厚度下限生效（z 极近，c·z < min_thickness）。正常相机永不进入。
+    if (!(w_cell <= thickness_coefficient / min_thickness_m)) {
+        const float z = 1.0f / w_cell;
+        return w_max >= 1.0f / (z + min_thickness_m);
     }
-    return true;
+    return w_max * (1.0f + thickness_coefficient) >= w_cell;
 }
 
 // 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
@@ -368,7 +392,8 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // 自己的柱子里立刻命中自己。**只对 σ_start == 0 的那一段成立**，其余 lane 的起点不在
 // 反射体上，不该跳。
 //
-// depth_at(x, y) → 该格的视距（米）。越界时由调用方保证不会发生（这里仍防御性 break）。
+// w_at(x, y) → 该格的 **w = 1/z_view**（0/负 = 没有几何）。越界由调用方保证不会发生
+// （这里仍防御性 break）。
 //
 // facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
 //   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
@@ -376,7 +401,7 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
                    bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
-                   DepthFn&& depth_at, int width, int height, int* hit_x = nullptr,
+                   DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
                    int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
@@ -424,8 +449,8 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
         if (!(sigma_out > sigma)) {
             break;   // 退化（浮点抖动）—— 别在这里死循环
         }
-        const float z_cell = depth_at(cx, cy);
-        if (!(z_cell > 0.0f)) {
+        const float w_cell = w_at(cx, cy);
+        if (!(w_cell > 0.0f)) {
             // 空格子（天空/无深度数据）：这里没有柱子，穿过去（见 kEmptyCell 的注释）。
             // ⚠️ 别在这里 return —— 屏内天空后面还可能有几何。
             if (sigma_out >= sigma_end) {
@@ -441,8 +466,8 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             }
             continue;
         }
-        const float thickness = CellThickness(z_cell, thickness_coefficient, min_thickness_m);
-        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), z_cell, thickness) &&
+        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
+                    thickness_coefficient, min_thickness_m) &&
             facing(cx, cy, ray.dir3)) {
             if (hit_x != nullptr) {
                 *hit_x = cx;
@@ -470,12 +495,12 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
 // 单线程版：整条射线一条 DDA 走到底（"K=1"的语义，也是等价性测试的对照）。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
-                    int max_cells, DepthFn&& depth_at, int width, int height,
+                    int max_cells, DepthFn&& w_at, int width, int height,
                     int* hit_x = nullptr, int* hit_y = nullptr,
                     FacingFn facing = FacingFn{}) {
     const bool skip = ray.sigma_enter <= 0.0f;
     return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
-                        thickness_coefficient, min_thickness_m, depth_at, width, height,
+                        thickness_coefficient, min_thickness_m, w_at, width, height,
                         hit_x, hit_y, facing);
 }
 
@@ -483,7 +508,7 @@ float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min
 // **必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧"分段 + min"能成立的全部依据。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
-                 DepthFn&& depth_at, int width, int height, int* hit_x = nullptr,
+                 DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
                  int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
     float best = kNoHit;
     int best_x = -1;
@@ -501,7 +526,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cx = -1;
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
-                                     d.thickness_coefficient, min_thickness_m, depth_at,
+                                     d.thickness_coefficient, min_thickness_m, w_at,
                                      width, height, &cx, &cy, facing);
         if (s < best) {
             best = s;

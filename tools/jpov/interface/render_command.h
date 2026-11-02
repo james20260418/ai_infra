@@ -683,7 +683,9 @@ struct EnvSpecular {
 //   ③ 反射求交（SsrRenderer）：每个镜面像素沿反射方向在**屏幕空间**逐格 DDA 前进，
 //        命中判据 = 射线段的深度区间与该格柱体 [z, z+T] 相交（T = 厚度，补偿"深度缓冲
 //        只存最近表面"）。输出三样：命中颜色 / ray_ratio / 类型（命中·天空·出屏·预算耗尽）。
-//   ④ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
+//   ④ 预滤波（SsrFilter）：把 SSR 结果做成**覆盖率加权的 mip 链**（空像素填充 + A 跟着降）
+//        —— 粗糙度越高采的 mip 级越大，倒影就越糊；这是"磨砂感"的唯一来源。
+//   ⑤ 融合（SsrFusion）：用 A 预乘的双边核（深度 + 法线软权）把低分辨率结果升采样回
 //        全分辨率，然后**替换**环境镜面项：
 //          out = hdr + mask·A·ao·(ssr_L·weight − env_term)
 //
@@ -695,7 +697,7 @@ struct EnvSpecular {
 //   · 必须同时设置 `env_specular`（SSR 要重算"被替换掉的那一份"，没有 env 就无从替换，
 //     Renderer 会 LOG(FATAL)）；
 //   · 只有 `ssr_reflector = true` 的物体参与反射（其余像素照常走 env，A=0）；
-//   · 本版反射体**共用一套材质**（见下面的 base_color/metallic/roughness/ao）。
+//   · 反射体材质**逐像素**（属性纹理附件 1：F0 + roughness），同屏可以混搭。
 struct SsrConfig {
     // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
     bool enabled = false;
@@ -719,23 +721,21 @@ struct SsrConfig {
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;
 
-    // ── 升采样的值域项（2026-10-31 改成**连续软权**，见 docs 与像素对照）──
+    // ── 升采样的值域项（深度 + 法线的**联合**软权，2026-11-02 定稿）──
     //
-    // 旧版是两个**硬阈值**（超了直接权重 0）。硬阈值在阈值附近必然跳变：只要画面里
-    // 存在跨阈值的连续梯度（掠射最典型），就会沿等值线整行/整片现形 —— 实测就是
-    // "周期 = 降采样倍率的横向条纹" 与 "贴地平线 8/27 行黑带"。
-    // 业界两份可查源码的实现都是**软权 + 下限**：
-    //   · INSIDE（Playdead, loopit.dk rendering_inside.pdf p.39）：w = 1/(|Δdepth| + 1e-5)，
-    //     作者原话"bad pixels still contribute, just a lot less"
-    //   · Unity postprocessing v1 的 SSR（Mara/McGuire 版）：法线用 clamp(dot,0,1)、
-    //     粗糙度用 1−|Δr|^0.25，且 `a = max(a, 0.001)` 保证分母不为 0；**完全不判深度**
+    // 硬阈值的结构性毛病：阈值附近必然跳变，只要画面里有跨阈值的连续梯度（掠射最典型），
+    // 就会沿等值线整行/整片现形 —— 实测是"周期 = 降采样倍率的横向条纹"+"贴地平线黑带"。
+    // 现在只有一套判据，三条一起用：
+    //   ① 法线夹角软权 clamp(dot(n_hi, n_lo), 0, 1)（业界普遍做法）
+    //   ② 深度软权，且比的是"用 1/z 的屏幕仿射梯度**预测**到本像素位置"的残差 ——
+    //      直接比两个 w 的数值在掠射下必然误判（同一平面相邻行能差一倍）
+    //   ③ 残差超 hard_cut 才硬拒（数量级不同 = 真剪影，挡串色）
     //
-    // 所以这里给两个模式，面板可切，用来看差别：
-    //   0 = 软权：rel 相对残差 → wr = 1/(rel + soft_scale)，rel > hard_cut 才硬拒
-    //   1 = 不判深度（Unity 式）：深度只用于 march，升采样只看法线（软）+ 下限
-    int upsample_depth_mode = 0;
-
-    // upsample_depth_tolerance：**软权尺度**（rel 等于它时权重约减半），不再是硬阈值。
+    // 历史：这里曾经有个"Unity 式（不判深度）"的对照档，2026-11-02 按 Danis 要求删除。
+    // 结论记在这里：那一档在本仓库的镜面场景里与联合软权只差 0.05% 像素（地板是一整块
+    // 平面，几乎不触发深度拒绝）；差异只在"深度不同但法线相近"的接缝（箱子顶面 vs 它
+    // 后面的地板）才显现 —— 联合判据在那类地方更稳，代价是每像素多 2 次取纹理。
+    // upsample_depth_tolerance：**软权尺度**（rel 等于它时权重约减半），不是硬阈值。
     float upsample_depth_tolerance = 0.02f;
 
     // rel 超过它 ⇒ 硬拒。数量级不同的深度差只能是"真跨表面"（剪影），留着它挡串色。
@@ -744,15 +744,28 @@ struct SsrConfig {
     // 权重下限（相对空间权）：保证 Σw > 0，永不出现"整片黑"的孔洞。
     float upsample_weight_floor = 1.0e-3f;
 
-    // 反射层材质（本版**全场景一套**；升级点 = 逐像素 F0/roughness 进属性纹理）。
-    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换：
-    //   weight   = F0·AB.x + AB.y,  F0 = mix(0.04, base_color, metallic)
-    //   env_term = EnvSpecularTerm(n, V, roughness, metallic, base_color)
-    // ⚠️ 金属的 F0 就是 base_color 本身：给 0.02 会得到一块黑（只有 2% 反射）。
-    Vec3f base_color = {0.02f, 0.02f, 0.02f};
-    float metallic = 1.0f;
-    float roughness = 0.02f;
+    // 全局 AO（本管线没有 SSAO；逐物体的材质 ao 常量对场景无意义，故只留一个旋钮）。
     float ao = 1.0f;
+
+    // ── 粗糙度（2026-11-02 起**逐像素**，来自属性纹理附件 1）──
+    //
+    // 这里不再有 base_color/metallic/roughness：合成层读逐像素 (F0, roughness)。
+    // 旧做法（一套材质）在同屏两种反射材质时必然算错，是 10-31 "铬人腰部蓝光"的根因。
+    //
+    // 两个**全局**旋钮（与材质无关，属于算法/成本）：
+    //
+    // roughness_cutoff：粗糙度**超过它就不发射线**（直接交回 env 的 mip 天空）。
+    //   粗糙表面的正确答案是一个宽积分，单条镜面射线表达不了；FidelityFX SSSR 的
+    //   tile classification 用的是同一条规则。1.0 = 从不跳过（旧行为）。
+    //   建议 0.55~0.7：再高的话 mip 链本身也已经糊到看不出形状，射线纯属浪费。
+    float roughness_cutoff = 0.6f;
+
+    // roughness_to_lod：roughness → mip 级数的斜率（"磨砂"强度）。
+    //   lod = clamp(roughness × 该值, 0, 级数−1)；0 = 永远锐利（旧行为）。
+    //   mip 级在 SSR 分辨率上 ⇒ 「1 级 = 2^LOD 个 SSR 像素」的方框平均（1:2 时 ×2 到屏幕像素）。
+    //   默认 8：0.15→LOD1.2（刚起糊）、0.30→LOD2.4（明显磨砂）、0.55→LOD4.4（近乎无形状）。
+    //   线性而非 r²：理由见 ssr_fusion.cc 里那段注释（r² 会让 0.2~0.4 这段几乎不糊）。
+    float roughness_to_lod = 8.0f;
 
     // 调试视图（关 = 0）：
     //   1 = A 覆盖率灰度（看洞/漏在哪）

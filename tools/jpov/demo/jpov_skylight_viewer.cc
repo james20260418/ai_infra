@@ -50,11 +50,12 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
         jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
         jpov_skylight::kBoxHalf));
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
+    app.ground_strip_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad(
+        jpov_skylight::kLadderStripHalfWidth, jpov_skylight::kLadderStripHalfDepth));
     app.mat_low_    = jpov_skylight::MaterialLowGloss();
     app.mat_high_   = jpov_skylight::MaterialHighGloss();
     app.mat_metal_  = jpov_skylight::MaterialMetal();
     app.mat_ground_ = jpov_skylight::GroundMaterial();
-    app.mat_mirror_ = jpov_skylight::MirrorMaterial();
     app.mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
     app.mat_mirror_skin_ = jpov_skylight::MirrorSkinMaterial();
     app.BuildClutter(/*count=*/24);
@@ -443,6 +444,100 @@ int RunCaptureEnv(const std::string& out_dir) {
 //   ssr_on_half.png    (c) SSR 半分辨率 1:2 + A 预乘双边升采样 —— 本次方案
 //   ssr_coverage.png   (d) A 覆盖率灰度（看洞/漏在哪）
 // 用法：jpov_skylight_viewer --capture-ssr <out_dir>
+// 地面材质阶梯（2026-11-02）：SSR 粗糙度那条链的验收拍摄。
+//
+// 为什么要这组图：roughness 的正确性**只能靠材质对比**判断 ——
+//   镜面要锐利、金属要糊但仍是有形状的反射、石砖近处几乎没有倒影而远处掠射发亮、
+//   岩石基本只剩一层淡淡的天光。单看一张图无法判断"这糊得对不对"。
+//
+// 出图（全部同一机位/光照，只在坐标或材质上不同）：
+//   floor0_mirror.png  镜面（metal=1, r=0.02）—— 锐利倒影的基准
+//   floor1_metal.png   金属（metal=1, r=0.30）—— 磨砂的基准
+//   floor2_stone.png   光滑石砖（metal=0, r=0.20）
+//   floor3_rock.png    粗糙岩石（metal=0, r=0.85）—— 应几乎只看到漫反射
+//   ladder_ssr_on.png  四段拼接（近→远：镜面/金属/石砖/岩石）
+//   ladder_ssr_off.png 同场景、关 SSR —— 纯 env 的对照（"单调改进"的基线）
+int RunCaptureMaterials(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SSR 地面材质阶梯（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.21;   // ≈12°：掠射最能看出菲涅尔与模糊量的差别
+    app.view_.theta = 0.15;
+    app.view_.R     = 45.0;
+    app.ssr_scale_ = 0.5f;
+    app.ssr_debug_ = 0;
+
+    // 单材质：四个档位各一张（SSR 开）。
+    app.SetSsr(true);
+    const char* names[4] = {"floor0_mirror", "floor1_metal", "floor2_stone", "floor3_rock"};
+    for (int i = 0; i < 4; ++i) {
+        app.floor_preset_ = i;
+        app.RunOnce(input, winfo, (out_dir + "/" + names[i] + ".png").c_str());
+        LOG(INFO) << "capture: " << out_dir << "/" << names[i] << ".png";
+    }
+
+    // 模糊量的 A/B：同一块金属（r=0.30）在"磨砂强度=0"（等价旧行为，永远锐利）
+    // 与"磨砂强度=8"（本次新行为）下的对照图 —— 这是"逐渐磨砂"是否真的生效的直接证据。
+    app.floor_preset_ = 1;
+    const float saved_lod_slope = app.ssr_rough_to_lod_;
+    app.ssr_rough_to_lod_ = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/metal_lod0_sharp.png").c_str());
+    app.ssr_rough_to_lod_ = saved_lod_slope;
+
+    // 镜面 + SMAA：回答"最终帧的 SMAA 能不能救倒影的锯齿"（因为倒影是在 1:2 分辨率上
+    // 追踪、再双边升采样回全分辨率，锯齿的步长是 2 屏幕像素）。
+    app.floor_preset_ = 0;
+    app.SetSmaa(true, 0.1f);
+    app.RunOnce(input, winfo, (out_dir + "/mirror_smaa_on.png").c_str());
+    app.SetSmaa(false, 0.1f);
+
+    // 四段拼接：开 / 关 SSR 两张（关 SSR = 纯 env 基线）。
+    // 相机拉远一点：四段沿 X 并排（±40 m），要让四条都完整入画。
+    app.view_.phi   = 0.26;
+    app.view_.theta = 0.0;
+    app.view_.R     = 52.0;
+    app.floor_preset_ = jpov_skylight::kFloorLadder;
+    app.SetSsr(true);
+    app.RunOnce(input, winfo, (out_dir + "/ladder_ssr_on.png").c_str());
+    app.SetSsr(false);
+    app.RunOnce(input, winfo, (out_dir + "/ladder_ssr_off.png").c_str());
+    // 覆盖率（调试档 1）：看哪些像素真的发了射线并命中（粗糙段应当整段为黑 = 已截止）。
+    app.SetSsr(true);
+    app.ssr_debug_ = 1;
+    app.RunOnce(input, winfo, (out_dir + "/ladder_coverage.png").c_str());
+    app.ssr_debug_ = 0;
+
+    LOG(INFO) << "SSR 材质阶梯 captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int RunCaptureSsr(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — SSR A/B（headless）";
@@ -508,24 +603,15 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_third.png").c_str());
     app.ssr_scale_ = 0.5f;
 
-    // (e)(f) 升采样的**深度项**两种口径（其它参数完全相同）：
-    //   soft  = 软权 1/(rel+ε) + 真剪影硬拒（默认）
-    //   unity = 不判深度（Unity postprocessing 的 SSR 做法：深度只用于 march）
+    // (e) 升采样的深度判据只有一套（联合软权，2026-11-02 删掉 Unity 对照档）。
     app.ssr_debug_ = 0;
-    app.ssr_depth_mode_ = 0;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_half_soft.png").c_str());
-    app.ssr_depth_mode_ = 1;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_half_unity.png").c_str());
+    app.RunOnce(input, winfo, (out_dir + "/ssr_half.png").c_str());
 
-    // (g)(h) **掠射**机位（R=45 m、离地 0.042 m）：横向条纹就是在这里暴露的。
-    //   两种深度口径各一张 —— 这是判断"升采样深度项要不要"的关键对照。
+    // (f) **掠射**机位（R=45 m、离地 0.042 m）：横向条纹就是在这里暴露的。
     app.view_.R = 45.0;
     app.view_.phi = std::asin(0.042 / 45.0);
     app.view_.theta = 0.0;
-    app.ssr_depth_mode_ = 0;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_soft.png").c_str());
-    app.ssr_depth_mode_ = 1;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_unity.png").c_str());
+    app.RunOnce(input, winfo, (out_dir + "/ssr_graze.png").c_str());
 
 
     // (i)(j) 远景仰角雾 × SSR：雾用 **MRT#1 场景深度**，而 SSR 合成是往同一个 FBO 的颜色
@@ -550,6 +636,7 @@ int main(int argc, char** argv) {
     std::string smaa_out_dir;
     std::string env_out_dir;
     std::string ssr_out_dir;
+    std::string mat_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -560,12 +647,17 @@ int main(int argc, char** argv) {
             env_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ssr") == 0 && i + 1 < argc) {
             ssr_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
+            mat_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!mat_out_dir.empty()) {
+        return RunCaptureMaterials(mat_out_dir);
     }
     if (!ssr_out_dir.empty()) {
         return RunCaptureSsr(ssr_out_dir);

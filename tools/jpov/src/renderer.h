@@ -164,6 +164,8 @@ private:
     // SSR 的属性目标（全分辨率 RGBA16F：.xy 视空间法线，.a mask）。只在开了 SSR 时才建；
     // 深度附件**复用 HDR FBO 的 depth 纹理**（只读它做 LEQUAL 测试，不写）。
     unsigned int ssr_attr_fbo_ = 0, ssr_attr_tex_ = 0;
+    // 属性目标附件 1（RGBA16F）：rgb = F0，a = roughness —— 逐像素材质（2026-11-02）。
+    unsigned int ssr_attr_mat_tex_ = 0;
     int ssr_attr_w_ = 0, ssr_attr_h_ = 0;
     unsigned int ssr_attr_depth_tex_ = 0;   // 缓存当时挂的深度纹理句柄（变了要重建 FBO）
     SsrIntegration ssr_integration_;

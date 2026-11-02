@@ -5,11 +5,15 @@
 //       分辨率（N×N 选点）。纯数学部分 GL-free，单测在 ssr_downsample_test.cc。
 //   SsrRenderer  （ssr_renderer.h）：**算法** —— 纯模块，同分辨率进/出：
 //       radiance(rgb) + ray_ratio(a) + 类型图（命中/天空/出屏/预算耗尽）。
+//   SsrFilter    （ssr_filter.h）：**粗糙度预滤波** —— 把 radiance/type 变成
+//       覆盖率加权的 mip 链（A 预乘 + 空像素填充），合成层按 roughness 采 textureLod。
+//       没有这一步，粗糙材质上的命中区域仍是像素级锐利（"把石头画成镜子"）。
 //   SsrFusion    （ssr_fusion.h）：**融合** —— A 预乘双边升采样 + 用 SSR **替换**
 //       3D pass 已经加过的那一份环境镜面项（不是叠加，叠加会让金属亮一倍）：
 //           out = hdr + mask·A·ao·(ssr_L·weight − env_term)
 //       A = 0 ⇒ 整项抵消 ⇒ 与"没开 SSR"逐字节相同（单调改进）。
-//   SsrIntegration（本类）：**编排** —— HDR 副本 blit → 调上面三者；另外编译属性 pass 的
+//       材质（F0/roughness）与模糊量都**逐像素**取自属性纹理附件 1。
+//   SsrIntegration（本类）：**编排** —— HDR 副本 blit → 调上面四者；另外编译属性 pass 的
 //       program（Renderer 用自己的 draw 路径画它，见 DrawSsrAttrPass）。
 //
 // 管线位置：不透明 3D 之后、半透明（strip/粒子/雾）之前 —— 要的是"没有雾、没有半透明"的颜色。
@@ -23,6 +27,7 @@
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/ssr/ssr_downsample.h"
 #include "tools/jpov/src/ssr/ssr_fusion.h"
+#include "tools/jpov/src/ssr/ssr_filter.h"
 #include "tools/jpov/src/ssr/ssr_renderer.h"
 
 namespace jpov {
@@ -33,6 +38,7 @@ struct SsrPassInputs {
     unsigned int hdr_color_tex = 0;    // RGBA16F：不透明 3D 已画完的颜色
     unsigned int scene_depth_tex = 0;  // R32F：MRT#1 的 gl_FragCoord.z
     unsigned int attr_tex = 0;         // RGBA16F：rgb = 视空间法线，a = 掩码编码
+    unsigned int attr_mat_tex = 0;     // RGBA16F：rgb = F0，a = roughness（逐像素材质）
     int full_w = 0;
     int full_h = 0;
 
@@ -81,9 +87,6 @@ public:
     unsigned int attr_cutout_program() const { return prog_attr_cutout_; }
     unsigned int attr_skinned_program() const { return prog_attr_skinned_; }
 
-    // 最近一次 SSR 的分辨率（供 HUD / 测试读数）。
-    int ssr_width() const { return ssr_w_; }
-    int ssr_height() const { return ssr_h_; }
 
 private:
     void EnsureCopyTarget(int w, int h);
@@ -101,10 +104,9 @@ private:
 
     SsrDownsample downsample_;
     SsrRenderer ssr_;
+    SsrFilter filter_;
     SsrFusion fusion_;
 
-    int ssr_w_ = 0;
-    int ssr_h_ = 0;
     bool initialized_ = false;
 };
 

@@ -697,6 +697,10 @@ void Renderer::DestroyHDRFBO() {
             glDeleteTextures(1, &ssr_attr_tex_);
             ssr_attr_tex_ = 0;
         }
+        if (ssr_attr_mat_tex_ != 0) {
+            glDeleteTextures(1, &ssr_attr_mat_tex_);
+            ssr_attr_mat_tex_ = 0;
+        }
         ssr_attr_w_ = 0;
         ssr_attr_h_ = 0;
         ssr_attr_depth_tex_ = 0;
@@ -1784,6 +1788,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 ssi.hdr_color_tex = color_tex_hdr_;
                 ssi.scene_depth_tex = scene_depth_tex_hdr_;
                 ssi.attr_tex = ssr_attr_tex_;
+                ssi.attr_mat_tex = ssr_attr_mat_tex_;
                 ssi.full_w = fbo_3d_w;
                 ssi.full_h = fbo_3d_h;
                 ssi.near_plane = cmds.camera.near;
@@ -2532,27 +2537,37 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
         glDeleteTextures(1, &ssr_attr_tex_);
         ssr_attr_tex_ = 0;
     }
+    if (ssr_attr_mat_tex_ != 0) {
+        glDeleteTextures(1, &ssr_attr_mat_tex_);
+        ssr_attr_mat_tex_ = 0;
+    }
     CHECK_NE(depth_tex_hdr_, 0u) << "SSR 属性 pass 复用 HDR FBO 的深度纹理，它还没建";
 
-    glGenTextures(1, &ssr_attr_tex_);
-    glBindTexture(GL_TEXTURE_2D, ssr_attr_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    auto make_attr_tex = [&](unsigned int* tex) {
+        glGenTextures(1, tex);
+        glBindTexture(GL_TEXTURE_2D, *tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    };
+    make_attr_tex(&ssr_attr_tex_);          // 附件0：视空间法线 + 掩码
+    make_attr_tex(&ssr_attr_mat_tex_);      // 附件1：F0 + roughness（逐像素材质）
 
     glGenFramebuffers(1, &ssr_attr_fbo_);
     GLint prev_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, ssr_attr_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssr_attr_tex_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
+                           ssr_attr_mat_tex_, 0);
     // 深度附件**复用** HDR FBO 的那张深度纹理：只读它做 LEQUAL 测试（glDepthMask(GL_FALSE)），
     // 所以属性 pass 只会写"真正可见的那一层表面"，不会把被挡住的背面也写进去。
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex_hdr_, 0);
-    const GLenum buf = GL_COLOR_ATTACHMENT0;
-    glDrawBuffers(1, &buf);
+    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR 属性 FBO 不完整（" << w << "×" << h << "）";
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
@@ -2606,7 +2621,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, ssr_attr_fbo_);
     glViewport(0, 0, w, h);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT);   // 两个颜色附件一起清（清屏作用于所有 draw buffer）
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -2634,9 +2649,16 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     const unsigned int attr_progs[2] = {prog, prog_cutout};
     GLint loc_world_to_view[2] = {0, 0};
     GLint loc_is_reflector[2] = {0, 0};
+    // 逐像素材质（附件 1）：F0 的来源。base_color 走常量（镂空变体另外用纹理色覆盖）。
+    GLint loc_base_color[2] = {0, 0};
+    GLint loc_metallic[2] = {0, 0};
+    GLint loc_roughness[2] = {0, 0};
     for (int i = 0; i < 2; ++i) {
         loc_world_to_view[i] = glGetUniformLocation(attr_progs[i], "uWorldToView");
         loc_is_reflector[i] = glGetUniformLocation(attr_progs[i], "uAttrIsReflector");
+        loc_base_color[i] = glGetUniformLocation(attr_progs[i], "uAttrBaseColor");
+        loc_metallic[i] = glGetUniformLocation(attr_progs[i], "uAttrMetallic");
+        loc_roughness[i] = glGetUniformLocation(attr_progs[i], "uAttrRoughness");
         glUseProgram(attr_progs[i]);
         glUniformMatrix3fv(loc_world_to_view[i], 1, GL_FALSE, world_to_view);
     }
@@ -2654,6 +2676,13 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
             glUniform1f(loc_is_reflector[which], is_reflector);
             last_is_reflector[which] = is_reflector;
         }
+        // 材质三项逐物体上传（与主 pass 同一份 PBRMaterial）。
+        // 为什么不在属性 pass 里只画反射体：合成层的 env 项要按**该像素自己的** F0 重算，
+        // 而反射体旁边的非反射体虽然 mask=0 不会被合成层用到，成本也只多 3 次 uniform。
+        glUniform3f(loc_base_color[which], o.material.base_color.r, o.material.base_color.g,
+                    o.material.base_color.b);
+        glUniform1f(loc_metallic[which], o.material.metallic);
+        glUniform1f(loc_roughness[which], o.material.roughness);
         // 与主 pass 用同一个 mvp（含 model），只换 FS：写法线 + 掩码。
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_,
                                                attr_progs[which], attr_progs[which],
@@ -2669,6 +2698,9 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
         glUniformMatrix3fv(glGetUniformLocation(prog_sk, "uWorldToView"), 1, GL_FALSE,
                            world_to_view);
         const GLint loc_sk_reflector = glGetUniformLocation(prog_sk, "uAttrIsReflector");
+        const GLint loc_sk_base_color = glGetUniformLocation(prog_sk, "uAttrBaseColor");
+        const GLint loc_sk_metallic = glGetUniformLocation(prog_sk, "uAttrMetallic");
+        const GLint loc_sk_roughness = glGetUniformLocation(prog_sk, "uAttrRoughness");
         for (const SkinnedMeshCommand& sm : cmds.skinned_mesh) {
             if (!sm.ssr_reflector) {
                 continue;
@@ -2677,6 +2709,10 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
             CHECK(skel != nullptr) << "SSR 属性 pass: skeleton_id " << sm.skeleton_id
                                    << " 未注册";
             glUniform1f(loc_sk_reflector, 1.0f);
+            glUniform3f(loc_sk_base_color, sm.material.base_color.r, sm.material.base_color.g,
+                        sm.material.base_color.b);
+            glUniform1f(loc_sk_metallic, sm.material.metallic);
+            glUniform1f(loc_sk_roughness, sm.material.roughness);
             SkeletonRenderer::DrawSkinnedMesh(
                 sm, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_, prog_sk, prog_sk,
                 skel->gpu_handles(), skel->pose_count(), instance_model_buf_,
