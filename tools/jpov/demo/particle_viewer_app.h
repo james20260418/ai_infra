@@ -1,6 +1,6 @@
 // JPOV 粒子查看器（particle viewer）— 渲染核心 App
 //
-// 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
+// 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff + 水花喷泉，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
 //   烟雾（类型 / 开关 / 照度 / 浓度）/ 火星（开关 / 数量 / 大小）/
 //   火焰温度增益（含 3 套温度→颜色映射）/ 软深度（开关 + 过渡距离，A/B 用）/
@@ -93,6 +93,16 @@ inline const SmokeTexEntry kSmokeTexes[] = {
 };
 inline constexpr int kSmokeTexCount =
     static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
+
+// ── 水花（water splash）────────────────────────────────────────────────────
+// 素材：/james_pm/danis/water_splash.png 里横排的 5 个水花（F1..F5）。
+// 产线：S_i = 相邻关键帧的 FLOW 形变中点 → 6 条两段链 × 12 帧 → 12×6 图集。
+// 2026-11-02 Danis 定稿：**flipbook 只保留 S5 FLOW 这一版**（F5 直出偏硬、
+// S5 PROFILE 会「充气」，两版都删了）。水柱核心与顶点水花共用这一张图集。
+inline constexpr const char* kWaterAtlasFile = "water/water_s5_flow_12x6.png";
+inline constexpr int kWaterTilesX = 12;
+inline constexpr int kWaterTilesY = 6;
+inline constexpr int kWaterPairLen = 12;
 
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
@@ -198,6 +208,100 @@ inline jpov::particles::EmitterConfig MakeEmberConfig() {
     return c;
 }
 
+// 水花喷泉（单座），只用两层：
+//   ① 水柱核心（MakeWaterCoreConfig）：窄锥，寿命 = t_apex = v/g，只活到抛物线顶点
+//   ② 顶点水花（MakeWaterSplashConfig）：rate = 0，只在①的死亡点 SpawnAt
+// 两层共用同一张 S5 FLOW 水花图集（kWaterAtlasFile），对齐一律 kView。
+// 「外抛水滴」「落点泡沫」两层按 Danis 2026-11-02 反馈不做 —— 先看最简单结构。
+inline jpov::particles::EmitterConfig MakeWaterSplashConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {0.0f, 0.06f, 0.0f};
+    c.rate = 0.0f;                       // 只在核心死亡点 spawn
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.02f;
+    c.cone_half_angle_deg = 85.0f;       // 朝上 + 85° ≈ 水平外抛
+    c.emit_dir = {0.0f, 1.0f, 0.0f};
+    c.lifetime = {0.45f, 0.65f};
+    c.speed = {0.20f, 0.75f};
+    c.size_start = {0.09f, 0.13f};
+    c.rotation = {0.0f, 6.2831853f};
+    c.rotation_speed = {-0.35f, 0.35f};   // 轻微自旋（不要翻跟头）
+    c.rotation_speed_decay = 0.85f;
+    c.gravity = {0.0f, -8.0f, 0.0f};      // 真重力方向：落回来
+    c.drag = 0.10f;
+    c.noise_enabled = true;
+    c.noise_amp = 0.25f;
+    c.noise_freq = 1.4f;
+    c.use_color_over_life = true;
+    // 水色：冷白（略偏蓝），alpha 两端 0 → 出生淡入、死亡淡出，避免硬弹。
+    jpov::particles::Gradient g;
+    g.keys = {
+        {0.00f, jpov::Color{0.45f, 0.70f, 0.95f, 0.00f}},
+        {0.12f, jpov::Color{0.55f, 0.78f, 1.00f, 0.55f}},
+        {0.55f, jpov::Color{0.68f, 0.86f, 1.00f, 0.62f}},
+        {0.86f, jpov::Color{0.82f, 0.93f, 1.00f, 0.32f}},
+        {1.00f, jpov::Color{1.00f, 1.00f, 1.00f, 0.00f}},
+    };
+    c.color_over_life = g;
+    c.use_size_over_life = true;
+    // 出生偏小（刚溅起的一小团）→ 中段铺开 → 末段保持
+    c.size_curve.keys = {{0.0f, 0.35f}, {0.30f, 1.00f}, {1.0f, 1.00f}};
+    c.flipbook = true;
+    c.tiles_x = kWaterTilesX;
+    c.tiles_y = kWaterTilesY;
+    c.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
+    c.pair_len = kWaterPairLen;
+    c.start_frame_random = true;
+    c.align = jpov::AlignMode::kView;   // 面向相机：俯瞰时不会穿帮
+    c.emissive = true;   // 加法集：水花的亮部叠加（覆盖混合会糊成白烟）
+    return c;
+}
+
+// 水柱核心：极窄锥 + 高发射率。贴图与顶点水花共用同一张水花图集，
+// 体积由小到大（size_curve 0.20 → 1.00）⇒ 底部细、到顶铺开。
+// 下面这些数值只是「速度倍率 = 1.0」的基准，运行时按面板/CLI 覆盖。
+inline jpov::particles::EmitterConfig MakeWaterCoreConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {0.0f, 0.06f, 0.0f};
+    c.rate = 90.0f;
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.020f;
+    c.cone_half_angle_deg = 2.0f;
+    c.emit_dir = {0.0f, 1.0f, 0.0f};
+    c.lifetime = {0.25f, 0.30f};          // 基准；运行时 × 速度倍率（t_apex = v/g）
+    c.speed = {2.60f, 2.85f};
+    c.size_start = {0.018f, 0.030f};
+    c.rotation = {0.0f, 6.2831853f};      // 随机滚转：打散"同一张贴图复制"感
+    c.rotation_speed = {-0.5f, 0.5f};
+    c.rotation_speed_decay = 1.0f;
+    c.gravity = {0.0f, -6.0f, 0.0f};
+    c.drag = 0.10f;
+    c.noise_enabled = true;
+    c.noise_amp = 0.08f;
+    c.noise_freq = 1.4f;
+    c.use_color_over_life = true;
+    jpov::particles::Gradient g;
+    g.keys = {
+        {0.00f, jpov::Color{0.50f, 0.62f, 0.80f, 0.00f}},
+        {0.10f, jpov::Color{0.72f, 0.84f, 1.02f, 0.80f}},
+        {0.60f, jpov::Color{0.65f, 0.78f, 0.98f, 0.68f}},
+        {1.00f, jpov::Color{0.50f, 0.60f, 0.80f, 0.00f}},
+    };
+    c.color_over_life = g;
+    c.use_size_over_life = true;
+    // 体积由小到大：刚离开喷口是一小团，升到顶点铺开
+    c.size_curve.keys = {{0.0f, 0.20f}, {0.55f, 0.65f}, {1.0f, 1.00f}};
+    c.flipbook = true;     // 由 viewer 换成水花图集
+    c.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
+    c.pair_len = kWaterPairLen;
+    // ⚠️ 不用 kVelocity：该分支的 up 轴算错（up = cross(right, u) 得到的是面片法线），
+    // 速度与视线垂直时面片会退化成一条横线。这里用 kView 面向相机。
+    c.align = jpov::AlignMode::kView;
+    c.stretched = false;
+    c.emissive = true;
+    return c;
+}
+
 class ParticleViewerApp : public JPOV {
 public:
     using JPOV::JPOV;
@@ -206,6 +310,15 @@ public:
     jpov::PBRMaterial ground_mat_;
     uint32_t fuel_mesh_ = 0;
     jpov::PBRMaterial fuel_mat_;
+    // 喷泉水池底座（扁平石台）。
+    uint32_t basin_mesh_ = 0;
+    uint32_t pool_mesh_ = 0;   // 水面（扁平大盒）
+    jpov::PBRMaterial basin_mat_ =
+        jpov::PBRMaterial::SolidColorMR({0.52f, 0.54f, 0.55f, 1.0f}, 0.0f, 0.85f);
+    jpov::PBRMaterial pool_mat_ =
+        jpov::PBRMaterial::SolidColorMR({0.20f, 0.32f, 0.40f, 1.0f}, 0.0f, 0.16f);
+    jpov::PBRMaterial water_ground_mat_ =
+        jpov::PBRMaterial::SolidColorMR({0.07f, 0.12f, 0.16f, 1.0f}, 0.0f, 0.25f);
 
     jpov_viewer::ViewConfig view_;
     jpov_skylight::SkyDegrees deg_;
@@ -213,20 +326,28 @@ public:
     bool fire_enable_ = true;
     bool smoke_enable_ = true;
     bool ember_enable_ = true;
+    int ui_scene_ = 0;   // 0 = 火焰（原样）；1 = 水花喷泉
+    int last_scene_ = 0;
     jpov::particles::EmitterConfig fire_cfg_ = MakeFireConfig();
     jpov::particles::EmitterConfig smoke_cfg_ = MakeSmokeConfig();
     jpov::particles::EmitterConfig ember_cfg_ = MakeEmberConfig();
+    jpov::particles::EmitterConfig water_cfg_ = MakeWaterSplashConfig();
+    jpov::particles::EmitterConfig water_core_cfg_ = MakeWaterCoreConfig();
     jpov::particles::ParticleEmitter fire_emitter_;
     jpov::particles::ParticleEmitter smoke_emitter_;
     jpov::particles::ParticleEmitter ember_emitter_;
+    jpov::particles::ParticleEmitter water_emitter_;
+    jpov::particles::ParticleEmitter water_core_emitter_;
     bool fire_needs_reset_ = true;
     bool smoke_needs_reset_ = true;
     bool ember_needs_reset_ = true;
+    bool water_needs_reset_ = true;
     int fire_choice_ = 0;
     int smoke_choice_ = 0;
     int smoke_choice_applied_ = 0;
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     std::array<uint32_t, kSmokeTexCount> smoke_choice_tex_{};
+    uint32_t water_tex_ = 0;   // 水花图集（全场景一张）
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
@@ -242,6 +363,12 @@ public:
     float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
     float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
     float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
+    float ui_water_count_ = 100.0f;       // 喷泉目标存活粒子数（40..200，含核心+水花）
+    float ui_water_size_ = 0.36f;        // 水花世界尺寸（米）
+    float ui_water_speed_ = 1.2f;        // 喷射速度倍率（喷泉高度）
+    float ui_water_spread_ = 1.0f;       // 锥角倍率（张开程度）
+    float ui_water_opacity_ = 0.55f;     // 水花整体不透明度（叠乘在逐粒子 alpha 上）
+    bool ui_water_emissive_ = true;      // true = 水花走加法集（水花是亮→暗的叠加，观感最像水）
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     bool ui_soft_depth_ = true;          // 软深度开关（关 = 旧 2cm 硬切，便于 A/B）
     float ui_soft_depth_m_ = 0.08f;      // 软深度淡出过渡距离（视空间米）
@@ -254,6 +381,7 @@ public:
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
     jpov::particles::Rng sub_rng_{20261015u};
+    jpov::particles::Rng water_rng_{20261110u};
 
     void InstallTextMeasure() { ui_.SetTextMeasure(&ParticleViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -295,15 +423,35 @@ public:
                                     static_cast<int>(winfo.width),
                                     static_cast<int>(winfo.height));
         }
+        if (ui_scene_ != last_scene_) {
+            if (ui_scene_ == 1) {
+                // 切到水花场景：默认机位 + 清空旧粒子（否则会看到冻结的一帧突然复活）。
+                view_.R = 1.15;
+                view_.phi = 0.10;
+                view_.theta = 0.30;
+                water_needs_reset_ = true;
+            }
+            last_scene_ = ui_scene_;
+        }
         cmds->camera.position = view_.Position();
-        cmds->camera.target = jpov_viewer::ViewConfig::Target();
+        // 水花喷泉整体在 y∈[0, 0.9]，把视点抬到 0.32 才能居中（火焰仍看原点）。
+        cmds->camera.target = (ui_scene_ == 1) ? jpov::Vec3f{0.0f, 0.22f, 0.0f}
+                                               : jpov_viewer::ViewConfig::Target();
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 60.0f;
         cmds->camera.near = 0.05f;
         cmds->camera.far = 1000.0f;
 
+        // 水花场景：把太阳拍高一点（45°）——低太阳下地面/水面几乎是黑的，
+        // 白色水花飘在黑底上会读成“烟花/雪”；亮环境下才有水的反光。
+        jpov_skylight::SkyDegrees sky_deg = deg_;
+        if (ui_scene_ == 1) {
+            sky_deg.sun_elev_deg = 45.0f;
+            sky_deg.sun_azim_deg = 35.0f;
+            sky_deg.turbidity = 3.0f;
+        }
         const jpov_skylight::SkyLighting nl =
-            jpov_skylight::MakeSkyLighting(deg_, /*tricolor_ambient=*/false);
+            jpov_skylight::MakeSkyLighting(sky_deg, /*tricolor_ambient=*/false);
         cmds->sky = nl.sky;
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
@@ -317,9 +465,11 @@ public:
             cmds->bloom = bc;
         }
 
-        cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
+        cmds->DrawObject3D(ground_mesh_,
+                           (ui_scene_ == 1) ? water_ground_mat_ : ground_mat_,
+                           {0.0f, 0.0f, 0.0f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-        if (ui_fuel_enable_) {
+        if (ui_fuel_enable_ && ui_scene_ == 0) {
             const float s = ui_fuel_scale_;
             cmds->DrawObject3D(fuel_mesh_, fuel_mat_,
                                {ui_fuel_x_, ui_fuel_y_ + 0.5f * s, ui_fuel_z_},
@@ -378,7 +528,7 @@ public:
         // ── 火焰 ──
         std::vector<jpov::Vec3f> flame_deaths;
         std::vector<jpov::ParticleInstance> finst;
-        if (fire_enable_) {
+        if (ui_scene_ == 0 && fire_enable_) {
             fire_cfg_.rate = ui_particle_count_ / std::max(life_avg, 1e-3f);
             fire_cfg_.size_start = {ui_fire_size_ * 0.6f, ui_fire_size_};
             const float base_y = ui_fuel_enable_
@@ -418,8 +568,7 @@ public:
 
         // ── 烟 ──
         // 发射逻辑参考备份 PR #196：火焰死亡点概率 spawn，小团慢速上浮，寿命内放大。
-        if (smoke_enable_) {
-            // 烟：全部为 12×6 成对形变图集，每粒子随机选一块，寿命内走完块首→块尾。
+        if (ui_scene_ == 0 && smoke_enable_) {
     const SmokeTexEntry& smoke = kSmokeTexes[sc];
     smoke_cfg_.tiles_x = smoke.tx;
     smoke_cfg_.tiles_y = smoke.ty;
@@ -466,7 +615,7 @@ public:
         }
 
         const uint32_t fire_tex = fire_choice_tex_[fc];
-        if (fire_enable_ && !finst.empty() && fire_tex != 0) {
+        if (ui_scene_ == 0 && fire_enable_ && !finst.empty() && fire_tex != 0) {
             jpov::ParticleRenderCommand pc;
             pc.particles = std::move(finst);
             pc.texture_id = fire_tex;
@@ -483,7 +632,7 @@ public:
         // 简单一层：纯色加法小点，从火焰上方冒出；数量/大小只由 UI 控制。
         {
             const float life_avg = 0.5f * (ember_cfg_.lifetime.min + ember_cfg_.lifetime.max);
-            ember_cfg_.rate = ember_enable_
+            ember_cfg_.rate = (ui_scene_ == 0 && ember_enable_)
                 ? ui_ember_count_ / std::max(life_avg, 1e-3f) : 0.0f;
             ember_cfg_.size_start = {ui_ember_size_ * 0.6f, ui_ember_size_};
             const float base_y = ui_fuel_enable_
@@ -497,7 +646,7 @@ public:
             ember_emitter_.SetConfig(ember_cfg_);
             std::vector<jpov::ParticleInstance> einst;
             ember_emitter_.Update(dt, &einst);
-            if (ember_enable_ && !einst.empty()) {
+            if (ui_scene_ == 0 && ember_enable_ && !einst.empty()) {
                 jpov::ParticleRenderCommand ec;
                 ec.particles = std::move(einst);
                 ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
@@ -507,6 +656,119 @@ public:
                 cmds->DrawParticles(std::move(ec));
             }
         }
+
+        // ── 水花喷泉（单座）──
+        // 两层：
+        //   ① 水柱核心：窄锥，活到抛物线顶点（t_apex = v/g），体积由小到大
+        //   ② 顶点水花：rate=0，只在①的死亡点 SpawnAt，朝上 85° 锥 + 重力落回
+        // 两层共用同一张 S5 FLOW 水花图集；对齐一律 kView（俯瞰不穿帮）。
+        if (ui_scene_ == 1) {
+            if (water_tex_ == 0) {
+                const std::string rel = std::string("textures/") + kWaterAtlasFile;
+                const std::string p = FindTexture(rel.c_str());
+                if (!p.empty()) {
+                    // 粒子只有几厘米，256px/cell 的图集不开 mipmap 会严重闪烁、像盐粒。
+                    jpov::TextureOptions opts;
+                    opts.mipmap = true;
+                    water_tex_ = RegisterTexture(p, opts);
+                    LOG(INFO) << "[particle_viewer] water tex = " << p;
+                }
+            }
+
+            // 核心寿命 = t_apex = v/g，与「喷射高度」成正比 → 无论喷多高都死在顶点。
+            // 基准 {0.25,0.30}s 是「速度倍率 1.0」的值；默认 1.2 时即 {0.30,0.36}s。
+            const float spd = ui_water_speed_;
+            water_core_cfg_.lifetime = {0.25f * spd, 0.30f * spd};
+            const float core_life =
+                0.5f * (water_core_cfg_.lifetime.min + water_core_cfg_.lifetime.max);
+            // 预算 40..200（默认 100）：核心占 55%，其余留给顶点水花。
+            water_core_cfg_.rate =
+                ui_water_count_ * 0.55f / std::max(core_life, 1e-3f);
+            // 速度区间收窄 ⇒ 相邻水花间距均匀，不会一段密一段稀（串珠）。
+            water_core_cfg_.speed = {2.60f * spd, 2.85f * spd};
+            water_core_cfg_.cone_half_angle_deg =
+                std::clamp(2.0f * ui_water_spread_, 0.5f, 60.0f);
+            water_core_cfg_.size_start = {ui_water_size_ * 0.16f, ui_water_size_ * 0.26f};
+            water_core_cfg_.tiles_x = kWaterTilesX;
+            water_core_cfg_.tiles_y = kWaterTilesY;
+            water_core_cfg_.pair_len = kWaterPairLen;
+
+            water_cfg_.size_start = {ui_water_size_ * 0.55f, ui_water_size_ * 0.75f};
+            water_cfg_.speed = {0.20f * ui_water_speed_, 0.75f * ui_water_speed_};
+            water_cfg_.tiles_x = kWaterTilesX;
+            water_cfg_.tiles_y = kWaterTilesY;
+            water_cfg_.pair_len = kWaterPairLen;
+
+            if (water_needs_reset_) {
+                water_emitter_.SetConfig(water_cfg_);
+                water_emitter_.Reset(20261110u);
+                water_core_emitter_.SetConfig(water_core_cfg_);
+                water_core_emitter_.Reset(20261111u);
+                water_needs_reset_ = false;
+            }
+
+            // 底座石台 + 水面（纯平面 quad，避免扁盒子的侧壁暗边）。
+            cmds->DrawObject3D(pool_mesh_, pool_mat_, {0.0f, 0.008f, 0.0f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            cmds->DrawObject3D(basin_mesh_, basin_mat_, {0.0f, 0.030f, 0.0f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
+                               /*scale=*/0.34f);
+
+            // ① 水柱核心：上升段 + 收集死亡点（≈ 抛物线顶点）
+            water_core_emitter_.SetConfig(water_core_cfg_);
+            std::vector<jpov::Vec3f> core_deaths;
+            std::vector<jpov::ParticleInstance> cinst;
+            water_core_emitter_.Update(dt, &cinst, &core_deaths);
+
+            // ② 顶点水花：每个死亡点原地生成一朵
+            water_emitter_.SetConfig(water_cfg_);
+            for (const jpov::Vec3f& p : core_deaths) {
+                water_emitter_.SpawnAt(p);
+            }
+            std::vector<jpov::ParticleInstance> winst;
+            water_emitter_.Update(dt, &winst);
+
+            const float walpha = std::clamp(ui_water_opacity_, 0.0f, 2.0f);
+            for (jpov::ParticleInstance& p : winst) {
+                p.color.a = std::clamp(p.color.a * walpha, 0.0f, 1.0f);
+                if (ui_water_emissive_) {
+                    // 加法集：多层叠加会累加，颜色要压暗一点（略偏青蓝）
+                    p.color.r *= 0.30f;
+                    p.color.g *= 0.34f;
+                    p.color.b *= 0.40f;
+                }
+            }
+
+            if (!winst.empty() && water_tex_ != 0) {
+                jpov::ParticleRenderCommand wpc;
+                wpc.particles = std::move(winst);
+                wpc.texture_id = water_tex_;
+                wpc.tiles_x = kWaterTilesX;
+                wpc.tiles_y = kWaterTilesY;
+                wpc.flipbook = true;
+                wpc.align = jpov::AlignMode::kView;
+                wpc.emissive = ui_water_emissive_;
+                wpc.frame_blend = frame_blend_;
+                wpc.soft_depth_m = SoftDepthForCommand();
+                cmds->DrawParticles(std::move(wpc));
+            }
+
+            // 水柱核心那一批
+            if (!cinst.empty() && water_tex_ != 0) {
+                jpov::ParticleRenderCommand cpc;
+                cpc.particles = std::move(cinst);
+                cpc.texture_id = water_tex_;
+                cpc.tiles_x = kWaterTilesX;
+                cpc.tiles_y = kWaterTilesY;
+                cpc.flipbook = true;
+                cpc.align = jpov::AlignMode::kView;
+                cpc.frame_blend = frame_blend_;
+                cpc.emissive = true;
+                cpc.soft_depth_m = SoftDepthForCommand();
+                cmds->DrawParticles(std::move(cpc));
+            }
+        }
+
 
         if (show_panel_) {
             DrawPanel(input);
@@ -559,74 +821,97 @@ private:
         const float x0 = 0.02f * w;
         const float labw = 52.0f;
         const float combo_x = x0 + labw + 6.0f;
+
+        // 场景下拉：两种场景共用；选中哪个只画哪个的控件。
         {
-            ui_.Text("火焰", jpov::UiRect{{x0, 8.0f}, {labw, 26.0f}});
-            std::vector<const char*> items;
-            items.reserve(static_cast<size_t>(kFireTexCount));
-            for (int i = 0; i < kFireTexCount; ++i) { items.push_back(kFireTexes[i].label); }
-            ui_.Combo("火焰纹理", &fire_choice_, items,
-                      jpov::UiRect{{combo_x, 8.0f}, {0.30f * w, 26.0f}});
+            ui_.Text("场景", jpov::UiRect{{x0, 8.0f}, {labw, 26.0f}});
+            std::vector<const char*> scenes = {"火焰", "水花喷泉"};
+            ui_.Combo("场景", &ui_scene_, scenes,
+                      jpov::UiRect{{combo_x, 8.0f}, {0.46f * w, 26.0f}});
         }
-        {
-            ui_.Text("烟", jpov::UiRect{{x0, 42.0f}, {labw, 26.0f}});
-            std::vector<const char*> items;
-            items.reserve(static_cast<size_t>(kSmokeTexCount));
-            for (int i = 0; i < kSmokeTexCount; ++i) { items.push_back(kSmokeTexes[i].label); }
-            ui_.Combo("烟纹理", &smoke_choice_, items,
-                      jpov::UiRect{{combo_x, 42.0f}, {0.30f * w, 26.0f}});
-        }
-        {
-            ui_.Text("温度", jpov::UiRect{{x0, 76.0f}, {labw, 26.0f}});
-            std::vector<const char*> items;
-            for (int i = 0; i < kFirePaletteCount; ++i) {
-                items.push_back(kFirePaletteNames[i]);
+
+        if (ui_scene_ == 1) {
+            // ── 水花场景：只留水花自己的参数（不出现火焰/烟/火星/燃料块）──
+            const float colw = 0.30f * w;
+            const float top = 48.0f;
+            auto wrow = [&](int i) {
+                return jpov::UiRect{{x0, top + i * 34.0f}, {colw, 24.0f}};
+            };
+            ui_.SliderFloat("水花数量", &ui_water_count_, wrow(0), 40.0f, 200.0f, 0);
+            ui_.SliderFloat("水花大小", &ui_water_size_, wrow(1), 0.04f, 0.40f, 3);
+            ui_.SliderFloat("喷射高度", &ui_water_speed_, wrow(2), 0.3f, 2.0f, 2);
+            ui_.SliderFloat("张开", &ui_water_spread_, wrow(3), 0.3f, 2.0f, 2);
+            ui_.SliderFloat("水花不透明度", &ui_water_opacity_, wrow(4), 0.05f, 1.5f, 2);
+            ui_.Checkbox("水花加法（关 = 覆盖混合）", &ui_water_emissive_, wrow(5));
+        } else {
+            {
+                ui_.Text("火焰", jpov::UiRect{{x0, 42.0f}, {labw, 26.0f}});
+                std::vector<const char*> items;
+                items.reserve(static_cast<size_t>(kFireTexCount));
+                for (int i = 0; i < kFireTexCount; ++i) { items.push_back(kFireTexes[i].label); }
+                ui_.Combo("火焰纹理", &fire_choice_, items,
+                          jpov::UiRect{{combo_x, 42.0f}, {0.30f * w, 26.0f}});
             }
-            ui_.Combo("温度映射", &ui_palette_, items,
-                      jpov::UiRect{{combo_x, 76.0f}, {0.30f * w, 26.0f}});
-        }
+            {
+                ui_.Text("烟", jpov::UiRect{{x0, 76.0f}, {labw, 26.0f}});
+                std::vector<const char*> items;
+                items.reserve(static_cast<size_t>(kSmokeTexCount));
+                for (int i = 0; i < kSmokeTexCount; ++i) { items.push_back(kSmokeTexes[i].label); }
+                ui_.Combo("烟纹理", &smoke_choice_, items,
+                          jpov::UiRect{{combo_x, 76.0f}, {0.30f * w, 26.0f}});
+            }
+            {
+                ui_.Text("温度", jpov::UiRect{{x0, 110.0f}, {labw, 26.0f}});
+                std::vector<const char*> items;
+                for (int i = 0; i < kFirePaletteCount; ++i) {
+                    items.push_back(kFirePaletteNames[i]);
+                }
+                ui_.Combo("温度映射", &ui_palette_, items,
+                          jpov::UiRect{{combo_x, 110.0f}, {0.30f * w, 26.0f}});
+            }
+            // 两列布局：第一列 = 火焰/烟/燃料块/软深度（17 行），第二列 = buff 类开关。
+            const float colw = 0.24f * w;
+            const float col2x = x0 + colw + 14.0f;
+            const float top = h - 16.0f - (17 * 24.0f + 16 * 5.0f);
+            auto row = [&](int i) {
+                return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
+            };
+            auto row2 = [&](int i) {
+                return jpov::UiRect{{col2x, top + i * 29.0f}, {colw, 24.0f}};
+            };
+            ui_.Checkbox("粒子火", &fire_enable_, row(0));
+            ui_.SliderFloat("粒子数", &ui_particle_count_, row(1), 1.0f, 100.0f, 0);
+            ui_.SliderFloat("时间快慢", &ui_time_scale_, row(2), 0.1f, 2.5f, 2);
+            ui_.Checkbox("燃料块", &ui_fuel_enable_, row(3));
+            ui_.SliderFloat("燃料块 X", &ui_fuel_x_, row(4), -0.8f, 0.8f, 2);
+            ui_.SliderFloat("燃料块 Y", &ui_fuel_y_, row(5), -0.3f, 0.8f, 2);
+            ui_.SliderFloat("燃料块 Z", &ui_fuel_z_, row(6), -0.8f, 0.8f, 2);
+            ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(7), 0.05f, 0.6f, 2);
+            ui_.Checkbox("烟雾", &smoke_enable_, row(8));
+            ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
+            ui_.SliderFloat("烟雾浓度", &ui_smoke_density_, row(10), 0.0f, 3.0f, 2);
+            ui_.Checkbox("火星", &ember_enable_, row(11));
+            ui_.SliderFloat("火星数量", &ui_ember_count_, row(12), 0.0f, 80.0f, 0);
+            ui_.SliderFloat("火星大小", &ui_ember_size_, row(13), 0.002f, 0.040f, 3);
+            ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
+            ui_.Checkbox("软深度", &ui_soft_depth_, row(15));
+            ui_.SliderFloat("软深度距离", &ui_soft_depth_m_, row(16), 0.01f, 0.5f, 3);
 
-        // 两列布局：第一列 = 火焰/烟/燃料块/软深度（17 行），第二列 = buff 类开关。
-        const float colw = 0.24f * w;
-        const float col2x = x0 + colw + 14.0f;
-        const float top = h - 16.0f - (17 * 24.0f + 16 * 5.0f);
-        auto row = [&](int i) {
-            return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
-        };
-        auto row2 = [&](int i) {
-            return jpov::UiRect{{col2x, top + i * 29.0f}, {colw, 24.0f}};
-        };
-        ui_.Checkbox("粒子火", &fire_enable_, row(0));
-        ui_.SliderFloat("粒子数", &ui_particle_count_, row(1), 1.0f, 100.0f, 0);
-        ui_.SliderFloat("时间快慢", &ui_time_scale_, row(2), 0.1f, 2.5f, 2);
-        ui_.Checkbox("燃料块", &ui_fuel_enable_, row(3));
-        ui_.SliderFloat("燃料块 X", &ui_fuel_x_, row(4), -0.8f, 0.8f, 2);
-        ui_.SliderFloat("燃料块 Y", &ui_fuel_y_, row(5), -0.3f, 0.8f, 2);
-        ui_.SliderFloat("燃料块 Z", &ui_fuel_z_, row(6), -0.8f, 0.8f, 2);
-        ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(7), 0.05f, 0.6f, 2);
-        ui_.Checkbox("烟雾", &smoke_enable_, row(8));
-        ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("烟雾浓度", &ui_smoke_density_, row(10), 0.0f, 3.0f, 2);
-        ui_.Checkbox("火星", &ember_enable_, row(11));
-        ui_.SliderFloat("火星数量", &ui_ember_count_, row(12), 0.0f, 80.0f, 0);
-        ui_.SliderFloat("火星大小", &ui_ember_size_, row(13), 0.002f, 0.040f, 3);
-        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
-        ui_.Checkbox("软深度", &ui_soft_depth_, row(15));
-        ui_.SliderFloat("软深度距离", &ui_soft_depth_m_, row(16), 0.01f, 0.5f, 3);
-
-        // ── 第二列：卡片/管线 buff ──
-        {
-            std::vector<const char*> align_items;
-            align_items.push_back("视图 view");
-            align_items.push_back("竖直 vertical");
-            align_items.push_back("面向 facing");
-            align_items.push_back("自适应 blend");
-            ui_.Combo("朝向", &ui_align_mode_, align_items, row2(0));
+            // ── 第二列：卡片/管线 buff ──
+            {
+                std::vector<const char*> align_items;
+                align_items.push_back("视图 view");
+                align_items.push_back("竖直 vertical");
+                align_items.push_back("面向 facing");
+                align_items.push_back("自适应 blend");
+                ui_.Combo("朝向", &ui_align_mode_, align_items, row2(0));
+            }
+            ui_.Checkbox("火光照明", &ui_fire_light_, row2(1));
+            ui_.SliderFloat("火光强度", &ui_fire_light_intensity_, row2(2), 0.0f, 20.0f, 1);
+            ui_.Checkbox("辉光 Bloom", &ui_bloom_, row2(3));
+            ui_.SliderFloat("辉光强度", &ui_bloom_intensity_, row2(4), 0.0f, 2.0f, 2);
+            ui_.SliderFloat("辉光门槛", &ui_bloom_threshold_, row2(5), 0.2f, 2.0f, 2);
         }
-        ui_.Checkbox("火光照明", &ui_fire_light_, row2(1));
-        ui_.SliderFloat("火光强度", &ui_fire_light_intensity_, row2(2), 0.0f, 20.0f, 1);
-        ui_.Checkbox("辉光 Bloom", &ui_bloom_, row2(3));
-        ui_.SliderFloat("辉光强度", &ui_bloom_intensity_, row2(4), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("辉光门槛", &ui_bloom_threshold_, row2(5), 0.2f, 2.0f, 2);
     }
 
     bool show_panel_ = true;
