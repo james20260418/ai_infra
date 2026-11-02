@@ -57,3 +57,58 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# SSR 端到端 gold：天光查看器「场景1（镜面地板）」的 5 个固定组合
+# （掠射 / 1:1 / 金属磨砂 / 四段拼接 / 低太阳 + 1:3）。组合定义见
+# jpov_ssr_gold_common.h；验收闸门见 jpov_ssr_gold_test.cc。
+cc_binary(
+    name = "jpov_ssr_gold_generator",
+    srcs = [
+        "jpov_ssr_gold_common.h",
+        "jpov_ssr_gold_generator.cc",
+    ],
+    data = [
+        "//tools/jpov/assets/models:oak_tripo_negative_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/test:test_utils",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_ssr_gold_test",
+    srcs = [
+        "jpov_ssr_gold_common.h",
+        "jpov_ssr_gold_test.cc",
+    ],
+    data = glob(["ssr_gold_*_1280x720.png"]) + [
+        "//tools/jpov/assets/models:oak_tripo_negative_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+        "//third_party/stb:stb_image",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
