@@ -18,7 +18,9 @@
 | 链 | 6 条两段链：`S1→S2→S3 / S2→S3→S4 / S3→S4→S5 / S4→S5→S1 / S5→S1→S2 / S1→S3→S5` | 每块 12 帧（6+6，中点共享不重复） |
 | 图集 | 12 列 × 6 行，256px/cell；行序按 JPOV `CellUV`（`vrow = tilesY-1-row`）翻转 | `assets/water/water_s5_flow_12x6.png` |
 
-形变用 `genVolume/morph_util.py`（火焰时期验收的那份，现位于 `/james_pm/ai_infra_4_morph/`）。
+形变与图集生成的**可复用工具**在 `tools/jpov/genVolume/flipbook_s5/`
+（`extract_keyframes.py` / `build_s5_atlas.py` / `morph_flow.py` + README，
+说明「为什么绕一层 S、为什么只留 FLOW、行序/引擎契约、粒子侧配套经验」）。
 
 **只保留 S5 FLOW 这一版**（2026-11-02 定稿）：
 - `F5 直出`（5 帧）偏硬、抽帧感明显；
