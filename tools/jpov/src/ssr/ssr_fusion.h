@@ -47,7 +47,6 @@ struct SsrFusionInputs {
 
     // SSR 分辨率（模块输出 + 降采样输入）
     unsigned int ssr_radiance_tex = 0;  // RGBA16F：rgb = 命中颜色，a = ray_ratio
-    unsigned int ssr_type_tex = 0;      // R8UI：命中/逃逸类型（见 ssr_renderer.h）
     unsigned int down_depth_tex = 0;    // R32F
     unsigned int down_normal_tex = 0;   // RGBA16F
     // 粗糙度预滤波结果（SsrFilter::mip_tex()）：RGBA16F + 完整 mip 链。

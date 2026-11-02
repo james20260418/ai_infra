@@ -603,24 +603,15 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_third.png").c_str());
     app.ssr_scale_ = 0.5f;
 
-    // (e)(f) 升采样的**深度项**两种口径（其它参数完全相同）：
-    //   soft  = 软权 1/(rel+ε) + 真剪影硬拒（默认）
-    //   unity = 不判深度（Unity postprocessing 的 SSR 做法：深度只用于 march）
+    // (e) 升采样的深度判据只有一套（联合软权，2026-11-02 删掉 Unity 对照档）。
     app.ssr_debug_ = 0;
-    app.ssr_depth_mode_ = 0;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_half_soft.png").c_str());
-    app.ssr_depth_mode_ = 1;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_half_unity.png").c_str());
+    app.RunOnce(input, winfo, (out_dir + "/ssr_half.png").c_str());
 
-    // (g)(h) **掠射**机位（R=45 m、离地 0.042 m）：横向条纹就是在这里暴露的。
-    //   两种深度口径各一张 —— 这是判断"升采样深度项要不要"的关键对照。
+    // (f) **掠射**机位（R=45 m、离地 0.042 m）：横向条纹就是在这里暴露的。
     app.view_.R = 45.0;
     app.view_.phi = std::asin(0.042 / 45.0);
     app.view_.theta = 0.0;
-    app.ssr_depth_mode_ = 0;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_soft.png").c_str());
-    app.ssr_depth_mode_ = 1;
-    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_unity.png").c_str());
+    app.RunOnce(input, winfo, (out_dir + "/ssr_graze.png").c_str());
 
 
     // (i)(j) 远景仰角雾 × SSR：雾用 **MRT#1 场景深度**，而 SSR 合成是往同一个 FBO 的颜色

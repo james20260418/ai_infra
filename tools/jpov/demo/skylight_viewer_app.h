@@ -215,7 +215,6 @@ public:
     int   floor_preset_ = 0;
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
-    int   ssr_depth_mode_ = 0;      // 0 = 软权 1/(rel+ε)+真剪影硬拒；1 = 不判深度（Unity 式）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
@@ -374,7 +373,6 @@ public:
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
-            sc.upsample_depth_mode = ssr_depth_mode_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
         }
@@ -439,8 +437,12 @@ private:
                 }
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
-            const std::vector<const char*> dbg = {"SSR 调试：关", "SSR 调试：A 覆盖率",
-                                                  "SSR 调试：直通（无 SSR）"};
+            // 5 档与 SsrConfig::debug_coverage 一一对应（3/4 以前只能在拍摄脚本里用）。
+            const std::vector<const char*> dbg = {"SSR 调试：关",
+                                                  "SSR 调试：A 覆盖率",
+                                                  "SSR 调试：直通（无 SSR）",
+                                                  "SSR 调试：SSR 辐亮度",
+                                                  "SSR 调试：ray_ratio（预算占用）"};
             int dsel = ssr_debug_;
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
@@ -497,12 +499,6 @@ private:
                 ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
-            }
-            const std::vector<const char*> depth_modes = {"升采样深度：软权 1/(rel+ε)",
-                                                          "升采样深度：不判（Unity 式）"};
-            int dm = ssr_depth_mode_;
-            if (ui_.Combo("升采样深度判据", &dm, depth_modes, row(1, 11))) {
-                ssr_depth_mode_ = dm;
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);

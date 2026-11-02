@@ -152,7 +152,6 @@ struct ScreenRay {
     float sigma_exit = 0.0f;
     // true = 射线在 sigma_exit 处撞到屏幕边界（或近平面裁剪）；false = 走完了整段。
     // 只用于调试原因位（kSky vs kOffscreen），不参与取色。
-    bool exits_screen = false;
 };
 
 // 由视空间起点 P（**已做卫生偏移**）与单位方向 R 构造屏幕参数化。
@@ -171,11 +170,14 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     if (!(d1 > 1.0e-6f)) {
         return false;   // 理论上被 ClipRayLength 挡掉；防御式再拦一次
     }
-    const float tan_x = aspect * tan_half_fov_y;
     const float tan_y = tan_half_fov_y;
 
-    const Vec2 np{p.x / (d0 * tan_x), p.y / (d0 * tan_y)};
-    const Vec2 nq{q.x / (d1 * tan_x), q.y / (d1 * tan_y)};
+    // 每点只做 1 次除法（原来两个分量各除一次；uAspect 与 tan_half 可以提出来）。
+    // 与着色器 SsrBuildRay 同一形式。
+    const float inv0 = 1.0f / (d0 * tan_y);
+    const float inv1 = 1.0f / (d1 * tan_y);
+    const Vec2 np{p.x / aspect * inv0, p.y * inv0};
+    const Vec2 nq{q.x / aspect * inv1, q.y * inv1};
     const float w = static_cast<float>(width);
     const float h = static_cast<float>(height);
 
@@ -190,7 +192,8 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
         return false;   // 长度退化：整条射线在屏幕上是一个点，没有可采样的格
     }
     out->dir = delta * (1.0f / out->span);
-    out->dir3 = Normalize(r);   // 朝向判据用（着色器里同一行）
+    // r 已经是单位向量（ReflectDir 的两个入参都归一过）⇒ 不再 Normalize。
+    out->dir3 = r;   // 朝向判据用（着色器里同一行）
 
     // 矩形裁剪（Liang–Barsky），结果用 σ 表示（像素弧长）。
     float t0 = 0.0f;
@@ -219,7 +222,6 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     }
     out->sigma_enter = t0;
     out->sigma_exit = t1;
-    out->exits_screen = t1 < out->span - 1.0e-4f;
     return true;
 }
 

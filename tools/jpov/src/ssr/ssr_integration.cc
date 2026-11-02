@@ -73,8 +73,6 @@ void SsrIntegration::Finalize() {
     }
     width_ = 0;
     height_ = 0;
-    ssr_w_ = 0;
-    ssr_h_ = 0;
     prog_attr_ = 0;
     prog_attr_cutout_ = 0;
     prog_attr_skinned_ = 0;
@@ -134,7 +132,6 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
         << in.cfg.resolution_scale;
 
     const int scale = static_cast<int>(std::lround(1.0f / in.cfg.resolution_scale));
-    DownsampleTargetSize(in.full_w, in.full_h, scale, &ssr_w_, &ssr_h_);
 
     // ── 保存调用方状态（返回前原样恢复）──
     GLint prev_fbo = 0;
@@ -215,7 +212,6 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     fi.full_w = in.full_w;
     fi.full_h = in.full_h;
     fi.ssr_radiance_tex = outs.radiance_tex;
-    fi.ssr_type_tex = outs.type_tex;
     fi.down_depth_tex = downsample_.depth_tex();
     fi.down_normal_tex = downsample_.normal_tex();
     fi.ssr_w = downsample_.width();

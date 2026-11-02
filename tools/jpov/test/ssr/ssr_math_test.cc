@@ -460,7 +460,6 @@ TEST(SsrMath, MinPicksEarliest) {
     ray.w1 = ray.w0;
     ray.sigma_enter = 0.0f;
     ray.sigma_exit = 100.0f;
-    ray.exits_screen = false;
 
     auto depth_at = [](int x, int y) -> float {
         (void)y;
@@ -530,7 +529,6 @@ ScreenRay MakeSyntheticRay() {
     ray.w1 = 1.0f / 24.0f;   // 视深 20 m → 24 m，对 σ 线性（w = 1/d）
     ray.sigma_enter = 0.0f;
     ray.sigma_exit = 100.0f;
-    ray.exits_screen = false;
     return ray;
 }
 

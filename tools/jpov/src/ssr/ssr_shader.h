@@ -65,7 +65,6 @@ struct SsrRay {
     float w1;
     float enter;
     float exit;
-    bool exits;
 };
 
 // 该像素有没有深度数据（1.0 = 清空值 = 天空）。ssr_math.h::HasDepthData
@@ -173,15 +172,20 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
         return false;
     }
 
-    vec2 nrm0 = vec2(P.x / (d0 * uAspect * uTanHalf), P.y / (d0 * uTanHalf));
-    vec2 nrm1 = vec2(Q.x / (d1 * uAspect * uTanHalf), Q.y / (d1 * uTanHalf));
+    // 每点只做 1 次除法（原来两个分量各除一次，其中 uAspect 与 tanHalf 是可以提出来的常量）。
+    float inv0 = 1.0 / (d0 * uTanHalf);
+    float inv1 = 1.0 / (d1 * uTanHalf);
+    vec2 nrm0 = vec2(P.x / uAspect, P.y) * inv0;
+    vec2 nrm1 = vec2(Q.x / uAspect, Q.y) * inv1;
     vec2 s0 = (nrm0 * 0.5 + 0.5) * uRes;
     vec2 s1 = (nrm1 * 0.5 + 0.5) * uRes;
 
     ray.s0 = s0;
     ray.w0 = 1.0 / d0;
     ray.w1 = 1.0 / d1;
-    ray.d3 = normalize(R);   // 朝向判据用（ssr_math.h::BuildScreenRay 同一行）
+    // R 已经是单位向量：reflect(I, N) 在 |I| = |N| = 1 时保长度，因此**不再 normalize**
+    //（一次 rsqrt 省下来；四个 lane 各建一次射线 ⇒ 每像素省 4 次）。
+    ray.d3 = R;   // 朝向判据用（ssr_math.h::BuildScreenRay 同一行）
 
     vec2 delta = s1 - s0;
     ray.span = length(delta);
@@ -218,7 +222,6 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     }
     ray.enter = t0;
     ray.exit = t1;
-    ray.exits = (t1 < ray.span - 1.0e-4);
     return true;
 }
 

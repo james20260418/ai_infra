@@ -427,7 +427,7 @@ TEST(SsrGpu, HitPatternFollowsReflectedDirection) {
     const SsrOutputs& out = f.ssr.Render(f.in);
 
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
-    const std::vector<unsigned char> reason = ReadTexUInt8(out.reason_tex, kWidth, kHeight);
+    const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
     const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
 
     constexpr int kMargin = 3;

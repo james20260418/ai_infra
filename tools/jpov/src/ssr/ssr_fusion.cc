@@ -61,7 +61,6 @@ uniform float uAo;              // 全局（本管线没有 SSAO；逐物体 ao 
 uniform float uRangeDepthRatio;    // **软权尺度**：rel 等于它时权重约减半（旧版这里是硬阈值）
 uniform float uHardCut;            // rel 超过它 ⇒ 硬拒（数量级不同 = 真跨表面/剪影）
 uniform float uWeightFloor;        // 权重下限（相对空间权）⇒ Σw 永不为 0，不出孔洞
-uniform int   uDepthMode;          // 0 = 软权；1 = 不判深度（Unity 官方 SSR 的做法）
 uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = ray_ratio
 
 layout(location = 0) out vec4 FragColor;
@@ -189,32 +188,21 @@ void main() {
             vec3 n_lo = NormalFromAttr(texelFetch(uDownNormal, q, 0));
             float w_lo = 1.0 / max(z_lo, 1.0e-4);
 
-            // ── 值域项：**连续软权**（2026-10-31 从硬 0/1 改过来）──
+            // ── 值域项：深度 + 法线的**联合软权**（2026-11-02 只剩这一套）──
             //
-            // 硬阈值的结构性毛病：阈值附近必然跳变，而画面里存在跨阈值的连续梯度（掠射最典型）
-            // ⇒ 沿等值线整行/整片现形（实测"周期 = 降采样倍率的条纹"+"贴地平线黑带"）。
-            // 两份可查源码的实现都是软权 + 下限：INSIDE 用 1/(|Δd|+1e-5)（原话"bad pixels still
-            // contribute, just a lot less"）；Unity postprocessing v1 的 SSR 用 clamp(dot,0,1)
-            // 且 max(a,0.001)，**完全不判深度**。这里两种模式都留着，面板可切。
-            bool hard_reject = false;
-            float wr = 1.0;
-            if (uDepthMode == 0) {
-                // 深度：拿**预测到本像素位置**的低分 w 比残差（不是拿相邻格子的原始 w 比）。
-                // dpx = 本像素中心 → 低分 texel 中心的偏移（全分辨率像素）；scale=1 时恒为 0。
-                vec2 dpx = (vec2(q) + 0.5) * float(uScale) - (vec2(ip) + 0.5);
-                // 低分深度是**格内最近**（降采样取 min 窗口深度 = max w），所以期望值取
-                // 本像素平面上「该格范围内」的**最大 w**：仿射函数在方形格上的极值在角上
-                // = 中心值 + 半格·(|gx|+|gy|)。注意是 (uScale−1)：取的是格内各 texel 中心的
-                // 最小深度，1:1 时格就是一个 texel ⇒ 扩展量必须为 0（否则 1:1 变回归）。
-                float w_center = w_hi + dot(gw, dpx);
-                float w_pred = w_center + 0.5 * float(uScale - 1) * (abs(gw.x) + abs(gw.y));
-                float rel = abs(w_lo - w_pred) / max(abs(w_pred), 1.0e-6);
-                wr = 1.0 / (rel + uRangeDepthRatio);
-                if (rel > uHardCut) {
-                    hard_reject = true;   // 数量级不同 ⇒ 真跨表面，硬拒（挡剪影串色）
-                }
-            }
-            // 法线：连续权（Unity 同款）。0 = 正交（地面 vs 墙），1 = 同向。
+            // 深度：拿**预测到本像素位置**的低分 w 比残差（不是拿相邻格子的原始 w 比）。
+            // dpx = 本像素中心 → 低分 texel 中心的偏移（全分辨率像素）；scale=1 时恒为 0。
+            vec2 dpx = (vec2(q) + 0.5) * float(uScale) - (vec2(ip) + 0.5);
+            // 低分深度是**格内最近**（降采样取 min 窗口深度 = max w），所以期望值取
+            // 本像素平面上「该格范围内」的**最大 w**：仿射函数在方形格上的极值在角上
+            // = 中心值 + 半格·(|gx|+|gy|)。注意是 (uScale−1)：取的是格内各 texel 中心的
+            // 最小深度，1:1 时格就是一个 texel ⇒ 扩展量必须为 0（否则 1:1 变回归）。
+            float w_center = w_hi + dot(gw, dpx);
+            float w_pred = w_center + 0.5 * float(uScale - 1) * (abs(gw.x) + abs(gw.y));
+            float rel = abs(w_lo - w_pred) / max(abs(w_pred), 1.0e-6);
+            float wr = 1.0 / (rel + uRangeDepthRatio);
+            bool hard_reject = (rel > uHardCut);   // 数量级不同 ⇒ 真跨表面，硬拒（挡剪影串色）
+            // 法线：连续权。0 = 正交（地面 vs 墙），1 = 同向。
             wr *= clamp(dot(n_hi, n_lo), 0.0, 1.0);
 
             // 空间权 × 值域权；**非硬拒**的再抬一个下限，保证 Σw > 0（不出孔洞）。
@@ -308,7 +296,6 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     CHECK_NE(in.attr_tex, 0u);
     CHECK_NE(in.scene_depth_tex, 0u);
     CHECK_NE(in.ssr_radiance_tex, 0u);
-    CHECK_NE(in.ssr_type_tex, 0u);
     CHECK_NE(in.attr_mat_tex, 0u) << "缺属性纹理的材质附件（F0/roughness）";
     CHECK_NE(in.ssr_mip_tex, 0u) << "缺 SSR 预滤波 mip 链（SsrFilter 的输出）";
     CHECK_GE(in.ssr_mip_levels, 1);
@@ -403,7 +390,6 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
                 in.cfg.upsample_depth_tolerance);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uHardCut"), in.cfg.upsample_hard_cut);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uWeightFloor"), in.cfg.upsample_weight_floor);
-    glUniform1i(shader_mgr_->GetUniform(prog_, "uDepthMode"), in.cfg.upsample_depth_mode);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uCoverageDebug"), in.cfg.debug_coverage);
     // 环境镜面：**每帧必须重传**（uniform 是 program 状态，上一帧开着本帧不传就还用旧的）。
     UploadEnvSpecular(*shader_mgr_, prog_, in.env_cube_tex, in.env_max_lod,

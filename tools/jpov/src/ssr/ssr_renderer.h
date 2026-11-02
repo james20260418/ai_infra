@@ -264,10 +264,6 @@ struct SsrOutputs {
     //   kHit 之外的取值 = "为什么没有可用结果"，供融合层选择 fallback（env / sky / 跳过）。
     unsigned int type_tex = 0;
 
-    // **type_tex 的别名**（同一张纹理、同一个句柄）：为兼容既有测试的字段名而保留，
-    // 不要当成"第二份数据"，也不要单独释放（DestroyTargets 里已注明）。
-    unsigned int reason_tex = 0;
-
     // R32F（仅 debug_reason == true 时非 0）：每像素写整条射线的碰撞位置 s（像素弧长，
     // 无命中写哨兵 +1e30）。§11.2-3 的"命中格与解析解一致"最自然的断言对象就是它
     // （靠颜色反推很脆）；它同时是 tile 等价性测试的直接证据：s 相同 ⇒ 命中格相同。

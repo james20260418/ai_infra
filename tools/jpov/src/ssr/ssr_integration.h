@@ -87,9 +87,6 @@ public:
     unsigned int attr_cutout_program() const { return prog_attr_cutout_; }
     unsigned int attr_skinned_program() const { return prog_attr_skinned_; }
 
-    // 最近一次 SSR 的分辨率（供 HUD / 测试读数）。
-    int ssr_width() const { return ssr_w_; }
-    int ssr_height() const { return ssr_h_; }
 
 private:
     void EnsureCopyTarget(int w, int h);
@@ -110,8 +107,6 @@ private:
     SsrFilter filter_;
     SsrFusion fusion_;
 
-    int ssr_w_ = 0;
-    int ssr_h_ = 0;
     bool initialized_ = false;
 };
 

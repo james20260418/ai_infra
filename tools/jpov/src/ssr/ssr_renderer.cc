@@ -144,8 +144,6 @@ void SsrRenderer::DestroyTargets() {
         glDeleteTextures(1, &outputs_.radiance_tex);
         outputs_.radiance_tex = 0;
     }
-    // ⚠️ reason_tex 是 type_tex 的别名，**不能**在这里再删一次（会 double-free 同一张纹理）。
-    outputs_.reason_tex = 0;
     if (outputs_.type_tex != 0) {
         glDeleteTextures(1, &outputs_.type_tex);
         outputs_.type_tex = 0;
@@ -196,9 +194,6 @@ void SsrRenderer::EnsureTargets(int w, int h, int tile, bool debug) {
     MakeTexture(&outputs_.type_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            outputs_.type_tex, 0);
-    // reason_tex 是 type_tex 的**别名**（同一张纹理）：老测试按 reason_tex 断言分类，
-    // 不再单独分配第二张（分类本来就只有一份数据）。
-    outputs_.reason_tex = outputs_.type_tex;
     std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     if (debug) {
         MakeTexture(&outputs_.hit_s_tex, w, h, GL_R32F, GL_RED, GL_FLOAT);
