@@ -22,6 +22,16 @@
 
 namespace jpov::sp_ui {
 
+namespace {
+
+// 逐分量线性插值（t 已在 [0,1] 内）。只给增强按钮的 hover 渐变用。
+Color LerpColor(const Color& a, const Color& b, float t) {
+    return Color{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                 a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+}
+
+}  // namespace
+
 // ==================== SpTheme ====================
 
 SpTheme SpTheme::Default(float font_size) {
@@ -114,6 +124,16 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     strips_.clear();
     popup_fill_rects_.clear();
     popup_texts_.clear();
+    // 悬停渐变轨道的回收：只保留「上一帧还在被绘制」的条目（last_frame 是
+    // 上一帧或本帧的序号）。控件被删/换 box 后，它的半亮状态自然消失；
+    // 留一帧余量是因为 ratio 的衰减靠下一帧重新碰到同一个按钮才能继续。
+    ++frame_index_;
+    hover_tracks_.erase(
+        std::remove_if(hover_tracks_.begin(), hover_tracks_.end(),
+                       [this](const HoverTrack& t) {
+                           return t.last_frame + 2 < frame_index_;
+                       }),
+        hover_tracks_.end());
 }
 
 void SpUi::SetUiScale(float scale) {
@@ -254,6 +274,24 @@ void SpUi::Plate(const SpRect& box, Color fill, float radius, bool textured) {
 
 bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
                 bool stretch_h) {
+    return ButtonImpl(label, box, /*skin=*/nullptr, stretch_w, stretch_h);
+}
+
+bool SpUi::Button(const char* label, const SpRect& box, const SpButtonSkin& skin,
+                bool stretch_w, bool stretch_h) {
+    // 参数自检：报在这里比等渲染层 CHECK 好查——那边只会指向 DrawPlate。
+    CHECK_GE(skin.tiles_x, 1) << "SpButtonSkin.tiles_x 必须 >= 1";
+    CHECK_GE(skin.tiles_y, 1) << "SpButtonSkin.tiles_y 必须 >= 1";
+    CHECK_GE(skin.fps, 0.0f) << "SpButtonSkin.fps 必须 >= 0";
+    CHECK_GE(skin.material_px, 0.0f) << "SpButtonSkin.material_px 必须 >= 0";
+    CHECK_GE(skin.normal_to_hover_delay, 0.0f)
+        << "SpButtonSkin.normal_to_hover_delay 必须 >= 0";
+    return ButtonImpl(label, box, &skin, stretch_w, stretch_h);
+}
+
+bool SpUi::ButtonImpl(const char* label, const SpRect& box,
+                      const SpButtonSkin* skin, bool stretch_w,
+                      bool stretch_h) {
     const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不命中。
@@ -313,10 +351,29 @@ bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
     //   - 按下态：theme_.selected（深蓝，danis 增强——按下用沉稳深色）。
     //   - 悬停态：theme_.accent（亮色高亮，danis 验收 bug#15 修正）。
     //   - 默认态：theme_.hover（深色填充）。
-    const Color fill =
-        pressed_now ? theme_.selected
-                    : (hovered ? theme_.accent : theme_.hover);
-    PushPlate(b, fill, theme_.border, theme_.corner_radius_px);
+    if (skin == nullptr) {
+        const Color fill =
+            pressed_now ? theme_.selected
+                        : (hovered ? theme_.accent : theme_.hover);
+        PushPlate(b, fill, theme_.border, theme_.corner_radius_px);
+    } else {
+        // 增强皮肤：底板换成该按钮自己的 flipbook 材质（normal 态持续翻书），
+        // hover / pressed 不改材质、只改 tint —— 状态切换不会跳帧。
+        //
+        // hover 渐变：按下时仍继续衰减（按下走 pressed_tint，不看 ratio），
+        // 松开后如果鼠标还在按钮上，ratio 从当前值继续往上爬。
+        // 轨道 key 用调用方原始 box（raw，缩放后、布局前）：ResolveBox 的结果
+        // 会随 label 宽度变，不能当身份。
+        const float ratio = AdvanceHoverRatio(
+            raw, hovered && !pressed_now, skin->normal_to_hover_delay);
+        const Color tint =
+            pressed_now ? skin->pressed_tint
+                        : LerpColor(skin->normal_tint, skin->hover_tint, ratio);
+        const PlateLayer fill_layer = MakeButtonLayer(b, *skin);
+        PushPlateInternal(b, tint, theme_.border, theme_.corner_radius_px,
+                          /*fill_textured=*/true, /*border_textured=*/true,
+                          &fill_layer);
+    }
     // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
     TextInternal(label, b, /*stretch_w=*/true, /*stretch_h=*/true);
 
@@ -1462,6 +1519,63 @@ PlateLayer SpUi::MakeLayerFor(const SpRect& box, uint32_t tex,
     return l;
 }
 
+PlateLayer SpUi::MakeButtonLayer(const SpRect& box_device,
+                                 const SpButtonSkin& skin) const {
+    // 密度规则与 MakeLayerFor 完全一致（同一套「屏幕锤定 + 按尺寸反算 tiling」），
+    // 差别只在数值来源：这里是逐按钮的 skin，不是主题。
+    // box_device 已是设备像素，而 skin.material_px 是布局单位 ⇒ 只乘一次 ui_scale_。
+    PlateLayer l;
+    l.texture_id = skin.texture_id;
+    l.flipbook = FlipbookDesc{skin.tiles_x, skin.tiles_y, skin.fps};
+    const float px = skin.material_px * ui_scale_;
+    if (px > 0.0f) {
+        l.tiling = {std::max(box_device.size.x() / px, 1e-4f),
+                    std::max(box_device.size.y() / px, 1e-4f)};
+        l.scroll = {-box_device.pos.x() / px, -box_device.pos.y() / px};
+    } else {
+        // 0 = 整张图铺满一块按钮。不用主题的 plate_tiling：按钮皮肤是**另一层**
+        // 配置，借无关字段会让调用方以为密度生效了（同 MakeLayerFor）。
+        l.tiling = {1.0f, 1.0f};
+        l.scroll = {0.0f, 0.0f};
+    }
+    return l;
+}
+
+float SpUi::AdvanceHoverRatio(const SpRect& key, bool hovering,
+                              float delay_s) {
+    HoverTrack* track = nullptr;
+    for (HoverTrack& t : hover_tracks_) {
+        // 与 StateSlot 同一套识别规则：pos + size 精确相等 = 同一个按钮。
+        if (t.box.pos == key.pos && t.box.size == key.size) {
+            track = &t;
+            break;
+        }
+    }
+    if (track == nullptr) {
+        // 没历史且本帧也不悬停 ⇒ 就是纯 normal，不必建条目（避免每帧给
+        // 满屏按钮都建一条永远为 0 的轨道）。
+        if (!hovering) {
+            return 0.0f;
+        }
+        hover_tracks_.push_back(HoverTrack{key, 0.0f, frame_index_});
+        track = &hover_tracks_.back();
+    }
+    track->last_frame = frame_index_;
+
+    const float dt_s = frame_dt_ms_ / 1000.0f;
+    if (delay_s <= 0.0f || dt_s <= 0.0f) {
+        // delay = 0：立即切。dt = 0（Begin 没给帧时长）：无从计时，旧的
+        // 保守做法是「不动」，但那样在无时钟 app 里 hover 永远看不出效果；
+        // 这里选「直接切到目标值」——交互结果可预测，代价是 delay 被忽略。
+        track->ratio = hovering ? 1.0f : 0.0f;
+    } else {
+        const float step = dt_s / delay_s;
+        track->ratio = std::clamp(track->ratio + (hovering ? step : -step),
+                                  0.0f, 1.0f);
+    }
+    return track->ratio;
+}
+
 void SpUi::MultiPlate(const SpRect& box, const SpPlateSkin& skin) {
     const SpRect dev = SanitizeBox(Scaled(box));
     if (dev.size.x() <= 0.0f || dev.size.y() <= 0.0f || OutsideViewport(dev)) {
@@ -1491,7 +1605,8 @@ void SpUi::PushPlate(const SpRect& r, Color fill, Color border, float radius) {
 
 void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
                              float radius, bool fill_textured,
-                             bool border_textured) {
+                             bool border_textured,
+                             const PlateLayer* fill_layer) {
     // 规格化 box（负尺寸 clamp 0），圆角 clamp 到合法上限。
     // 注：UI 侧的 clamp 是有意的 —— 控件 box 由调用方的布局算出来，可能任意小；
     //   而 `Plate2DCommand`/渲染层对越界参数是 CHECK 崩的（不静默 clamp），
@@ -1516,7 +1631,10 @@ void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
 
     // 两层材质：填充区（底色 tint）+ 边框带（各自的图集/帧率/密度）。
     // 色样这类「本体必须是纯色」的控件只把 fill 层关掉，边框照旧上纹理。
-    c.fill = MakeLayer(box, /*is_border=*/false, fill_textured);
+    // fill_layer != nullptr 时直接用调用方给的层（增强按钮的逐按钮 flipbook）。
+    c.fill = (fill_layer != nullptr)
+                 ? *fill_layer
+                 : MakeLayer(box, /*is_border=*/false, fill_textured);
     c.border = MakeLayer(box, /*is_border=*/true, border_textured);
     c.fill_color = fill;
     c.border_color = border;

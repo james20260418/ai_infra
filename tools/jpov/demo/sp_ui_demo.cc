@@ -186,6 +186,9 @@ public:
         // 多纹理展示区用哪两张图集（核心 / 边界各一张）。
         st_.showcase_core_tex = wave_tex_[2];   // 涟漪
         st_.showcase_rim_tex = wave_tex_[1];    // 正弦波
+        // 翻书按钮的图集：用大理石（与主题默认的正弦波不同，能看出是「逐按钮
+        // 自己的材质」而不是从主题继承来的）。
+        st_.button_tex = wave_tex_[0];
 
         // 帧时钟：log 时间戳 + 键盘 hold 阈值（固定 30fps 帧周期，与 target_fps 一致）。
         st_.frame = static_cast<int>(frame_count);
@@ -254,8 +257,10 @@ struct ScriptFrame {
     bool emit_click = false;  // true → left_clicks[0] 填本帧位置（left 应为 >=1）
 };
 
-// 把 "重置" 按钮走一遍「悬停 → 按下 → 松开」的最小交互脚本。
-// 坐标是**设备像素**（按 scale 缩放后的窗口坐标），面板布局见 sp_ui_demo_panel.h。
+// 把 "重置" 按钮以及「翻书按钮」走一遍交互脚本：
+//   重置：悬停 → 按下 → 松开（验证点击语义）
+//   翻书：悬停 → 继续悬停（tint 渐变爬升）→ 按下（pressed tint）→ 松开 → 移开（衰减）
+// 坐标是**设备像素**（按 scale 缩放后的窗口坐标），布局取自 sp_ui_demo_panel.h。
 std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
                                              float mouse_out_y) {
     // 「重置」按钮布局 (16,274) 尺寸 (120,30) → 缩放后中心点。
@@ -272,6 +277,24 @@ std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
     out.push_back({cx, cy, 1, true});
     // 4) 移开并回到 None（松开后的静止帧）
     out.push_back({mouse_out_x, mouse_out_y, 0, false});
+
+    // 翻书按钮 #0（0.1s 渐变）：每一帧一张图 ⇒ 能逐帧看出 tint 爬升/衰减。
+    const jpov::sp_ui::SpRect fb = jpov::sp_ui::UiDemoFlipbookButtonRect(0);
+    const float fbx = (fb.pos.x() + fb.size.x() * 0.5f) * scale;
+    const float fby = (fb.pos.y() + fb.size.y() * 0.5f) * scale;
+    // 5..9) 悬停：0.1s @ 30fps = 3 帧满，再 2 帧维持满亮。
+    for (int i = 0; i < 5; ++i) {
+        out.push_back({fbx, fby, 0, false});
+    }
+    // 10..11) 按下：直接用 pressed_tint（ratio 在后台衰减）。
+    out.push_back({fbx, fby, -2, false});
+    out.push_back({fbx, fby, -2, false});
+    // 12) 松开 → Click（进业务逻辑，log 应 +1）。
+    out.push_back({fbx, fby, 1, true});
+    // 13..16) 移开：ratio 衰减回 normal。
+    for (int i = 0; i < 4; ++i) {
+        out.push_back({mouse_out_x, mouse_out_y, 0, false});
+    }
     return out;
 }
 

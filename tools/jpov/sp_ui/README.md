@@ -87,6 +87,7 @@ class MyApp : public JPOV {
 ```cpp
 void Text(label, box, stretch_w=true, stretch_h=true);
 bool Button(label, box, ...);                      // true = 本帧被点
+bool Button(label, box, skin, ...);                // 增强按钮：flipbook 底板 + tint 渐变
 bool Checkbox(label, bool* value, box, ...);       // true = 本帧被点（value 已翻转）
 bool SliderFloat(label, float* v, box, min, max, decimal_places=0, ...);
 bool InputText(label, char* buf, size_t cap, box, ...);   // 返回本帧末尾是否聚焦
@@ -114,6 +115,39 @@ ui.MultiPlate(box, skin);
 
 ---
 
+## 增强按钮（flipbook 底板）
+
+普通 `Button` 的底板是三块主题色（normal / hover / pressed）。需要“活着的石头”
+那种观感时，传一个 `SpButtonSkin`：
+
+```cpp
+SpButtonSkin skin;
+skin.texture_id = marble_tex;      // 图集（0 = 纯色底板）
+skin.tiles_x = skin.tiles_y = 4;   // 4x4 = 16 帧
+skin.fps = 8.0f;                   // normal 态一直在翻书
+skin.material_px = 120.0f;         // 一格图集 = 120 屏幕像素（随 ui_scale 缩放）
+skin.normal_tint  = {0.55f, 0.57f, 0.60f, 1.0f};   // 暗石
+skin.hover_tint   = {0.82f, 0.75f, 0.60f, 1.0f};   // 暖亮
+skin.pressed_tint = {0.30f, 0.33f, 0.38f, 1.0f};   // 沉下去
+skin.normal_to_hover_delay = 0.5f;                 // 0.5s 爬到满
+if (ui.Button("应用", box, skin)) { DoApply(); }
+```
+
+设计要点：
+
+- **normal 态走 flipbook，hover / pressed 只换 tint** —— 状态切换不会换图、不会跳帧，
+  看起来就是同一块石头在呼吸/亮起来/沉下去。
+- `normal_to_hover_delay` = 从 normal 到 100% hover tint 的时长（秒），**反向同值**。
+  内部是一个跨帧的 `hover_ratio`：悬停且未按下时 `+= dt / delay`，否则 `-= dt / delay`。
+  0 = 立即切；`Begin` 传 `frame_dt_ms = 0`（无时钟）时也退化为立即切。
+- 按下时**直接用** `pressed_tint`（不参与渐变），ratio 在后台继续衰减；松开且鼠标仍在
+  按钮上时从当前 ratio 继续爬（不会先归零再爬）。
+- 图集/网格/帧率/密度是**逐按钮**的，与主题 `plate_*` 无关（边框层仍取主题）。
+- 默认三个 tint 全是白（= 只翻书、状态不变色）：状态反馈是美术决定，本库不猜。
+- 同 box 的两颗按钮会被当成同一个（跨帧状态按 box 识别，同其它状态槽）。
+
+---
+
 ## 单帧仿真 / 多帧回放
 
 `OneIteration` 收的是**纯数据**，所以可以完全伪造：
@@ -129,7 +163,8 @@ app.RunOnce(/*frame_count=*/3, in, winfo, "f03.png");   // 帧号原样进 OneIt
 - ⚠️ `RunOnce` **不走窗口事件循环** ⇒ `FlushMouseButton` 不会执行，`Click/Hold/Drag`
   的 `raw` 编码要自己写（见 `interface/input_snapshot.h`）。点按钮 = 先 Hold 再 Click，
   且 Click 要填 `left_clicks[0]` 的位置。
-- `jpov_sp_ui_demo --script` 就是这套东西的现成样板（悬停→按下→松开→移开）。
+- `jpov_sp_ui_demo --script` 就是这套东西的现成样板（悬停→按下→松开→移开，
+  后半段还包含一遍翻书按钮的 tint 渐变：逐帧 PNG 能直接看出爬升/到顶/clamp）。
 
 ## 我该怎么写自己的面板
 
@@ -212,7 +247,8 @@ bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY /
 
 | 目标 | 层次 | 钉住什么 |
 |---|---|---|
-| `//tools/jpov/test/sp_ui:sp_ui_gold_test` | 纯 CPU（无 GL） | 文字落在自己控件上（scale 1.0/1.5）、缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入、**跨帧交互状态机**（点击释放位置 / 下拉弹层独占 / 一次 drag 语义） |
+| `//tools/jpov/test/sp_ui:sp_ui_gold_test` | 纯 CPU（无 GL） | 文字落在自己控件上（scale 1.0/1.5）、缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入、**跨帧交互状态机**（点击释放位置 / 下拉弹层独占 / 一次 drag 语义）、**翻书按钮的 hover_ratio 渐变**（皮肤图集只换填充层 / 线性爬升 / 按下用 pressed_tint / 松开续爬 / 离开衰减 / delay=0 与 dt=0 退化） |
+| `//tools/jpov/test/sp_ui:sp_ui_replay_test` | **GPU 多帧回放**（伪造 InputSnapshot） | 悬停/按下/松开确实进了业务逻辑；三态亮度关系；**翻书按钮的 tint 渐变在像素上逐帧爬升并在 delay 处 clamp**（64→79→94→108→123→138→153→153） |
 | `//tools/jpov/test/plate2d:plate2d_gold_test` | **GPU 像素**（llvmpipe 即可，无需 DISPLAY） | 图集**行序**（帧 0 在左上角）、`fps=0` 的图集静止在第 0 格且整块均匀、两层材质各自采样、边框带取自己的图集 |
 
 两个 GPU 侧的坑（行序倒置 / fps=0 整张显示）CPU 测试一律看不见，都是真出过的 bug，
@@ -222,8 +258,10 @@ bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY /
 
 ## 目前没做 / 边界
 
-- **`ButtonDelux`**（用户自带整键烘焙皮）没做。真要做得先定 `kReplace` / `kOverlay` 枚举，
-  且**不许开辟第二条渲染路径** —— 必须展开成 `Plate2DCommand` 的组合。
+- **`ButtonDelux`**（用户自带整键烘焙皮，状态各自占一张图）仍然没做。现在能做的是
+  **normal 态一条 flipbook + hover/pressed 只调 tint**（见上一节），这是“会呼吸的石头”；
+  烘焙皮要的是“换图”（normal/hover/pressed 各一格），本质不同，得先定 `kReplace` /
+  `kOverlay` 枚举，且**不许开辟第二条渲染路径** —— 必须展开成 `Plate2DCommand` 的组合。
 - 形状只有矩形 / 圆角矩形 / 胶囊（单一半径），没有每角独立半径、没有任意多边形。
 - 没有外发光 / 内阴影 / 描边动画；没有布局系统、没有 scissor。
 - 每帧每块板做 ~16 次 `glGetUniformLocation`（没走 `ShaderManager` 缓存）；30 块板量级无感，

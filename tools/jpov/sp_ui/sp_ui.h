@@ -101,6 +101,7 @@
 #define JPOV_SP_UI_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -196,6 +197,48 @@ struct SpRect {
     Vec2f size;  // 宽高（像素）
 };
 
+// ==================== 按钮增强皮肤 ====================
+//
+// 给 `SpUi::Button` 的可选增强：底板换成**一条 flipbook 材质**，normal 态持续
+// 翻书（按钮「活着」的样子）；hover / pressed **不换材质、只换 tint**（同一张图集
+// 上乘不同颜色）—— 所以状态切换不会跳帧、不会换图，只是同一块石头亮起来/沉下去。
+//
+// hover 的 tint 不是瞬切：`normal_to_hover_delay` = 从 normal 到 100% hover tint
+// 所需的**时间（秒）**，反向（hover → normal）用同一个时长。中间量是一个跨帧的
+// `hover_ratio`（[0,1]），每帧按 dt/delay 线性推进：
+//     hover 且未按下      → ratio += dt / delay
+//     未悬停 **或** 按下  → ratio -= dt / delay
+// 按下时直接用 `pressed_tint`（不参与渐变），同时 ratio 在后台继续衰减；
+// 松开且鼠标仍在按钮上时 ratio 从当前值继续往上爬（不会先归零再爬）。
+//
+// 退化为「无时钟」时（Begin 传 frame_dt_ms = 0）：无从计时 ⇒ 直接切到目标值
+// （悬停 = 1，否则 = 0），即 delay 被忽略。delay = 0 也走这条立即分支。
+//
+// Pre-condition: texture_id == 0（= 不启用）或已注册；
+//                tiles_x >= 1、tiles_y >= 1、fps >= 0、material_px >= 0；
+//                normal_to_hover_delay >= 0。
+// 注意：hover_ratio 按**按钮 box**（与其它跨帧状态槽同一套识别规则）归属，
+//       两个同 box 同屏的按钮会被当成同一个 —— 别这么排版。
+struct SpButtonSkin {
+    // 底板图集纹理 id。0 = 不启用材质（纯色 fill），但 hover/pressed 的 tint
+    // 渐变仍然生效（tint 就是纯色体本身）。
+    uint32_t texture_id = 0;
+    int tiles_x = 1;           // 图集列数
+    int tiles_y = 1;           // 图集行数
+    float fps = 0.0f;          // normal 态翻书帧率；0 = 静止在第 0 帧
+    float material_px = 0.0f;  // 一格图集对应的屏幕像素（布局单位，随 ui_scale
+                               // 一起放大）；0 = 整张图铺满一块按钮
+
+    // 三种状态的 tint（乘在图集上 / 无材质时即本体色）。
+    // 默认全 1 = 只翻书、状态不变色 —— 状态反馈是美术决定，本库不猜。
+    Color normal_tint = {1.0f, 1.0f, 1.0f, 1.0f};
+    Color hover_tint = {1.0f, 1.0f, 1.0f, 1.0f};
+    Color pressed_tint = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    // normal ↔ hover 的 tint 渐变时长（秒）。0 = 立即切换。
+    float normal_to_hover_delay = 0.2f;
+};
+
 // ==================== 控件 ====================
 
 // 即时模式 UI 主入口。
@@ -237,6 +280,13 @@ public:
 
     // 按钮。返回 true = 本帧被点击（一次性事件）。
     bool Button(const char* label, const SpRect& box,
+                bool stretch_w = true, bool stretch_h = true);
+
+    // 增强按钮：底板用 skin 的 flipbook（normal 态持续翻书），
+    // hover / pressed 只改 tint（渐变时长 = skin.normal_to_hover_delay）。
+    // 返回值语义与上面**完全一致**（本帧是否被点击）；hover 渐变状态由 SpUi
+    // 跨帧持有（调用方不需要存任何东西）。
+    bool Button(const char* label, const SpRect& box, const SpButtonSkin& skin,
                 bool stretch_w = true, bool stretch_h = true);
 
     // 复选框。value 为 in/out（状态外置，本接口不跨帧记忆）；
@@ -403,13 +453,27 @@ private:
     void PushPlate(const SpRect& r, Color fill, Color border, float radius);
     // PushPlate 的实际实现：textured=false 时这次不采样材质（纯色填充）。
     // 走参数而不是临时改主题 —— 隐式改成员状态会让后面所有控件也跟着变。
+    // fill_layer 非空时**直接用这层**填填充区（忽略 fill_textured）——
+    // 给增强按钮用：它的图集/帧率/密度是逐按钮的，不来自主题。
     void PushPlateInternal(const SpRect& r, Color fill, Color border,
                            float radius, bool fill_textured,
-                           bool border_textured);
+                           bool border_textured,
+                           const PlateLayer* fill_layer = nullptr);
     // 由主题字段造一层材质（fill / border 共用同一套规则）。
     // textured = false 时该层退回纯色（不采样纹理；图集/帧率仍保留，不影响其它层）。
     PlateLayer MakeLayer(const SpRect& box_device, bool is_border,
                          bool textured) const;
+
+    // ---- 增强按钮（SpButtonSkin）----
+    // 两个公开 Button 重载共用的实现；skin == nullptr = 老路径（主题三态色）。
+    bool ButtonImpl(const char* label, const SpRect& box,
+                    const SpButtonSkin* skin, bool stretch_w, bool stretch_h);
+    // 用 skin 造填充层材质（密度规则与 MakeLayerFor 一致；box_device 已是设备像素）。
+    PlateLayer MakeButtonLayer(const SpRect& box_device,
+                               const SpButtonSkin& skin) const;
+    // 推进某个按钮的 hover_ratio（跨帧，按 key 归属）并返回本帧的 ratio。
+    // hovering = 本帧悬停且**未**按下（按下走 pressed_tint，同时 ratio 衰减）。
+    float AdvanceHoverRatio(const SpRect& key, bool hovering, float delay_s);
     void PushText(const char* s, const SpRect& box);
     // 与公开的 Text() 同语义，但 box 已是**设备像素**（不再过 Scaled）。
     // 控件内部把 box 缩过一次后必须调这个：调公开的 Text() 会二次缩放
@@ -599,6 +663,20 @@ private:
     // 释放才恢复）；起始判据仍保留（box 内才可开始）。被按的按钮不被其他
     // 按钮抢走按下态（A 飘越 B 时 B 不误抢，因起始需槽位空闲）。
     StateSlot button_press_;
+
+    // ---- 跨帧状态（Button 增强皮肤的 hover 渐变）----
+    // 每个「用过 SpButtonSkin 的按钮」一条轨道，按 box 识别（同 StateSlot 的
+    // 规则：pos + size 精确相等 = 同一个按钮）。有多条而不是单个槽位：
+    // 鼠标从 A 移到 B 时，A 的 ratio 还要继续衰减到 0（只留一个槽位会让 A
+    // 卡在半亮）。条目在「连续两帧没被绘制」时被回收（见 Begin）。
+    struct HoverTrack {
+        SpRect box{};         // 归属按钮（调用方给的 box，设备像素）
+        float ratio = 0.0f;   // [0,1]
+        int64_t last_frame = 0;
+    };
+    std::vector<HoverTrack> hover_tracks_;
+    // 帧序号（Begin 自增，仅用于回收没再出现的 hover 轨道）。
+    int64_t frame_index_ = 0;
 };
 
 // 键盘字符映射：KeyCode → 可编辑字符（供 InputText 写回 buffer，也供测试

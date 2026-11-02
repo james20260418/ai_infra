@@ -38,6 +38,7 @@ using jpov::Color;
 using jpov::Plate2DCommand;
 using jpov::RenderCommandList;
 using jpov::sp_ui::SpDemoState;
+using jpov::sp_ui::SpButtonSkin;
 using jpov::sp_ui::SpRect;
 using jpov::sp_ui::SpTheme;
 using jpov::PlateLayer;
@@ -549,6 +550,155 @@ void CheckInteractionStateMachine() {
     }
 }
 
+// ---- 10. 翻书按钮：hover_ratio 渐变（跨帧状态机）----
+//
+// 要钉住的四件事（改错任意一条都能被下面的断言抓住）：
+//   a) 增强按钮的填充层用的是**皮肤自己的图集/图集网格/帧率**，边框层仍然是主题的；
+//   b) tint 按 dt/delay 线性爬升，**不是**一悬停就满；
+//   c) 按下那一帧直接用 pressed_tint（不看 ratio），且 ratio 在后台继续衰减；
+//     松开当帧从**当前** ratio 继续爬（不是先归零）；
+//   d) 离开后衰减回 normal_tint；delay=0 / dt=0 两个退化分支都是「立即切」。
+void CheckButtonHoverRatio() {
+    const SpRect box{{10.0f, 10.0f}, {200.0f, 40.0f}};
+    const float cx = box.pos.x() + box.size.x() * 0.5f;
+    const float cy = box.pos.y() + box.size.y() * 0.5f;
+    const float kDtMs = 100.0f;   // 每帧 0.1s；delay 0.4s ⇒ 每帧 +0.25
+
+    SpButtonSkin skin;
+    skin.texture_id = kCoreTex;   // 非 0：填充层必须换成这个图集
+    skin.tiles_x = 4;
+    skin.tiles_y = 4;
+    skin.fps = 8.0f;
+    skin.material_px = 100.0f;
+    skin.normal_tint = {0.2f, 0.2f, 0.2f, 1.0f};
+    skin.hover_tint = {1.0f, 0.6f, 0.2f, 1.0f};
+    skin.pressed_tint = {0.05f, 0.04f, 0.03f, 1.0f};
+    skin.normal_to_hover_delay = 0.4f;
+
+    SpUi ui;
+    SpTheme theme = MakeTheme();
+
+    // 跑一帧，返回那颗按钮的板材指令（面板上只有它一个控件）。
+    auto Frame = [&](const jpov::InputSnapshot& in, float dt_ms) {
+        RenderCommandList cmds;
+        ui.Begin(in, theme, 400.0f, 400.0f, dt_ms, /*time_seconds=*/0.0f);
+        ui.Button("activate", box, skin);
+        ui.End();
+        ui.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u) << "按钮应恰好产出一条板材指令";
+        return cmds.plate2d[0];
+    };
+    auto Near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+    auto CheckTint = [&](const Plate2DCommand& p, const Color& want,
+                         const char* what) {
+        CHECK(Near(p.fill_color.r, want.r) && Near(p.fill_color.g, want.g) &&
+              Near(p.fill_color.b, want.b))
+            << what << "：fill_color=(" << p.fill_color.r << ","
+            << p.fill_color.g << "," << p.fill_color.b << ")，期望 ("
+            << want.r << "," << want.g << "," << want.b << ")";
+    };
+
+    // a) 常态：填充层用皮肤图集，边框层仍是主题的。
+    {
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;   // 鼠标在按钮外
+        idle.mouse_y = 350.0f;
+        const Plate2DCommand p = Frame(idle, kDtMs);
+        CHECK_EQ(p.fill.texture_id, kCoreTex) << "填充层应换成按钮皮肤的图集";
+        CHECK_EQ(p.fill.flipbook.tiles_x, 4) << "填充层应用皮肤的图集网格";
+        CHECK_EQ(p.fill.flipbook.tiles_y, 4) << "填充层应用皮肤的图集网格";
+        CHECK(std::fabs(p.fill.flipbook.fps - 8.0f) < 1e-4f)
+            << "填充层应用皮肤的翻书帧率";
+        CHECK_EQ(p.border.texture_id, kRimTex)
+            << "边框层不该被按钮皮肤改写（它仍然来自主题）";
+        CheckTint(p, skin.normal_tint, "常态应为 normal_tint");
+        LOG(INFO) << "[PASS] 增强按钮：填充层=皮肤图集，边框层=主题图集";
+    }
+
+    // b) 悬停 1 帧 = 0.25 比例（线性爬升，不是一跳到底）。
+    jpov::InputSnapshot hover{};
+    hover.mouse_x = cx;
+    hover.mouse_y = cy;
+    {
+        const Plate2DCommand p = Frame(hover, kDtMs);
+        CheckTint(p, Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "悬停 1 帧（delay=0.4s, dt=0.1s）应为 25% 的 hover_tint");
+        LOG(INFO) << "[PASS] hover_ratio 第 1 帧 = 0.25（线性爬升）";
+    }
+    // 再 3 帧 ⇒ 满（0.25 × 4 = 1.0）。
+    {
+        Plate2DCommand p{};
+        for (int i = 0; i < 3; ++i) {
+            p = Frame(hover, kDtMs);
+        }
+        CheckTint(p, skin.hover_tint, "悬停满 delay 后应为 hover_tint");
+        // 再悬停不该越界（clamp 到 1）。
+        const Plate2DCommand q = Frame(hover, kDtMs * 10.0f);
+        CheckTint(q, skin.hover_tint, "ratio 必须 clamp 在 1，不会越界发白");
+        LOG(INFO) << "[PASS] hover_ratio 在 delay 处到 1.0 并 clamp";
+    }
+
+    // c) 按下：直接用 pressed_tint；ratio 在后台衰减。
+    {
+        jpov::InputSnapshot press = hover;
+        press.left.raw = -2;   // Hold 在按钮内
+        const Plate2DCommand p = Frame(press, kDtMs);
+        CheckTint(p, skin.pressed_tint, "按下那一帧应直接用 pressed_tint");
+        Frame(press, kDtMs);   // 再按住一帧 ⇒ ratio 1.0 → 0.5
+        // 松开（Click，鼠标仍在按钮上）：从当前 ratio 0.5 继续爬 ⇒ 0.75。
+        jpov::InputSnapshot release = hover;
+        release.left.raw = 1;
+        release.left_clicks[0] = {cx, cy, 0.5f};
+        const Plate2DCommand r = Frame(release, kDtMs);
+        CheckTint(r, Color{0.2f + 0.8f * 0.75f, 0.2f + 0.4f * 0.75f, 0.2f, 1.0f},
+                  "松开当帧应从当前 ratio 继续爬（不是跳回 normal）");
+        LOG(INFO) << "[PASS] 按下=pressed_tint；松开后 ratio 从当前值续爬";
+    }
+
+    // d) 离开：衰减回 normal（每帧 −0.25，4 帧归零）。
+    {
+        jpov::InputSnapshot leave{};
+        leave.mouse_x = 350.0f;
+        leave.mouse_y = 350.0f;
+        Plate2DCommand p{};
+        for (int i = 0; i < 8; ++i) {   // 多跑几帧：确保不是靠「刚好 4 帧」
+            p = Frame(leave, kDtMs);
+        }
+        CheckTint(p, skin.normal_tint, "离开后应衰减回 normal_tint");
+        LOG(INFO) << "[PASS] hover_ratio 离开后衰减回 0";
+    }
+
+    // e) 两个退化分支：delay=0、dt=0 ⇒ 都是「立即切」。
+    {
+        SpUi ui2;
+        SpButtonSkin instant = skin;
+        instant.normal_to_hover_delay = 0.0f;
+        auto Frame2 = [&](const jpov::InputSnapshot& in, float dt_ms,
+                          const SpButtonSkin& sk) {
+            RenderCommandList cmds;
+            ui2.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            ui2.Button("activate", box, sk);
+            ui2.End();
+            ui2.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        CheckTint(Frame2(hover, kDtMs, instant), skin.hover_tint,
+                  "delay=0 应在一帧内直达 hover_tint");
+        // 换一个全新 SpUi（不共享跨帧状态），用 dt=0 + 正常 delay。
+        SpUi ui3;
+        RenderCommandList cmds;
+        ui3.Begin(hover, theme, 400.0f, 400.0f, /*frame_dt_ms=*/0.0f, 0.0f);
+        ui3.Button("activate", box, skin);
+        ui3.End();
+        ui3.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u);
+        CheckTint(cmds.plate2d[0], skin.hover_tint,
+                  "dt=0（无时钟）时应直接切到目标值");
+        LOG(INFO) << "[PASS] delay=0 / dt=0 都退化为一帧直达";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -562,6 +712,7 @@ int main() {
     CheckMultiPlate();
     CheckLayerForScaleInvariance();
     CheckInteractionStateMachine();
+    CheckButtonHoverRatio();
     CheckDegenerateInputs();
     LOG(INFO) << "===== sp_ui gold 全部通过 =====";
     return 0;
