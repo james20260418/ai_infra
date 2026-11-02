@@ -264,7 +264,18 @@ void main() {
     // 常态；残留的一种可能是**属性 pass 与主 pass 的材质来源不同**：主 pass 的 base_color
     // 可以被纹理覆盖，而属性 pass 的非镂空变体只有材质常量（镂空变体才有 UV 去采样）。
     // 带纹理的反射体因此在 env 项上有一份残差 —— 如实记录，不在合成层打补丁。
-    vec3 out_rgb = hdr + mask * A * uAo * (ssr_L * weight - env_term);
+    // 合成：先"减掉 3D pass 已加的那一份环境镜面"，再加上 SSR 的估计。
+    //
+    // ⚠️ **逐通道对 hdr 截断被减项**（2026-11-02 修"剪影红边"）：数学上
+    //   hdr − env_term + ssr_L·weight ≥ 0 只要 hdr 里那份额度与 env_term 是同一套参数；
+    //   但在**蒙皮反射体的剪影**上，属性 pass 的覆盖率/法线与主 pass 会有 1~3 px 的不一致
+    //   （实测：镜面人轮廓上一圈 57 个像素），此时 env_term 远大于 hdr 里实际存在的那一份
+    //   ⇒ 出现负辐亮度 ⇒ tone map 把负通道压成 0、正通道顶到 1 ⇒ **纯红描边**。
+    //   辐亮度不可能为负，所以"减掉的不超过现有的"是物理硬约束，不是调参：
+    //   正常情况下 removed ≤ hdr，本式与原来的 `hdr + (add − removed)` **逐位相同**。
+    vec3 removed = mask * A * uAo * env_term;
+    removed = min(removed, max(hdr, vec3(0.0)));
+    vec3 out_rgb = hdr - removed + mask * A * uAo * ssr_L * weight;
     FragColor = vec4(out_rgb, 1.0);
 }
 )glsl";
