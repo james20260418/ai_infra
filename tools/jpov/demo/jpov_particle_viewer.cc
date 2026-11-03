@@ -13,6 +13,8 @@
 // headless 拍摄：--capture <out_dir> [--fire N] [--palette N]
 //                [--smoke N]（逐个烟类型扫谱）[--smoke-density F]
 //                [--ember-count N] [--ember-size F]
+//                [--ember-align 0|1] [--ember-stretch F]（火星 kVelocity 对齐/拉伸，A/B 用；
+//                   1 = 沿速度对齐，0 = 旧 kView）
 //                [--soft-depth F]（软深度过渡距离，单位米；F=0 = 关闭，便于 A/B）
 //                [--fuel-y F] [--fuel-scale F]（燃料块位置/大小；软深度 A/B 用：
 //                   fuel-y 调低可让火焰底部与地面相交，得到大面积的软过渡观察区）
@@ -98,6 +100,8 @@ struct CaptureOptions {
     float smoke_density = -1.0f;
     float ember_count = -1.0f;
     float ember_size = -1.0f;
+    std::optional<bool>  ember_velocity_align;   // true = kVelocity，false = kView（A/B）
+    std::optional<float> ember_stretch;          // 每 m/s 拉伸系数
 
     // 场景
     std::optional<float> fuel_y;
@@ -154,6 +158,10 @@ int RunCapture(const CaptureOptions& opts) {
     if (opts.smoke_density >= 0.0f) { app.ui_smoke_density_ = opts.smoke_density; }
     if (opts.ember_count >= 0.0f) { app.ui_ember_count_ = opts.ember_count; }
     if (opts.ember_size > 0.0f) { app.ui_ember_size_ = opts.ember_size; }
+    if (opts.ember_velocity_align.has_value()) {
+        app.ui_ember_velocity_align_ = *opts.ember_velocity_align;
+    }
+    if (opts.ember_stretch.has_value()) { app.ui_ember_stretch_ = *opts.ember_stretch; }
     if (opts.fuel_y.has_value()) { app.ui_fuel_y_ = *opts.fuel_y; }
     if (opts.fuel_scale.has_value()) { app.ui_fuel_scale_ = *opts.fuel_scale; }
     // 软深度：0 = 关闭（旧硬判据）；>0 = 开启并指定过渡距离。
@@ -301,6 +309,10 @@ int main(int argc, char** argv) {
             opts.ember_count = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(a, "--ember-size") == 0 && has_val) {
             opts.ember_size = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(a, "--ember-align") == 0 && has_val) {
+            opts.ember_velocity_align = (std::atoi(argv[++i]) != 0);
+        } else if (std::strcmp(a, "--ember-stretch") == 0 && has_val) {
+            opts.ember_stretch = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(a, "--count") == 0 && has_val) {
             opts.count = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(a, "--size") == 0 && has_val) {

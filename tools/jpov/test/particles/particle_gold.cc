@@ -10,7 +10,7 @@
 // 覆盖点：
 //   * 火焰：12×6 成对形变 atlas（V7.1）+ 自旋 + 温度调色
 //   * 烟：danis 重绘 12×6 图集，火焰死亡点 spawn，kAlpha over
-//   * 火星：纯色加法小点，数量/大小固定
+//   * 火星：纯色加法**短流线**（kVelocity 对齐 + 拉伸），数量/大小固定
 //   * 软深度：同一场景再渲一张 soft_depth_m=0.08 的 gold；并**断言**它与关闭软深度
 //     的那张确实存在足量像素差 —— 防「uniform 没绑上 / 淡出被短路」时 gold 静默变恒等。
 
@@ -144,7 +144,9 @@ EmitterConfig MakeEmberConfig() {
     c.size_curve.keys = {{0.0f, 0.60f}, {0.30f, 1.00f}, {1.0f, 0.30f}};
     c.flipbook = false;
     c.texture_id = 0;
-    c.align = jpov::AlignMode::kView;
+    // 火星 = 速度对齐 + 拉伸（与 particle viewer 的默认一致）：火花的正确画法是
+    // 「沿运动方向拉长的短流线」，不是面向相机的小方块。
+    c.align = jpov::AlignMode::kVelocity;
     return c;
 }
 
@@ -264,7 +266,9 @@ public:
             ec.particles = ember_inst_;
             ec.texture_id = 0;
             ec.flipbook = false;
-            ec.align = jpov::AlignMode::kView;
+            ec.align = jpov::AlignMode::kVelocity;
+            ec.stretched = true;
+            ec.stretch_scale = 3.0f;
             ec.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(ec));
         }

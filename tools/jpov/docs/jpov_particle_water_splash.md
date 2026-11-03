@@ -64,9 +64,9 @@
 | 扁盒子当水面 | 侧壁露出暗色楔形 → 改**无厚度 quad** |
 | 核心漏设 `sheet_time_mode`（默认 kFps） | 每颗粒子按 fps 走完整张 atlas，回不到"随机选一块"的形变链 |
 
-## 5. ⚠️ 顺带发现的引擎 bug（未修，单独 PR）
+## 5. ⚠️ 顺带发现的引擎 bug（已修复：2026-11-03 `feature/20261103-jpov-particle-velocity-align`）
 
-`src/particles/particle_renderer.h` 顶点着色器的 `kVelocity` 分支：
+`src/particles/particle_renderer.h` 顶点着色器的 `kVelocity` 分支原来是：
 
 ```glsl
 right = normalize(cross(u, n));       // OK
@@ -75,15 +75,18 @@ up    = normalize(cross(right, u));   // ❌ 得到的是面片【法线】= 视
 
 `right ⟂ u` 且 `right ⟂ n` ⇒ `cross(right,u) = ±n`，quad 侧对相机，投影成一条横线。
 宽锥水滴层（速度接近水平、与视线垂直）会整片变成横条 —— 这就是上一轮"外缘高亮圆片/塑料感"的根因。
-**修法**：`up = normalize(cross(n, right))`（或 `u - right*dot(u,right)`）。
-代价：`align=kVelocity` 的现有层（火星/余烬）画法会变，**fire gold 会变**，需单独 PR 并重出 gold。
-本 PR 的水花不复用该分支（一律 `kView`）。
+**已改为** `up = normalize(cross(n, right))`（= 速度在屏幕平面上的投影），面片恒正对相机、
+拉伸轴 = 速度轴。配套：
+- 火星/余烬层改用 `kVelocity + stretched`（viewer 面板新增「火星速度对齐」「火星拉伸」两项）
+- 新增 GPU 像素测试 `test/particles:particle_velocity_align_test`（旧写法下三条断言全红）
+- 粒子 gold 的火星层同步换成 `kVelocity + stretch 3`，两张 gold 已重出
+本 PR 的水花不复用该分支（一律 `kView`，不需要沿速度拉伸）。
 
 ## 6. 已知短板
 
 - 水面**没有反射/折射/涟漪**（object3d 无半透明水体通道），平水面只能靠颜色表达。
 - 水花贴图是 5 张**不同的**水花照片（不是同一朵的时间序列），S5 链在形状之间游走。
-- 100 粒预算下柱身仍有一点"珠链"；要更连续得加连续柱芯（网格带或修 kVelocity 后拉伸）。
+- 100 粒预算下柱身仍有一点"珠链"；要更连续得加连续柱芯（网格带，或用 kVelocity + 拉伸做纵向流线）。
 
 ## 7. 怎么跑
 
