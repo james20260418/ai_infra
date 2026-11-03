@@ -38,6 +38,7 @@ using jpov::Color;
 using jpov::Plate2DCommand;
 using jpov::RenderCommandList;
 using jpov::sp_ui::SpDemoState;
+using jpov::sp_ui::SpButtonSkin;
 using jpov::sp_ui::SpRect;
 using jpov::sp_ui::SpTheme;
 using jpov::PlateLayer;
@@ -549,6 +550,398 @@ void CheckInteractionStateMachine() {
     }
 }
 
+// ---- 10. 翻书按钮：hover_ratio 渐变（跨帧状态机）----
+//
+// 要钉住的四件事（改错任意一条都能被下面的断言抓住）：
+//   a) 增强按钮的填充层用的是**皮肤自己的图集/图集网格/帧率**，边框层仍然是主题的；
+//   b) tint 按 dt/delay 线性爬升，**不是**一悬停就满；
+//   c) 按下那一帧直接用 pressed_tint（不看 ratio），且 ratio 在后台继续衰减；
+//     松开当帧从**当前** ratio 继续爬（不是先归零）；
+//   d) 离开后衰减回 normal_tint；delay=0 / dt=0 两个退化分支都是「立即切」。
+void CheckButtonHoverRatio() {
+    const SpRect box{{10.0f, 10.0f}, {200.0f, 40.0f}};
+    const float cx = box.pos.x() + box.size.x() * 0.5f;
+    const float cy = box.pos.y() + box.size.y() * 0.5f;
+    const float kDtMs = 100.0f;   // 每帧 0.1s；delay 0.4s ⇒ 每帧 +0.25
+
+    SpButtonSkin skin;
+    skin.texture_id = kCoreTex;   // 非 0：填充层必须换成这个图集
+    skin.tiles_x = 4;
+    skin.tiles_y = 4;
+    skin.fps = 8.0f;
+    skin.material_px = 100.0f;
+    skin.normal_tint = {0.2f, 0.2f, 0.2f, 1.0f};
+    skin.hover_tint = {1.0f, 0.6f, 0.2f, 1.0f};
+    skin.pressed_tint = {0.05f, 0.04f, 0.03f, 1.0f};
+    skin.normal_to_hover_delay = 0.4f;
+
+    SpUi ui;
+    SpTheme theme = MakeTheme();
+
+    // 跑一帧，返回那颗按钮的板材指令（面板上只有它一个控件）。
+    auto Frame = [&](const jpov::InputSnapshot& in, float dt_ms) {
+        RenderCommandList cmds;
+        ui.Begin(in, theme, 400.0f, 400.0f, dt_ms, /*time_seconds=*/0.0f);
+        ui.Button("activate", box, skin);
+        ui.End();
+        ui.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u) << "按钮应恰好产出一条板材指令";
+        return cmds.plate2d[0];
+    };
+    auto Near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+    auto CheckTint = [&](const Plate2DCommand& p, const Color& want,
+                         const char* what) {
+        CHECK(Near(p.fill_color.r, want.r) && Near(p.fill_color.g, want.g) &&
+              Near(p.fill_color.b, want.b))
+            << what << "：fill_color=(" << p.fill_color.r << ","
+            << p.fill_color.g << "," << p.fill_color.b << ")，期望 ("
+            << want.r << "," << want.g << "," << want.b << ")";
+    };
+
+    // a) 常态：填充层用皮肤图集，边框层仍是主题的。
+    {
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;   // 鼠标在按钮外
+        idle.mouse_y = 350.0f;
+        const Plate2DCommand p = Frame(idle, kDtMs);
+        CHECK_EQ(p.fill.texture_id, kCoreTex) << "填充层应换成按钮皮肤的图集";
+        CHECK_EQ(p.fill.flipbook.tiles_x, 4) << "填充层应用皮肤的图集网格";
+        CHECK_EQ(p.fill.flipbook.tiles_y, 4) << "填充层应用皮肤的图集网格";
+        CHECK(std::fabs(p.fill.flipbook.fps - 8.0f) < 1e-4f)
+            << "填充层应用皮肤的翻书帧率";
+        CHECK_EQ(p.border.texture_id, kRimTex)
+            << "边框层不该被按钮皮肤改写（它仍然来自主题）";
+        CheckTint(p, skin.normal_tint, "常态应为 normal_tint");
+        LOG(INFO) << "[PASS] 增强按钮：填充层=皮肤图集，边框层=主题图集";
+    }
+
+    // b) 悬停 1 帧 = 0.25 比例（线性爬升，不是一跳到底）。
+    jpov::InputSnapshot hover{};
+    hover.mouse_x = cx;
+    hover.mouse_y = cy;
+    {
+        const Plate2DCommand p = Frame(hover, kDtMs);
+        CheckTint(p, Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "悬停 1 帧（delay=0.4s, dt=0.1s）应为 25% 的 hover_tint");
+        LOG(INFO) << "[PASS] hover_ratio 第 1 帧 = 0.25（线性爬升）";
+    }
+    // 再 3 帧 ⇒ 满（0.25 × 4 = 1.0）。
+    {
+        Plate2DCommand p{};
+        for (int i = 0; i < 3; ++i) {
+            p = Frame(hover, kDtMs);
+        }
+        CheckTint(p, skin.hover_tint, "悬停满 delay 后应为 hover_tint");
+        // 再悬停不该越界（clamp 到 1）。
+        const Plate2DCommand q = Frame(hover, kDtMs * 10.0f);
+        CheckTint(q, skin.hover_tint, "ratio 必须 clamp 在 1，不会越界发白");
+        LOG(INFO) << "[PASS] hover_ratio 在 delay 处到 1.0 并 clamp";
+    }
+
+    // c) 按下：直接用 pressed_tint；ratio 在后台衰减。
+    {
+        jpov::InputSnapshot press = hover;
+        press.left.raw = -2;   // Hold 在按钮内
+        const Plate2DCommand p = Frame(press, kDtMs);
+        CheckTint(p, skin.pressed_tint, "按下那一帧应直接用 pressed_tint");
+        Frame(press, kDtMs);   // 再按住一帧 ⇒ ratio 1.0 → 0.5
+        // 松开（Click，鼠标仍在按钮上）：从当前 ratio 0.5 继续爬 ⇒ 0.75。
+        jpov::InputSnapshot release = hover;
+        release.left.raw = 1;
+        release.left_clicks[0] = {cx, cy, 0.5f};
+        const Plate2DCommand r = Frame(release, kDtMs);
+        CheckTint(r, Color{0.2f + 0.8f * 0.75f, 0.2f + 0.4f * 0.75f, 0.2f, 1.0f},
+                  "松开当帧应从当前 ratio 继续爬（不是跳回 normal）");
+        LOG(INFO) << "[PASS] 按下=pressed_tint；松开后 ratio 从当前值续爬";
+    }
+
+    // d) 离开：衰减回 normal（每帧 −0.25，4 帧归零）。
+    {
+        jpov::InputSnapshot leave{};
+        leave.mouse_x = 350.0f;
+        leave.mouse_y = 350.0f;
+        Plate2DCommand p{};
+        for (int i = 0; i < 8; ++i) {   // 多跑几帧：确保不是靠「刚好 4 帧」
+            p = Frame(leave, kDtMs);
+        }
+        CheckTint(p, skin.normal_tint, "离开后应衰减回 normal_tint");
+        LOG(INFO) << "[PASS] hover_ratio 离开后衰减回 0";
+    }
+
+    // e) 两个退化分支：delay=0、dt=0 ⇒ 都是「立即切」。
+    {
+        SpUi ui2;
+        SpButtonSkin instant = skin;
+        instant.normal_to_hover_delay = 0.0f;
+        auto Frame2 = [&](const jpov::InputSnapshot& in, float dt_ms,
+                          const SpButtonSkin& sk) {
+            RenderCommandList cmds;
+            ui2.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            ui2.Button("activate", box, sk);
+            ui2.End();
+            ui2.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        CheckTint(Frame2(hover, kDtMs, instant), skin.hover_tint,
+                  "delay=0 应在一帧内直达 hover_tint");
+        // 换一个全新 SpUi（不共享跨帧状态），用 dt=0 + 正常 delay。
+        SpUi ui3;
+        RenderCommandList cmds;
+        ui3.Begin(hover, theme, 400.0f, 400.0f, /*frame_dt_ms=*/0.0f, 0.0f);
+        ui3.Button("activate", box, skin);
+        ui3.End();
+        ui3.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u);
+        CheckTint(cmds.plate2d[0], skin.hover_tint,
+                  "dt=0（无时钟）时应直接切到目标值");
+        LOG(INFO) << "[PASS] delay=0 / dt=0 都退化为一帧直达";
+    }
+
+    // f) kFlipbook 模式：整块按钮 = 图集。与 kPlate 的差别必须体现在指令上：
+    //    没有边框带（border_width=0）、边框层不采材质、圆角跟主题走；
+    //    而 tint 渐变的语义与 kPlate 完全一致（同一套 hover_ratio）。
+    {
+        SpUi uif;
+        SpButtonSkin baked = skin;
+        baked.style = SpButtonSkin::Style::kFlipbook;
+        baked.material_px = 0.0f;   // 整键皮不平铺：一格图铺满整颗按钮
+        auto FrameF = [&](const jpov::InputSnapshot& in, float dt_ms) {
+            RenderCommandList cmds;
+            uif.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            uif.Button("activate", box, baked);
+            uif.End();
+            uif.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;
+        idle.mouse_y = 350.0f;
+        const Plate2DCommand p = FrameF(idle, kDtMs);
+        CHECK(std::fabs(p.border_width) < 1e-4f)
+            << "kFlipbook 模式不该画边框带（否则整块图被挖掉一圈）："
+            << p.border_width;
+        CHECK_EQ(p.border.texture_id, 0u) << "kFlipbook 模式边框层不该采材质";
+        CHECK_EQ(p.fill.texture_id, kCoreTex) << "整块底板必须是皮肤图集";
+        CHECK_EQ(p.fill.flipbook.tiles_x, 4) << "整键图集的网格必须传下去";
+        // material_px = 0 ⇒ 一格图铺满（tiling = 1，不平铺）。
+        CHECK(std::fabs(p.fill.tiling.x() - 1.0f) < 1e-4f &&
+              std::fabs(p.fill.tiling.y() - 1.0f) < 1e-4f)
+            << "整键皮应当一格铺满：tiling=(" << p.fill.tiling.x() << ","
+            << p.fill.tiling.y() << ")";
+        // 圆角跟主题（本测试主题 6 ⇒ 设备像素仍是 6，scale=1）。
+        CHECK(std::fabs(p.radius - theme.corner_radius_px) < 1e-4f)
+            << "kFlipbook 模式的轮廓应跟主题圆角走";
+        CheckTint(p, skin.normal_tint, "整键模式常态仍用 normal_tint");
+        // 悬停一帧仍然只走到 25%：两种模式共用同一套渐变，不允许分叉。
+        const Plate2DCommand h = FrameF(hover, kDtMs);
+        CheckTint(h, Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "整键模式的 hover 渐变应与板材模式一致（25%）");
+        LOG(INFO) << "[PASS] kFlipbook 模式：无边框 / 一格铺满 / tint 语义同 kPlate";
+    }
+
+    // f2) kFlipbook + texture_id = 0 的降级：纯 tint 色块（文档写明的 fallback）。
+    //      demo 找不到图集时走的就是这条路，所以得钉住：不采样、不留边框带、
+    //      颜色就是 normal_tint（不是黑、也不是白）。
+    {
+        SpUi uin;
+        SpButtonSkin no_tex = skin;
+        no_tex.style = SpButtonSkin::Style::kFlipbook;
+        no_tex.texture_id = 0;
+        no_tex.material_px = 0.0f;
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;
+        idle.mouse_y = 350.0f;
+        RenderCommandList cmds;
+        uin.Begin(idle, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+        uin.Button("activate", box, no_tex);
+        uin.End();
+        uin.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u);
+        const Plate2DCommand p = cmds.plate2d[0];
+        CHECK_EQ(p.fill.texture_id, 0u) << "texture_id=0 必须退化为不采样";
+        CHECK(std::fabs(p.border_width) < 1e-4f)
+            << "kFlipbook 无图集时也不该有边框带";
+        CheckTint(p, no_tex.normal_tint, "无图集时就是 normal_tint 色块");
+        LOG(INFO) << "[PASS] kFlipbook + texture_id=0：降级为纯 tint 色块（无采样/无边框）";
+    }
+
+    // g) 跨帧回归：同一帧里同一个 box 被画两次（两颗按钮叠在同一点、或调用方
+    //    不小心画了两遍）只能推进一次。以前的实现会按调用次数累加 dt ⇒ 渐变
+    //    速度静默翻倍（0.25 → 0.5 一帧到半亮），肉眼很难发现是「时间尺度错了」。
+    {
+        SpUi uid;
+        auto DoubleFrame = [&](const jpov::InputSnapshot& in, float dt_ms) {
+            RenderCommandList cmds;
+            uid.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            uid.Button("a", box, skin);
+            uid.Button("b", box, skin);   // 同 box：共享同一条 ratio 轨道
+            uid.End();
+            uid.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 2u) << "两颗按钮应各产出一条指令";
+            return cmds.plate2d;
+        };
+        const auto first = DoubleFrame(hover, kDtMs);
+        const Color want25{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f};
+        CheckTint(first[0], want25, "同帧画两次：第一颗应 25%（不是 50%）");
+        CheckTint(first[1], want25, "同帧画两次：第二颗应复用同一份 25%");
+        LOG(INFO) << "[PASS] 同帧同 box 画两次：只推进一次（渐变不加速）";
+    }
+
+    // h) 跨帧回归：控件消失后轨道要被回收。否则隔几帧重新出现（换 tab/换面板）
+    //    会带着旧的满亮 ratio 亮一帧，看起来像「没悬停却自己亮了」。
+    {
+        SpUi uir;
+        auto HoverFrame = [&](const jpov::InputSnapshot& in) {
+            RenderCommandList cmds;
+            uir.Begin(in, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uir.Button("activate", box, skin);
+            uir.End();
+            uir.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        for (int i = 0; i < 4; ++i) HoverFrame(hover);   // 爬到满
+        CheckTint(HoverFrame(hover), skin.hover_tint, "先确认已到满亮");
+        // 4 帧完全不画这颗按钮（模拟换 tab / 面板重建）。
+        for (int i = 0; i < 4; ++i) {
+            RenderCommandList cmds;
+            uir.Begin(hover, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uir.End();
+            uir.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 0u) << "这些帧不该有任何控件";
+        }
+        // 重新出现 + 悬停：必须从 0 重新爬（25%），不能带着旧的 1.0。
+        CheckTint(HoverFrame(hover),
+                  Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "消失 4 帧后轨道应被回收，重新从 25% 开始");
+        LOG(INFO) << "[PASS] 消失 ≥3 帧后 hover 轨道被回收（不带旧状态回来）";
+    }
+
+    // i) 跨帧回归：运行时改 ui_scale 不该把所有 hover_ratio 清零。
+    //    轨道若按「缩放后的设备像素」识别，改倍率后所有按钮都会当成新按钮，
+    //    表现为「调整 UI 缩放时悬停状态闪一下」——很轻但确实是个跨帧 bug。
+    {
+        SpUi uis;
+        auto HoverFrame = [&](const jpov::InputSnapshot& in) {
+            RenderCommandList cmds;
+            uis.Begin(in, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uis.Button("activate", box, skin);
+            uis.End();
+            uis.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        for (int i = 0; i < 4; ++i) HoverFrame(hover);
+        CheckTint(HoverFrame(hover), skin.hover_tint, "先跑到满亮");
+        uis.SetUiScale(2.0f);
+        const Plate2DCommand scaled = HoverFrame(hover);
+        CheckTint(scaled, skin.hover_tint,
+                  "改 ui_scale 后 ratio 不该归零（轨道按布局坐标识别）");
+        // 再确认缩放真的生效了（否则上面这条会恒真）。
+        CHECK(std::fabs(scaled.pos.x() - box.pos.x() * 2.0f) < 1e-4f)
+            << "ui_scale=2 后板材位置应翻倍：" << scaled.pos.x();
+        LOG(INFO) << "[PASS] 运行时改 ui_scale 不清空 hover_ratio（布局坐标识别 + 缩放确实生效）";
+    }
+}
+
+// ---- 11. 跨帧兜底：控件在「按住期间」被移出画面，槽位必须被释放 ----
+//
+// 这是 2026-11-03 第二轮 review **实测复现**的老 bug（不是本 PR 引入）：
+// `ButtonImpl` / `SliderFloat` 在 `OutsideViewport` 早退之后就永远走不到自己的
+// `Release` 分支，于是：按住 A → A 被隐藏/滚出视口 → 松开 → 槽位永久被 A 占着
+// ⇒ 之后所有按钮都按不动（只显示 hover 色），所有滑条也拖不动，直到 A 再被
+// 绘制一次。修复在 `SpUi::Begin`：左键已不是 Drag/Hold ⇒ 无条件释放这两个槽位。
+//
+// 两条断言分别钉按钮与滑条（共用同一类槽位 + 同一种早退路径）。
+void CheckCulledControlReleasesState() {
+    const SpTheme theme = MakeTheme();
+    const SpRect box_a{{10.0f, 10.0f}, {200.0f, 40.0f}};
+    const SpRect box_b{{10.0f, 100.0f}, {200.0f, 40.0f}};
+
+    // --- 按钮 ---
+    {
+        SpButtonSkin skin;
+        skin.texture_id = 0;
+        skin.normal_tint = {0.5f, 0.5f, 0.5f, 1.0f};
+        skin.hover_tint = {0.8f, 0.8f, 0.8f, 1.0f};
+        skin.pressed_tint = {0.1f, 0.1f, 0.1f, 1.0f};
+        skin.normal_to_hover_delay = 10.0f;   // 让 hover 变化极小，按下色可区分
+
+        SpUi ui;
+        auto Frame = [&](const jpov::InputSnapshot& in, bool draw_a,
+                         bool draw_b) {
+            RenderCommandList cmds;
+            ui.Begin(in, theme, 400.0f, 400.0f, 33.0f, 0.0f);
+            if (draw_a) ui.Button("A", box_a, skin);
+            if (draw_b) ui.Button("B", box_b, skin);
+            ui.End();
+            ui.Emit(&cmds);
+            return cmds.plate2d;
+        };
+        jpov::InputSnapshot hold_a{};
+        hold_a.mouse_x = 20.0f;
+        hold_a.mouse_y = 20.0f;
+        hold_a.left.raw = -2;                 // Hold 在 A 内
+        CHECK_EQ(Frame(hold_a, true, false).size(), 1u);
+        CHECK_EQ(Frame(hold_a, false, false).size(), 0u);   // A 消失，仍按住
+        jpov::InputSnapshot released{};
+        released.mouse_x = 350.0f;
+        released.mouse_y = 350.0f;
+        CHECK_EQ(Frame(released, false, false).size(), 0u); // A 仍消失，松开
+
+        jpov::InputSnapshot hold_b{};
+        hold_b.mouse_x = 20.0f;
+        hold_b.mouse_y = 110.0f;
+        hold_b.left.raw = -2;                 // 想在 B 上重新按下
+        const auto cmds = Frame(hold_b, false, true);
+        CHECK_EQ(cmds.size(), 1u);
+        CHECK(std::fabs(cmds[0].fill_color.r - skin.pressed_tint.r) < 1e-4f)
+            << "A 消失后 B 必须能重新按下（槽位被旧持有者卡死）：fill_color.r="
+            << cmds[0].fill_color.r << "，pressed=" << skin.pressed_tint.r;
+        LOG(INFO) << "[PASS] 按住 A 期间 A 消失 → 松开 → B 仍能按下（槽位不被卡死）";
+    }
+
+    // --- 滑条（同一类槽位、同一种早退路径）---
+    {
+        SpUi ui;
+        float value_a = 50.0f;
+        float value_b = 50.0f;
+        auto Frame = [&](const jpov::InputSnapshot& in, bool draw_a,
+                         bool draw_b) {
+            RenderCommandList cmds;
+            ui.Begin(in, theme, 400.0f, 400.0f, 33.0f, 0.0f);
+            if (draw_a) ui.SliderFloat("A", &value_a, box_a, 0.0f, 100.0f);
+            if (draw_b) ui.SliderFloat("B", &value_b, box_b, 0.0f, 100.0f);
+            ui.End();
+            ui.Emit(&cmds);
+        };
+        jpov::InputSnapshot drag_a{};
+        drag_a.mouse_x = box_a.pos.x() + box_a.size.x() * 0.5f;
+        drag_a.mouse_y = box_a.pos.y() + 5.0f;
+        drag_a.left.raw = -1;                 // Drag 在 A 上
+        Frame(drag_a, true, false);
+        const float a_after_drag = value_a;
+        CHECK(a_after_drag > 40.0f && a_after_drag < 60.0f)
+            << "A 的拖拽本身应该生效：" << a_after_drag;
+        Frame(drag_a, false, false);          // A 消失，仍按住
+        jpov::InputSnapshot released{};
+        released.mouse_x = 350.0f;
+        released.mouse_y = 350.0f;
+        Frame(released, false, false);        // A 仍消失，松开
+
+        jpov::InputSnapshot drag_b{};
+        drag_b.mouse_x = box_b.pos.x() + box_b.size.x() * 0.9f;
+        drag_b.mouse_y = box_b.pos.y() + 5.0f;
+        drag_b.left.raw = -1;                 // 想拖 B 到 90%
+        Frame(drag_b, false, true);
+        CHECK(value_b > 80.0f)
+            << "A 消失后 B 必须能重新拖动（槽位被旧持有者卡死）：" << value_b;
+        LOG(INFO) << "[PASS] 拖拽 A 期间 A 消失 → 松开 → B 仍能拖动";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -562,6 +955,8 @@ int main() {
     CheckMultiPlate();
     CheckLayerForScaleInvariance();
     CheckInteractionStateMachine();
+    CheckButtonHoverRatio();
+    CheckCulledControlReleasesState();
     CheckDegenerateInputs();
     LOG(INFO) << "===== sp_ui gold 全部通过 =====";
     return 0;

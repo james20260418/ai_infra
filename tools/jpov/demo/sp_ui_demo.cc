@@ -52,14 +52,16 @@ std::string ExeDir() {
 std::string ExeDir() { return std::string(); }
 #endif
 
-// 材质查找顺序：构建产物目录 → 可执行文件目录 → 仓库 assets。
+// 素材查找顺序：构建产物目录 → 可执行文件目录 → 仓库 assets（两份：marble / button）。
 // 与 strip viewer 同一套约定（产物目录里由 build 脚本同构拷贝）。
-std::string ResolveMarbleTexture(const char* file_name) {
+// 名字不叫 ResolveMarbleTexture：它现在也解析 button/ 下的整键皮，叫 marble 会误导。
+std::string ResolveAssetTexture(const char* file_name) {
     const std::string d = ExeDir();
     const std::string rels[] = {
         std::string("textures/") + file_name,
         std::string(file_name),
         std::string("../assets/sp_ui/marble/") + file_name,
+        std::string("../assets/sp_ui/button/") + file_name,
     };
     for (const std::string& r : rels) {
         const std::string p = d.empty() ? r : (d + "/" + r);
@@ -116,6 +118,8 @@ public:
             wave_tex_[i] = tex[i];
         }
     }
+    // 整键皮图集（kFlipbook 模式的按钮用；0 = 退化为纯色 tint 渐变）。
+    void SetBakedButtonTexture(uint32_t tex) { baked_tex_ = tex; }
     // 预选水波方式（命令行用；交互时面板上的下拉会盖它）。
     // Pre-condition: mode ∈ [0,3]
     void SetWaveMode(int mode) {
@@ -186,6 +190,11 @@ public:
         // 多纹理展示区用哪两张图集（核心 / 边界各一张）。
         st_.showcase_core_tex = wave_tex_[2];   // 涟漪
         st_.showcase_rim_tex = wave_tex_[1];    // 正弦波
+        // 翻书按钮的图集：上排用大理石（与主题默认的正弦波不同，能看出是「逐个
+        // 按钮自己的材质」而不是从主题继承来的）；下排用专门为整键模式做的
+        // 金属扫光图集（assets/sp_ui/button，**不是**水纹）。
+        st_.button_tex = wave_tex_[0];
+        st_.baked_button_tex = baked_tex_;
 
         // 帧时钟：log 时间戳 + 键盘 hold 阈值（固定 30fps 帧周期，与 target_fps 一致）。
         st_.frame = static_cast<int>(frame_count);
@@ -215,6 +224,7 @@ private:
     jpov::sp_ui::SpUi ui_;              // 跨帧持有（焦点/下拉展开/拖动状态）
     jpov::sp_ui::SpDemoState st_;       // 跨帧持有（全部控件状态 + 实时 log + 帧时钟）
     uint32_t wave_tex_[4] = {0, 0, 0, 0};
+    uint32_t baked_tex_ = 0;
     PlateOptions plate_opt_;
     float time_s_ = 0.0f;
     bool auto_advance_ = false;
@@ -254,8 +264,10 @@ struct ScriptFrame {
     bool emit_click = false;  // true → left_clicks[0] 填本帧位置（left 应为 >=1）
 };
 
-// 把 "重置" 按钮走一遍「悬停 → 按下 → 松开」的最小交互脚本。
-// 坐标是**设备像素**（按 scale 缩放后的窗口坐标），面板布局见 sp_ui_demo_panel.h。
+// 把 "重置" 按钮以及「翻书按钮」走一遍交互脚本：
+//   重置：悬停 → 按下 → 松开（验证点击语义）
+//   翻书：悬停 → 继续悬停（tint 渐变爬升）→ 按下（pressed tint）→ 松开 → 移开（衰减）
+// 坐标是**设备像素**（按 scale 缩放后的窗口坐标），布局取自 sp_ui_demo_panel.h。
 std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
                                              float mouse_out_y) {
     // 「重置」按钮布局 (16,274) 尺寸 (120,30) → 缩放后中心点。
@@ -272,6 +284,38 @@ std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
     out.push_back({cx, cy, 1, true});
     // 4) 移开并回到 None（松开后的静止帧）
     out.push_back({mouse_out_x, mouse_out_y, 0, false});
+
+    // 翻书按钮 #0（0.1s 渐变）：每一帧一张图 ⇒ 能逐帧看出 tint 爬升/衰减。
+    const jpov::sp_ui::SpRect fb = jpov::sp_ui::UiDemoFlipbookButtonRect(0);
+    const float fbx = (fb.pos.x() + fb.size.x() * 0.5f) * scale;
+    const float fby = (fb.pos.y() + fb.size.y() * 0.5f) * scale;
+    // 5..9) 悬停：0.1s @ 30fps = 3 帧满，再 2 帧维持满亮。
+    for (int i = 0; i < 5; ++i) {
+        out.push_back({fbx, fby, 0, false});
+    }
+    // 10..11) 按下：直接用 pressed_tint（ratio 在后台衰减）。
+    out.push_back({fbx, fby, -2, false});
+    out.push_back({fbx, fby, -2, false});
+    // 12) 松开 → Click（进业务逻辑，log 应 +1）。
+    out.push_back({fbx, fby, 1, true});
+    // 13..16) 移开：ratio 衰减回 normal。
+    for (int i = 0; i < 4; ++i) {
+        out.push_back({mouse_out_x, mouse_out_y, 0, false});
+    }
+
+    // 整键 flipbook 按钮（kFlipbook）：同样一遍悬停→按下→松开→移开。
+    const jpov::sp_ui::SpRect bk = jpov::sp_ui::UiDemoBakedButtonRect(0);
+    const float bkx = (bk.pos.x() + bk.size.x() * 0.5f) * scale;
+    const float bky = (bk.pos.y() + bk.size.y() * 0.5f) * scale;
+    for (int i = 0; i < 5; ++i) {   // 17..21 悬停（0.1s = 3 帧满）
+        out.push_back({bkx, bky, 0, false});
+    }
+    out.push_back({bkx, bky, -2, false});   // 22 按下
+    out.push_back({bkx, bky, -2, false});   // 23 继续按住
+    out.push_back({bkx, bky, 1, true});     // 24 松开 → Click
+    for (int i = 0; i < 4; ++i) {           // 25..28 移开衰减
+        out.push_back({mouse_out_x, mouse_out_y, 0, false});
+    }
     return out;
 }
 
@@ -402,7 +446,7 @@ int main(int argc, char** argv) {
         tex_opt.mipmap = false;
         uint32_t ids[4] = {0, 0, 0, 0};
         for (int i = 0; i < 4; ++i) {
-            const std::string p = ResolveMarbleTexture(kAtlasFiles[i]);
+            const std::string p = ResolveAssetTexture(kAtlasFiles[i]);
             if (p.empty()) {
                 LOG(WARNING) << "找不到材质图集：" << kAtlasFiles[i]
                              << "（该水波选项将退化为纯色）";
@@ -412,6 +456,17 @@ int main(int argc, char** argv) {
             LOG(INFO) << "材质[" << i << "] = " << p;
         }
         app.SetWaveTextures(ids);
+
+        // 整键皮图集（kFlipbook 模式的按钮）：专门为本模式生成的金属扫光序列。
+        const std::string baked =
+            ResolveAssetTexture("plate_button_steel_4x4.png");
+        if (baked.empty()) {
+            LOG(WARNING) << "找不到整键按钮图集 plate_button_steel_4x4.png"
+                         << "（整键模式会退化为纯色 tint 渐变）";
+        } else {
+            app.SetBakedButtonTexture(app.RegisterTexture(baked, tex_opt));
+            LOG(INFO) << "整键按钮图集 = " << baked;
+        }
     }
 
     if (opt.script) {
