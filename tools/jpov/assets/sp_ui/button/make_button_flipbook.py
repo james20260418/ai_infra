@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""生成「整键 flipbook」按钮底板（er），4x4 / 16 帧 / 每格 256x128。
+"""生成「整键 flipbook」按钮底板（steel），4x4 / 16 帧 / 每格 380x96。
 
 用途：`sp_ui` 的 `SpButtonSkin::Style::kFlipbook` —— 按钮**整块**就是这张图集
 （不画主题板材/边框），hover / pressed 只在这张图上乘 tint。
 
-风格：拉丝碳灰金属 + 一条周期性扫过的高光带 + 边缘呼吸的琥珀色余晖。
+风格：拉丝碳灰金属 + 一条周期性扫过的高光带 + 边缘呼吸的冷蓝余晖。
 **不用水纹/涟漪/位移场** —— 这里是机械感，不是流体。
+
+格子长宽比 ≈ 3.95:1（380x96），对应 demo 里 173x44 的按钮 —— 图集格子与按钮
+长宽比不一致时，倒角会被非等比拉伸。
 
 无缝约定（见 `interface/flipbook.h`）：
   * 行主序、帧 0 在图片左上角；
@@ -16,7 +19,7 @@
 
 复现：
     cd tools/jpov/assets/sp_ui/button
-    python3 make_button_flipbook.py --out plate_button_ember_4x4.png
+    python3 make_button_flipbook.py --out plate_button_steel_4x4.png
 """
 
 import argparse
@@ -97,7 +100,7 @@ def make_cell(w: int, h: int, phase: float, band_center: float) -> np.ndarray:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="plate_button_ember_4x4.png")
+    ap.add_argument("--out", default="plate_button_steel_4x4.png")
     ap.add_argument("--tiles", type=int, default=4, help="每边格数（4 = 4x4 = 16 帧）")
     ap.add_argument("--cell-w", type=int, default=380,
                     help="单格宽（默认 380；与 96 高 ≈ 3.95:1，对应 demo 的 173x44 按钮）")

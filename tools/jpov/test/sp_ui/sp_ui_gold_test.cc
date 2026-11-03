@@ -740,6 +740,58 @@ void CheckButtonHoverRatio() {
                   "整键模式的 hover 渐变应与板材模式一致（25%）");
         LOG(INFO) << "[PASS] kFlipbook 模式：无边框 / 一格铺满 / tint 语义同 kPlate";
     }
+
+    // g) 跨帧回归：同一帧里同一个 box 被画两次（两颗按钮叠在同一点、或调用方
+    //    不小心画了两遍）只能推进一次。以前的实现会按调用次数累加 dt ⇒ 渐变
+    //    速度静默翻倍（0.25 → 0.5 一帧到半亮），肉眼很难发现是「时间尺度错了」。
+    {
+        SpUi uid;
+        auto DoubleFrame = [&](const jpov::InputSnapshot& in, float dt_ms) {
+            RenderCommandList cmds;
+            uid.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            uid.Button("a", box, skin);
+            uid.Button("b", box, skin);   // 同 box：共享同一条 ratio 轨道
+            uid.End();
+            uid.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 2u) << "两颗按钮应各产出一条指令";
+            return cmds.plate2d;
+        };
+        const auto first = DoubleFrame(hover, kDtMs);
+        const Color want25{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f};
+        CheckTint(first[0], want25, "同帧画两次：第一颗应 25%（不是 50%）");
+        CheckTint(first[1], want25, "同帧画两次：第二颗应复用同一份 25%");
+        LOG(INFO) << "[PASS] 同帧同 box 画两次：只推进一次（渐变不加速）";
+    }
+
+    // h) 跨帧回归：控件消失后轨道要被回收。否则隔几帧重新出现（换 tab/换面板）
+    //    会带着旧的满亮 ratio 亮一帧，看起来像「没悬停却自己亮了」。
+    {
+        SpUi uir;
+        auto HoverFrame = [&](const jpov::InputSnapshot& in) {
+            RenderCommandList cmds;
+            uir.Begin(in, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uir.Button("activate", box, skin);
+            uir.End();
+            uir.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        for (int i = 0; i < 4; ++i) HoverFrame(hover);   // 爬到满
+        CheckTint(HoverFrame(hover), skin.hover_tint, "先确认已到满亮");
+        // 4 帧完全不画这颗按钮（模拟换 tab / 面板重建）。
+        for (int i = 0; i < 4; ++i) {
+            RenderCommandList cmds;
+            uir.Begin(hover, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uir.End();
+            uir.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 0u) << "这些帧不该有任何控件";
+        }
+        // 重新出现 + 悬停：必须从 0 重新爬（25%），不能带着旧的 1.0。
+        CheckTint(HoverFrame(hover),
+                  Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "消失 4 帧后轨道应被回收，重新从 25% 开始");
+        LOG(INFO) << "[PASS] 消失 ≥3 帧后 hover 轨道被回收（不带旧状态回来）";
+    }
 }
 
 }  // namespace

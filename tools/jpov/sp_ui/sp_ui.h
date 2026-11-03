@@ -215,10 +215,12 @@ struct SpRect {
 // （悬停 = 1，否则 = 0），即 delay 被忽略。delay = 0 也走这条立即分支。
 //
 // Pre-condition: texture_id == 0（= 不启用）或已注册；
-//                tiles_x >= 1、tiles_y >= 1、fps >= 0、material_px >= 0；
-//                normal_to_hover_delay >= 0。
+//                tiles_x >= 1、tiles_y >= 1（且 tiles_x * tiles_y 不得溢出 int）、
+//                fps >= 0、material_px >= 0、normal_to_hover_delay >= 0。
 // 注意：hover_ratio 按**按钮 box**（与其它跨帧状态槽同一套识别规则）归属，
-//       两个同 box 同屏的按钮会被当成同一个 —— 别这么排版。
+//       两个同 box 同屏的按钮会被当成同一个（共享同一份 ratio，且同一帧里
+//       只推进一次 —— 不会因为画了两遍而加速渐变）。真正的「同位置两颗不同
+//       按钮」请让 box 至少差 1px，否则它们本来就是同一个交互区域。
 struct SpButtonSkin {
     // 按钮的两种外观（Danis 2026-11-03：就这两种）。
     enum class Style {
@@ -683,7 +685,11 @@ private:
     // 每个「用过 SpButtonSkin 的按钮」一条轨道，按 box 识别（同 StateSlot 的
     // 规则：pos + size 精确相等 = 同一个按钮）。有多条而不是单个槽位：
     // 鼠标从 A 移到 B 时，A 的 ratio 还要继续衰减到 0（只留一个槽位会让 A
-    // 卡在半亮）。条目在「连续两帧没被绘制」时被回收（见 Begin）。
+    // 卡在半亮）。回收在 Begin 里做：条目由最后一次被绘制的帧号 last_frame
+    // 决定，保留「last_frame ≥ 本帧 − 2」的条目 ⇒ 控件消失后还能再活 2 帧
+    // （让最后一小段衰减有机会画完），第 3 帧开始清掉。
+    // 同一帧内对同一 box 重复调用只会推进一次（last_frame 已是本帧就直接返回
+    // 当前 ratio）—— 否则画两遍的按钮渐变速度会翻倍。
     struct HoverTrack {
         SpRect box{};         // 归属按钮（调用方给的 box，设备像素）
         float ratio = 0.0f;   // [0,1]

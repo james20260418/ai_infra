@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include <glog/logging.h>
@@ -124,9 +125,10 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     strips_.clear();
     popup_fill_rects_.clear();
     popup_texts_.clear();
-    // 悬停渐变轨道的回收：只保留「上一帧还在被绘制」的条目（last_frame 是
-    // 上一帧或本帧的序号）。控件被删/换 box 后，它的半亮状态自然消失；
-    // 留一帧余量是因为 ratio 的衰减靠下一帧重新碰到同一个按钮才能继续。
+    // 悬停渐变轨道的回收：只保留「最近两帧内还在被绘制」的条目。
+    // last_frame 是那条轨道最后一次被绘制的帧号；保留 last_frame >= 本帧 − 2，
+    // 控件消失后还能再活两帧（把剩下的衰减画完），第 3 帧起清掉。
+    // 换成 box / 删掉控件后，旧的半亮状态不会永久残留。
     ++frame_index_;
     hover_tracks_.erase(
         std::remove_if(hover_tracks_.begin(), hover_tracks_.end(),
@@ -286,6 +288,13 @@ bool SpUi::Button(const char* label, const SpRect& box, const SpButtonSkin& skin
     CHECK_GE(skin.material_px, 0.0f) << "SpButtonSkin.material_px 必须 >= 0";
     CHECK_GE(skin.normal_to_hover_delay, 0.0f)
         << "SpButtonSkin.normal_to_hover_delay 必须 >= 0";
+    // 格数是 int 乘法（FlipbookDesc::frame_count）：两个大数相乘会溢出成负数，
+    // 后面 ResolveFlipbookFrame 的 wrap 会算出负帧号、UV 直接乱掉。这里先用
+    // int64 校验一遍乘积 —— 不额外设艺术上限，只拒绝会让算术失效的输入。
+    const int64_t cell_count = static_cast<int64_t>(skin.tiles_x) * skin.tiles_y;
+    CHECK_LE(cell_count, std::numeric_limits<int>::max())
+        << "SpButtonSkin 图集格数溢出 int：tiles_x=" << skin.tiles_x
+        << " x tiles_y=" << skin.tiles_y << "，请拆成更小的图集";
     return ButtonImpl(label, box, &skin, stretch_w, stretch_h);
 }
 
@@ -1560,6 +1569,7 @@ float SpUi::AdvanceHoverRatio(const SpRect& key, bool hovering,
             break;
         }
     }
+    bool created = false;
     if (track == nullptr) {
         // 没历史且本帧也不悬停 ⇒ 就是纯 normal，不必建条目（避免每帧给
         // 满屏按钮都建一条永远为 0 的轨道）。
@@ -1568,6 +1578,13 @@ float SpUi::AdvanceHoverRatio(const SpRect& key, bool hovering,
         }
         hover_tracks_.push_back(HoverTrack{key, 0.0f, frame_index_});
         track = &hover_tracks_.back();
+        created = true;   // 新建的轨道本身就是「本帧第一次」
+    }
+    // 同一帧里对同一个 box 重复调用（画了两遍 / 两颗按钮叠在同一点）：只推进
+    // 一次。不这么做的话 dt 会被加两次，渐变速度翻倍 —— 这是「看起来能用但
+    // 时间尺度静默错了」的那类 bug。
+    if (!created && track->last_frame == frame_index_) {
+        return track->ratio;
     }
     track->last_frame = frame_index_;
 
