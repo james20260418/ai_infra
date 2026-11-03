@@ -100,6 +100,7 @@ inline constexpr int kSmokeTexCount =
 // 2026-11-02 Danis 定稿：**flipbook 只保留 S5 FLOW 这一版**（F5 直出偏硬、
 // S5 PROFILE 会「充气」，两版都删了）。水柱核心与顶点水花共用这一张图集。
 inline constexpr const char* kWaterAtlasFile = "water/water_s5_flow_12x6.png";
+inline constexpr const char* kEmberSpriteFile = "particles/ember_soft_dot.png";
 inline constexpr int kWaterTilesX = 12;
 inline constexpr int kWaterTilesY = 6;
 inline constexpr int kWaterPairLen = 12;
@@ -204,7 +205,7 @@ inline jpov::particles::EmitterConfig MakeEmberConfig() {
     c.size_curve.keys = {{0.0f, 0.60f}, {0.30f, 1.00f}, {1.0f, 0.30f}};
     c.flipbook = false;
     c.texture_id = 0;
-    c.align = jpov::AlignMode::kView;
+    c.align = jpov::AlignMode::kVelocity;   // 火星沿速度方向对齐（见 renderer 的 kVelocity 分支）
     return c;
 }
 
@@ -294,8 +295,7 @@ inline jpov::particles::EmitterConfig MakeWaterCoreConfig() {
     c.flipbook = true;     // 由 viewer 换成水花图集
     c.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
     c.pair_len = kWaterPairLen;
-    // ⚠️ 不用 kVelocity：该分支的 up 轴算错（up = cross(right, u) 得到的是面片法线），
-    // 速度与视线垂直时面片会退化成一条横线。这里用 kView 面向相机。
+    // 水花不需要沿速度拉伸，用 kView 面向相机（俯瞰时也不会穿帮）。
     c.align = jpov::AlignMode::kView;
     c.stretched = false;
     c.emissive = true;
@@ -348,6 +348,7 @@ public:
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     std::array<uint32_t, kSmokeTexCount> smoke_choice_tex_{};
     uint32_t water_tex_ = 0;   // 水花图集（全场景一张）
+    uint32_t ember_tex_ = 0;   // 火星软圆点（单张，纯 alpha 形状）
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
@@ -361,8 +362,12 @@ public:
     float ui_fuel_scale_ = 0.125f;       // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
     float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
-    float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
-    float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
+    float ui_ember_count_ = 60.0f;       // 火星目标数量（0..80）
+    float ui_ember_size_ = 0.020f;       // 火星世界尺寸（米，2..40mm；软圆点核心比 quad 小）
+    // 火星朝向：true = kVelocity（沿速度对齐 + 拉伸成短流线，火花的正确画法）；
+    // false = kView（旧行为，只做 A/B 用）。
+    bool ui_ember_velocity_align_ = true;
+    float ui_ember_stretch_ = 3.0f;      // 拉伸系数（每 m/s，仅 kVelocity 时生效）
     float ui_water_count_ = 100.0f;       // 喷泉目标存活粒子数（40..200，含核心+水花）
     float ui_water_size_ = 0.36f;        // 水花世界尺寸（米）
     float ui_water_speed_ = 1.2f;        // 喷射速度倍率（喷泉高度）
@@ -389,7 +394,7 @@ public:
     // 本帧软深度设置：开着就带过渡距离，关着就 nullopt（= 旧硬判据，零回归）。
     // 火焰 / 烟 / 火星三层共用同一个 UI 值 —— 验收只关心这一个开关。
     // 本帧广告牌朝向（火/烟两层共用面板上的「朝向」下拉）。
-    // 火星层是速度对齐的（kVelocity），不受它影响。
+    // 火星层由自己的「火星速度对齐」开关控制（kVelocity / kView），不受它影响。
     jpov::AlignMode AlignForCommand() const {
         switch (ui_align_mode_) {
             case 1:
@@ -629,8 +634,19 @@ public:
         }
 
         // ── 火星 / 余烬 ──
-        // 简单一层：纯色加法小点，从火焰上方冒出；数量/大小只由 UI 控制。
+        // 一层：软圆点 + 沿速度拉伸（kVelocity），从火焰上方冒出；数量/大小只由 UI 控制。
         {
+            if (ember_tex_ == 0) {
+                const std::string rel = std::string("textures/") + kEmberSpriteFile;
+                const std::string p = FindTexture(rel.c_str());
+                if (!p.empty()) {
+                    // 火星屏幕上只有几像素：不开 mipmap 会闪成噪点。
+                    jpov::TextureOptions opts;
+                    opts.mipmap = true;
+                    ember_tex_ = RegisterTexture(p, opts);
+                    LOG(INFO) << "[particle_viewer] ember tex = " << p;
+                }
+            }
             const float life_avg = 0.5f * (ember_cfg_.lifetime.min + ember_cfg_.lifetime.max);
             ember_cfg_.rate = (ui_scene_ == 0 && ember_enable_)
                 ? ui_ember_count_ / std::max(life_avg, 1e-3f) : 0.0f;
@@ -649,9 +665,13 @@ public:
             if (ui_scene_ == 0 && ember_enable_ && !einst.empty()) {
                 jpov::ParticleRenderCommand ec;
                 ec.particles = std::move(einst);
-                ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
+                ec.texture_id = ember_tex_;   // 0 = 回退纯色（未找到贴图时仍是可见的方块）
                 ec.flipbook = false;
-                ec.align = ember_cfg_.align;
+                ec.align = ui_ember_velocity_align_ ? jpov::AlignMode::kVelocity
+                                                    : jpov::AlignMode::kView;
+                // 拉伸只对 kVelocity 有意义（up 轴 = 速度在屏幕上的投影）。
+                ec.stretched = ui_ember_velocity_align_;
+                ec.stretch_scale = ui_ember_stretch_;
                 ec.soft_depth_m = SoftDepthForCommand();
                 cmds->DrawParticles(std::move(ec));
             }
@@ -911,6 +931,8 @@ private:
             ui_.Checkbox("辉光 Bloom", &ui_bloom_, row2(3));
             ui_.SliderFloat("辉光强度", &ui_bloom_intensity_, row2(4), 0.0f, 2.0f, 2);
             ui_.SliderFloat("辉光门槛", &ui_bloom_threshold_, row2(5), 0.2f, 2.0f, 2);
+            ui_.Checkbox("火星速度对齐", &ui_ember_velocity_align_, row2(6));
+            ui_.SliderFloat("火星拉伸", &ui_ember_stretch_, row2(7), 0.0f, 8.0f, 1);
         }
     }
 

@@ -55,3 +55,21 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# kVelocity 对齐 GPU 像素测试 —— 面片必须正对相机（不许退化成细线）
+# ============================================================================
+cc_test(
+    name = "particle_velocity_align_test",
+    srcs = ["particle_velocity_align_test.cc"],
+    deps = [
+        "//third_party/stb:stb_image",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/test:test_utils",
+        "//tools/common:utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

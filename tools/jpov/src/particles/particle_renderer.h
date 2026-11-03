@@ -117,17 +117,26 @@ void main() {
         // 混合后 right/up 不再严格垂直 → 去掉 up 的 right 分量（否则卡片被剪切）。
         up = normalize(up - dot(up, right) * right);
     } else {
+        // kVelocity：面片**跟着速度走，但永远正对相机**。
+        //   n     = 指向相机的单位向量（面片法线必须与它同向）
+        //   right = u × n（⟂ u、⟂ n）—— 屏幕内的横向
+        //   up    = n × right = u 在屏幕平面上的投影 ⇒ 面片平面由 {right, up} 张成，
+        //           法线 = n ⇒ 恒定正对相机；速度沿 up，拉伸才是「沿运动方向拉长」。
+        // ⚠️ 不能写 up = cross(right, u)：{right, up, u} 是正交基时它等于 ±n（面片法线），
+        //    面片会转成侧对相机 —— 速度 ⟂ 视线时整块 quad 投影成一条线（火花/余烬消失）。
+        vec3 n = normalize(toCam);
         float sp = length(aVel);
-        vec3 u = (sp > 1e-4) ? (aVel / sp) : uCamUp;
-        vec3 r = cross(u, normalize(toCam));
+        vec3 u = (sp > 1e-4) ? (aVel / sp) : n;
+        vec3 r = cross(u, n);
         if (length(r) < 1e-4) { r = uCamRight; }
         right = normalize(r);
-        up = normalize(cross(right, u));
+        up = normalize(cross(n, right));
     }
-    float c = cos(aMisc.z);
-    float s = sin(aMisc.z);
-    vec3 rr = right * c + up * s;
-    vec3 uu = -right * s + up * c;
+    // kVelocity 下**忽略滚转**：滚转会连「拉伸轴」一起转走（火星的 rotation 是随机的，
+    // 于是拉长方向也随机 —— 看上去只是一堆大小不一的矩形片，而不是沿速度的流线）。
+    vec2 roll = (uAlign == 3) ? vec2(1.0, 0.0) : vec2(cos(aMisc.z), sin(aMisc.z));
+    vec3 rr = right * roll.x + up * roll.y;
+    vec3 uu = -right * roll.y + up * roll.x;
     vec2 size = aMisc.xy;
     if (uStretched == 1) {
         size.y *= (1.0 + length(aVel) * uStretchScale);

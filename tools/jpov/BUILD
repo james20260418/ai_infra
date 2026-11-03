@@ -594,6 +594,7 @@ filegroup(
     srcs = [
         "assets/fire/mp/flames_pairs_v71_12x6.png",
         "assets/smoke/danis_repaint_12x6.png",
+        "assets/particles/ember_soft_dot.png",
     ],
     visibility = ["//tools/jpov:__subpackages__"],
 )
