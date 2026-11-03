@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -29,6 +30,123 @@ namespace {
 Color LerpColor(const Color& a, const Color& b, float t) {
     return Color{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
                  a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+}
+
+// ==================== UTF-8（码点）基础工具 ====================
+//
+// InputText 的 buffer 是 UTF-8，而编辑单位必须是**码点**：按字节退格会把
+// 中文/emoji 切成半个序列，得到一个既显示不出、又无法再拼回原状的坏字符。
+// 这里只做最少的几件事：算序列长度、数码点、码点索引 → 字节偏移。
+// 所有函数**都必须是全函数**：buffer 可能被外部写坏（非法 UTF-8），
+// 也不能死循环或越界读——非法/截断的字节一律当作 1 字节单码点处理。
+
+// UTF-8 首字节 → 该码点占的字节数（1..4）；非法首字节（含孤立 continuation
+// 字节）返回 1，让调用方把它当单个坏字节跳过。
+int Utf8SeqLen(unsigned char lead) {
+    if (lead < 0x80) {
+        return 1;
+    }
+    if ((lead & 0xE0) == 0xC0) {
+        return 2;
+    }
+    if ((lead & 0xF0) == 0xE0) {
+        return 3;
+    }
+    if ((lead & 0xF8) == 0xF0) {
+        return 4;
+    }
+    return 1;
+}
+
+// 从 byte_off 起的码点字节数：序列不完整（越过 byte_len 或后续字节不是
+// continuation）时按 1 字节处理。保证返回 1..4 且 byte_off + n <= byte_len。
+int Utf8CpBytes(const char* s, size_t byte_len, size_t byte_off) {
+    CHECK_LT(byte_off, byte_len);
+    const unsigned char lead = static_cast<unsigned char>(s[byte_off]);
+    const int n = Utf8SeqLen(lead);
+    if (n == 1) {
+        return 1;
+    }
+    if (byte_off + static_cast<size_t>(n) > byte_len) {
+        return 1;  // 截断的尾巴：当单字节处理，不越过 buffer 末尾。
+    }
+    for (int i = 1; i < n; ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[byte_off + i]);
+        if ((c & 0xC0) != 0x80) {
+            return 1;  // 续字节不合规：首个字节自成一个“坏字符”。
+        }
+    }
+    return n;
+}
+
+// 码点个数（非法序列按 1 个码点计）。
+int Utf8Count(const char* s, size_t byte_len) {
+    int count = 0;
+    size_t i = 0;
+    while (i < byte_len) {
+        i += static_cast<size_t>(Utf8CpBytes(s, byte_len, i));
+        ++count;
+    }
+    return count;
+}
+
+// 第 cp_index 个码点的字节偏移。cp_index == 码点数 → byte_len（结尾边界）；
+// 越界（<0 或 > 码点数）由调用方保证不发生（内部 clamp 到两端）。
+size_t Utf8ByteOffset(const char* s, size_t byte_len, int cp_index) {
+    if (cp_index <= 0) {
+        return 0;
+    }
+    size_t i = 0;
+    int cp = 0;
+    while (i < byte_len && cp < cp_index) {
+        i += static_cast<size_t>(Utf8CpBytes(s, byte_len, i));
+        ++cp;
+    }
+    return i;
+}
+
+// 把外部剪贴板文本整理成「可安全插进单行 UTF-8 buffer」的内容：
+//   - 换行 / 回车 / Tab / 其它 C0 控制字符 / DEL → 单个空格（单行控件）；
+//   - 非法/截断的 UTF-8 字节直接丢弃（宁可少几个字，也不能把 buffer 弄坏）。
+std::string SanitizePastedText(const char* text) {
+    std::string out;
+    if (text == nullptr) {
+        return out;
+    }
+    const size_t byte_len = std::strlen(text);
+    size_t i = 0;
+    while (i < byte_len) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x20 || c == 0x7F) {
+            // \r\n 只出一个空格，避免 Windows 剪贴板在行尾多吐一个空格。
+            if (c == '\r' && i + 1 < byte_len && text[i + 1] == '\n') {
+                ++i;
+                continue;
+            }
+            out.push_back(' ');
+            ++i;
+            continue;
+        }
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            ++i;
+            continue;
+        }
+        const int n = Utf8CpBytes(text, byte_len, i);
+        if (n == 1) {
+            ++i;  // 非法序列：丢弃这个字节。
+            continue;
+        }
+        out.append(text + i, static_cast<size_t>(n));
+        i += static_cast<size_t>(n);
+    }
+    return out;
+}
+
+// 点是否在矩形内（含边界）。输入框命中判定与按下起点共用。
+bool PointInRect(const SpRect& r, float x, float y) {
+    return x >= r.pos.x() && x <= r.pos.x() + r.size.x() &&
+           y >= r.pos.y() && y <= r.pos.y() + r.size.y();
 }
 
 }  // namespace
@@ -109,6 +227,9 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     if (!input.left.IsDrag() && !input.left.IsHold()) {
         button_press_.ReleaseAny();
         slider_drag_.ReleaseAny();
+        // 同一条规则也适用于文本拖拽选择：控件在按住期间被隐藏/移出视口时，
+        // 它的结束分支永远走不到 ⇒ 槽位永久卡住。
+        text_select_drag_.ReleaseAny();
     }
     // 缩放：所有「长度」类主题字段同步乘倍率（计数字段如 plate_tiling/tiles 不乘）。
     // 这样控件 box 放大后，字号/内边距/行高/圆角/线宽/材质尺度仍然互相匹配。
@@ -833,195 +954,378 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
     // 确保 buffer 以 '\0' 收尾（防调用方传入非终止字符串污染长度计算）。
     // buffer 至少 buffer_size 字节，下标 buffer_size-1 必然合法。
     buffer[buffer_size - 1] = '\0';
-    const size_t text_len = strnlen(buffer, buffer_size - 1);
+    // len / cap 都是**字节**（buffer 的真实容量）；caret / anchor / cp_len 是
+    // **码点**（用户看到的字符单位）。两者只在 UTF-8 工具处换算。
+    size_t len = strnlen(buffer, buffer_size - 1);
+    const size_t cap = buffer_size - 1;  // 可容纳的最大字节数（留 '\0'）。
+    int cp_len = Utf8Count(buffer, len);
 
-    // ---- 焦点管理（S5.2）：状态跨帧（text_focus_ 槽位），点击 box 内获得焦点 ----
-    // 即时模式：focus 是本对象跨帧状态。本帧绘制时，若本 box 与槽位记录的
-    // 聚焦 box 位置+尺寸一致 → 视为已聚焦（框移动/临时对象时自动失焦，重
-    // 新点击才聚焦）。写槽位只走 Acquire（点本框）/ Release（点框外、回车），
-    // 不持有则不碰槽位——同屏多个输入框互不干扰。
     const InputSnapshot& in = *input_;
-    const bool is_focused = text_focus_.IsHeldBy(b);
+    const float pad = theme_.padding_px;
+    const float text_left = b.pos.x() + pad;
+    const float text_right = b.pos.x() + b.size.x() - pad;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心
 
-    // 本帧点击落在 box 内 → 聚焦本框。
-    bool clicked_inside = false;
-    bool clicked_outside = false;
+    // ---- 鼠标：按下即聚焦 + 拖拽拉选区 ----
+    // 用**按下起点**（InputSnapshot::left_press_x/y）而不是帧末鼠标位置：
+    //   - 文本编辑器惯例是 mouse-down 就聚焦（拖拽选字时永远不会产生 Click，
+    //     若等松开才聚焦，拖拽期间框根本没焦点）；
+    //   - 低帧率下「按下 + 移动」可能在同一帧发生，帧末位置已经不是按下点了。
+    const bool left_down = in.left.IsDrag() || in.left.IsHold();
+    const bool press_on_popup =
+        left_down && PopupCoversPoint(in.left_press_x, in.left_press_y);
+    const bool press_inside =
+        left_down && !press_on_popup &&
+        PointInRect(b, in.left_press_x, in.left_press_y);
+    const bool press_elsewhere = left_down && !press_inside;  // 含弹层上的按下
+
+    const bool is_focused = text_focus_.IsHeldBy(b);
+    // 本帧是否有权读写光标/选区（共享字段只属聚焦框：非聚焦框读会把别人的
+    // 光标夹到自己的长度上，写会覆盖掉别人记住的位置）。
+    bool owns_caret = is_focused;
+    int caret = owns_caret ? std::clamp(input_caret_, 0, cp_len) : cp_len;
+    int anchor = owns_caret ? std::clamp(select_anchor_, 0, cp_len) : cp_len;
+
+    // 选区 = [min(anchor,caret), max(anchor,caret))；anchor == caret 即无选区。
+    // 放在外层：输入处理与绘制（高亮两端的 x）共用同一套定义。
+    const auto has_selection = [&]() { return anchor != caret; };
+    const auto selection_begin = [&]() { return std::min(anchor, caret); };
+    const auto selection_end = [&]() { return std::max(anchor, caret); };
+
+    if (press_inside) {
+        const bool first_press_frame = !text_select_drag_.IsHeldBy(b);
+        if (first_press_frame) {
+            if (!is_focused) {
+                input_scroll_px_ = 0.0f;  // 新聚焦：滚动归零（从头显示）。
+            }
+            text_focus_.Acquire(b);
+            // 按下点定位光标，锚点同步 → 取消原有选区（“再点框内其它位置取消选中”）。
+            const float press_text_x =
+                in.left_press_x - text_left + input_scroll_px_;
+            caret = CaretIndexForX(buffer, cp_len, press_text_x);
+            anchor = caret;
+        }
+        // 拖拽选择的所有权：按下在框内 → 归本框，直到左键松开（允许拖出框外）。
+        text_select_drag_.Acquire(b);
+        owns_caret = true;
+        if (!first_press_frame) {
+            // 光标跟随**当前**鼠标（活动端），锚点保持按下点 → 拉出选区。
+            const float mouse_text_x =
+                in.mouse_x - text_left + input_scroll_px_;
+            caret = CaretIndexForX(buffer, cp_len, mouse_text_x);
+        }
+    } else if (press_elsewhere) {
+        // 按在别处（含被弹层盖住的区域）：失焦。仅当本框正是持有者时生效。
+        if (is_focused) {
+            text_focus_.Release(b);
+            select_anchor_ = input_caret_;  // 失焦即取消选区（不变量：anchor == caret）
+            owns_caret = false;
+        }
+    }
+
+    // 左键已松开：结束拖拽选择（选区保留 —— 松开后才能按 Ctrl+C/X）。
+    if (!left_down && text_select_drag_.IsHeldBy(b)) {
+        text_select_drag_.Release(b);
+    }
+
+    // ---- 兼容只有 Click 的合成输入 ----
+    // 真实窗口链路在按下时已处理过焦点/光标，这里只是把光标再定位到同一位置；
+    // 无 press 起点的合成输入（如早期脚本）靠这段仍能点哪插哪。
     if (in.left.IsClick()) {
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
-            const float cy = in.left_clicks[i].y;
-            if (PopupCoversPoint(cx, cy)) {
-                // 被弹层盖住 = 点别处：不聚焦本框，但算作"点击框外"→ 失焦。
-                clicked_outside = true;
-                continue;
+            const float cy_click = in.left_clicks[i].y;
+            const bool hits =
+                !PopupCoversPoint(cx, cy_click) && PointInRect(b, cx, cy_click);
+            if (hits) {
+                text_focus_.Acquire(b);
+                caret = CaretIndexForX(buffer, cp_len,
+                                       cx - text_left + input_scroll_px_);
+                anchor = caret;
+                owns_caret = true;
+            } else {
+                text_focus_.Release(b);
+                if (!text_focus_.IsHeldBy(b)) {
+                    select_anchor_ = input_caret_;
+                    owns_caret = false;
+                }
             }
-            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
-                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
-                clicked_inside = true;
-                break;
-            }
-            clicked_outside = true;
         }
-    }
-    // 聚焦状态结算（先做，供下方键入判断使用）：
-    //  - 点本框 → 聚焦（Acquire）；点别处 → 本框失焦（Release，仅当自己是持有者）。
-    //  - 点本框内时，按点击 x 把光标定位到最近的字符边界（点哪插哪，符合直觉）。
-    if (clicked_inside) {
-        const bool was_focused = text_focus_.IsHeldBy(b);
-        text_focus_.Acquire(b);
-        if (!was_focused) {
-            input_scroll_px_ = 0.0f;  // 新聚焦：滚动归零（从头显示）。
-        }
-        // 按点击 x 定位光标（用真实字体进宽逐字符累加，选最接近的边界）。
-        const float pad = theme_.padding_px;
-        const float click_x = in.left_clicks[0].x - (b.pos.x() + pad) +
-                              input_scroll_px_;
-        input_caret_ = CaretIndexForX(buffer, text_len, click_x);
-    } else if (clicked_outside) {
-        text_focus_.Release(b);  // 仅当本框正是聚焦者时释放；否则无操作。
     }
 
-    // ---- 键盘写回 char*（S5.2）：仅聚焦框消费键入 ----
-    // 用本轮聚焦判定后的 is_focused 快照决定是否消费按键。
-    // 可编辑长度与光标位置用可变变量跟踪（插入/删除会改变二者）。
-    size_t len = text_len;
-    const size_t cap = buffer_size - 1;  // 可容纳的最大字符数（留 '\0'）。
-    // 光标夹到 [0, len]（调用方可能改了 buffer，导致长度变短）。
-    // ⚠️ input_caret_ 是**跨帧共享字段**（同一 SpUi 面板里同时可能有多个输入框）。
-    // 它只属于**当前聚焦的框**：非聚焦框绝不能读它（会把别人的光标夹到自己的
-    // 长度上）也不能回写它（会把别人记住的光标覆盖成自己的）。否则同屏第二个
-    // 框每帧都会把第一个框的光标冲掉——表现为“输入一个字符后光标弹到 1 号位”。
-    // 本帧“拥有光标”的框 = 帧首已聚焦 或 本帧刚点中（后者已在上面写入点击位置）。
-    const bool owns_caret = is_focused || clicked_inside;
-    int caret = owns_caret ? std::clamp(input_caret_, 0, static_cast<int>(len))
-                           : static_cast<int>(len);
+    // ---- 键盘写回 char*：仅「帧首已聚焦」的框消费键入 ----
+    // 点击聚焦的那一帧不消费按键（老语义）：坐标定位和打字分开处理，避免
+    // 「鼠标按下 + 键盘同时到达」时把字符插到还没定位好的位置。
     if (is_focused) {
-        // 控制键：Enter / Escape → 失焦（提交/取消，都不改变 buffer）。
         const KeyState& enter = in.GetKey(KeyCode::Enter);
         const KeyState& esc = in.GetKey(KeyCode::Escape);
         if (enter.IsClick() || esc.IsClick()) {
             text_focus_.Release(b);  // 回车/取消 → 失焦（本框为持有者）。
+            select_anchor_ = input_caret_;
+            owns_caret = false;
         } else {
             // 某键本帧的动作次数（Click 帧 = click_count；Hold 帧 = 阈值重复）。
             const auto actions_of = [&](KeyCode key) -> int {
                 const KeyState& ks = in.GetKey(key);
-                return ks.IsClick() ? ks.click_count()
-                                    : AdvanceKeyHold(key);
+                return ks.IsClick() ? ks.click_count() : AdvanceKeyHold(key);
             };
-            const auto move_caret = [&](int delta, int times) {
-                for (int t = 0; t < times; ++t) {
-                    caret = std::clamp(caret + delta, 0, static_cast<int>(len));
+            // 删除 [begin, end) 码点区间（字节级 memmove，调用方保证区间合法）。
+            const auto delete_cp_range = [&](int begin_cp, int end_cp) {
+                const size_t begin_byte = Utf8ByteOffset(buffer, len, begin_cp);
+                const size_t end_byte = Utf8ByteOffset(buffer, len, end_cp);
+                CHECK_LE(end_byte, len);
+                std::memmove(buffer + begin_byte, buffer + end_byte,
+                             len - end_byte + 1);
+                len -= (end_byte - begin_byte);
+                cp_len -= (end_cp - begin_cp);
+            };
+            // 删选区；返回是否真的删了（Backspace/Delete 用它把第一次动作让给选区）。
+            const auto delete_selection = [&]() -> bool {
+                if (!has_selection()) {
+                    return false;
                 }
+                const int begin_cp = selection_begin();
+                const int end_cp = selection_end();
+                delete_cp_range(begin_cp, end_cp);
+                caret = begin_cp;
+                anchor = caret;
+                return true;
+            };
+            // 在光标处插入 UTF-8 文本（先删选区，再按**整码点**塞到容量上限）。
+            const auto insert_utf8 = [&](const char* text) {
+                delete_selection();
+                const size_t text_bytes = std::strlen(text);
+                size_t i = 0;
+                while (i < text_bytes) {
+                    const int seq_bytes = Utf8CpBytes(text, text_bytes, i);
+                    const unsigned char lead = static_cast<unsigned char>(text[i]);
+                    if (seq_bytes == 1 && lead >= 0x80) {
+                        ++i;  // 非法序列（正常路径已被 sanitize 掉）：跳过该字节。
+                        continue;
+                    }
+                    if (len + static_cast<size_t>(seq_bytes) > cap) {
+                        break;  // 容量不够一个完整码点：整字丢弃，绝不写半个。
+                    }
+                    const size_t at = Utf8ByteOffset(buffer, len, caret);
+                    std::memmove(buffer + at + seq_bytes, buffer + at,
+                                 len - at + 1);
+                    std::memcpy(buffer + at, text + i,
+                                static_cast<size_t>(seq_bytes));
+                    len += static_cast<size_t>(seq_bytes);
+                    cp_len += 1;
+                    ++caret;
+                    i += static_cast<size_t>(seq_bytes);
+                }
+                anchor = caret;  // 插入后不再有选区。
+            };
+            // 插入单个 ASCII 字符（键盘按出来的字符一定是单字节）。
+            const auto insert_ascii = [&](char ch, int times) {
+                for (int t = 0; t < times; ++t) {
+                    if (has_selection()) {
+                        delete_selection();
+                    }
+                    if (len + 1 > cap) {
+                        break;
+                    }
+                    const size_t at = Utf8ByteOffset(buffer, len, caret);
+                    std::memmove(buffer + at + 1, buffer + at, len - at + 1);
+                    buffer[at] = ch;
+                    ++len;
+                    cp_len += 1;
+                    ++caret;
+                }
+                anchor = caret;
             };
 
-            // 光标移动（方向键 / Home / End）。
-            move_caret(-1, actions_of(KeyCode::Left));
-            move_caret(+1, actions_of(KeyCode::Right));
+            // ---- 剪贴板快捷键（Ctrl+A / C / X / V）----
+            // 只在按住 Ctrl 时消费；同时下面的可打印字符段会在 Ctrl/Alt/Super
+            // 按住时整体跳过 —— 否则 Ctrl+C 会在复制的同时插入一个 'c'。
+            if (in.mods.ctrl) {
+                const int select_all = actions_of(KeyCode::A);
+                const int copy_key = actions_of(KeyCode::C);
+                const int cut_key = actions_of(KeyCode::X);
+                const int paste_key = actions_of(KeyCode::V);
+                if (select_all > 0) {
+                    anchor = 0;
+                    caret = cp_len;
+                }
+                if ((copy_key > 0 || cut_key > 0) && has_selection()) {
+                    const size_t begin_byte =
+                        Utf8ByteOffset(buffer, len, selection_begin());
+                    const size_t end_byte =
+                        Utf8ByteOffset(buffer, len, selection_end());
+                    const std::string selected(buffer + begin_byte,
+                                               end_byte - begin_byte);
+                    WriteClipboard(selected.c_str());
+                }
+                if (cut_key > 0) {
+                    delete_selection();
+                }
+                if (paste_key > 0) {
+                    // 单行控件：换行/Tab 变空格；非法 UTF-8 字节丢弃（不弄坏 buffer）。
+                    const std::string pasted = SanitizePastedText(ClipboardText());
+                    if (!pasted.empty()) {
+                        insert_utf8(pasted.c_str());
+                    }
+                }
+            }
+
+            // ---- 光标移动（方向键 / Home / End）----
+            // 有选区时：Left/Right **先折叠**（Left → 选区头，Right → 选区尾），
+            // 只折叠、不再多走一格；hold 的后续重复才正常移动。
+            {
+                int left_n = actions_of(KeyCode::Left);
+                int right_n = actions_of(KeyCode::Right);
+                if (left_n > 0 || right_n > 0) {
+                    if (has_selection()) {
+                        if (left_n > 0) {
+                            caret = selection_begin();
+                            --left_n;
+                        } else {
+                            caret = selection_end();
+                            --right_n;
+                        }
+                    }
+                    for (; left_n > 0; --left_n) {
+                        caret = std::max(0, caret - 1);
+                    }
+                    for (; right_n > 0; --right_n) {
+                        caret = std::min(cp_len, caret + 1);
+                    }
+                    anchor = caret;  // 方向键一律取消选区（单竖杠状态）。
+                }
+            }
             {
                 const int home = actions_of(KeyCode::Home);
                 if (home > 0) {
                     caret = 0;
+                    anchor = 0;
                 }
                 const int end = actions_of(KeyCode::End);
                 if (end > 0) {
-                    caret = static_cast<int>(len);
+                    caret = cp_len;
+                    anchor = cp_len;
                 }
             }
 
-            // Backspace：删光标**左侧**字符（删除发生在插入前）。
+            // ---- 删除（有选区时第一次删整个选区）----
             {
-                const int n = std::min(actions_of(KeyCode::Backspace), caret);
-                for (int i = 0; i < n; ++i) {
-                    // 把 [caret-1, len) 整体左移一位，删掉 buffer[caret-1]。
-                    for (size_t j = static_cast<size_t>(caret) - 1; j + 1 < len; ++j) {
-                        buffer[j] = buffer[j + 1];
+                int n = actions_of(KeyCode::Backspace);
+                if (n > 0) {
+                    if (delete_selection()) {
+                        --n;
                     }
-                    --len;
-                    buffer[len] = '\0';
-                    --caret;
+                    for (; n > 0 && caret > 0; --n) {
+                        delete_cp_range(caret - 1, caret);
+                        --caret;
+                        anchor = caret;
+                    }
                 }
             }
-            // Delete：删光标**右侧**字符（光标不动）。
             {
-                const int room = static_cast<int>(len) - caret;
-                const int n = std::min(actions_of(KeyCode::Delete), room);
-                for (int i = 0; i < n; ++i) {
-                    for (size_t j = static_cast<size_t>(caret); j + 1 < len; ++j) {
-                        buffer[j] = buffer[j + 1];
+                int n = actions_of(KeyCode::Delete);
+                if (n > 0) {
+                    if (delete_selection()) {
+                        --n;
                     }
-                    --len;
-                    buffer[len] = '\0';
+                    for (; n > 0 && caret < cp_len; --n) {
+                        delete_cp_range(caret, caret + 1);
+                    }
+                    anchor = caret;
                 }
             }
 
-            // 可打印字符：按码点序扫描，**插入在光标处**，遇容量上限截断。
-            // 两个扫描段**互不重叠**：标点段（显式列出的标点码）+ 字母/数字/空格段。
-            const auto insert_char = [&](char ch, int times) {
-                for (int t = 0; t < times && len < cap; ++t) {
-                    // 从末尾起把 [caret, len) 右移一位，腾出 buffer[caret]。
-                    for (size_t j = len; j > static_cast<size_t>(caret); --j) {
-                        buffer[j] = buffer[j - 1];
+            // ---- 可打印字符（Ctrl/Alt/Super 按住时不插入）----
+            if (!in.mods.ctrl && !in.mods.alt && !in.mods.super) {
+                const auto try_key = [&](KeyCode key) {
+                    const int n = actions_of(key);
+                    if (n <= 0) {
+                        return;
                     }
-                    buffer[caret] = ch;
-                    ++len;
-                    buffer[len] = '\0';
-                    ++caret;
+                    const char ch = SpInputCharForKey(key, in.mods.shift);
+                    if (ch != '\0') {
+                        insert_ascii(ch, n);
+                    }
+                };
+                // 段 1：标点（显式枚举；避开字母/数字码，免得与段 2 重复）。
+                static const KeyCode kPunctKeys[] = {
+                    KeyCode::Apostrophe,  KeyCode::Comma,        KeyCode::Minus,
+                    KeyCode::Period,      KeyCode::Slash,        KeyCode::Semicolon,
+                    KeyCode::Equal,       KeyCode::LeftBracket,  KeyCode::Backslash,
+                    KeyCode::RightBracket, KeyCode::GraveAccent,
+                };
+                for (const KeyCode key : kPunctKeys) {
+                    try_key(key);
                 }
-            };
-            const auto try_key = [&](KeyCode key) {
-                const int n = actions_of(key);
-                if (n <= 0) {
-                    return;
+                // 段 2：空格(32) / 数字(48-57) / 字母(65-90)。
+                // 注意：不能简单扫 [Space..Z] 区间——该区间夹着若干标点码
+                // （45 减号/46 句点/47 斜杠/59 分号/61 等号），会与段 1 重复。
+                try_key(KeyCode::Space);
+                for (int code = static_cast<int>(KeyCode::_0);
+                     code <= static_cast<int>(KeyCode::_9); ++code) {
+                    try_key(static_cast<KeyCode>(code));
                 }
-                const char ch = SpInputCharForKey(key, in.mods.shift);
-                if (ch != '\0') {
-                    insert_char(ch, n);
+                for (int code = static_cast<int>(KeyCode::A);
+                     code <= static_cast<int>(KeyCode::Z); ++code) {
+                    try_key(static_cast<KeyCode>(code));
                 }
-            };
-            // 段 1：标点（显式枚举；避开字母/数字码，免得与段 2 重复）。
-            static const KeyCode kPunctKeys[] = {
-                KeyCode::Apostrophe,  KeyCode::Comma,       KeyCode::Minus,
-                KeyCode::Period,      KeyCode::Slash,       KeyCode::Semicolon,
-                KeyCode::Equal,       KeyCode::LeftBracket, KeyCode::Backslash,
-                KeyCode::RightBracket, KeyCode::GraveAccent,
-            };
-            for (const KeyCode key : kPunctKeys) {
-                try_key(key);
-            }
-            // 段 2：空格(32) / 数字(48-57) / 字母(65-90)。
-            // 注意：不能简单扫 [Space..Z] 区间——该区间夹着若干标点码
-            // （45 减号/46 句点/47 斜杠/59 分号/61 等号），会与段 1 重复。
-            try_key(KeyCode::Space);
-            for (int code = static_cast<int>(KeyCode::_0);
-                 code <= static_cast<int>(KeyCode::_9); ++code) {
-                try_key(static_cast<KeyCode>(code));
-            }
-            for (int code = static_cast<int>(KeyCode::A);
-                 code <= static_cast<int>(KeyCode::Z); ++code) {
-                try_key(static_cast<KeyCode>(code));
             }
         }
     }
-    // 回写光标（跨帧状态）。**仅本帧拥有光标的框回写**（见上：共享字段只属聚焦框）。
+    // 回写光标/锚点（跨帧状态）。**仅本帧拥有光标的框回写**。
+    caret = std::clamp(caret, 0, cp_len);
+    anchor = std::clamp(anchor, 0, cp_len);
     if (owns_caret) {
         input_caret_ = caret;
+        select_anchor_ = anchor;
     }
 
     // 绘制/返回用的“当前聚焦”判定：必须在本帧全部输入处理（含 Enter/Escape
     // 失焦）之后结算，才能正确反映本帧点击聚焦/框外失焦/回车失焦的最终状态。
-    // 键盘写回用的是上面的 is_focused 快照，二者语义不同：
-    //   键入：用“帧首是否已聚焦”决定是否消费（点击聚焦那一刻不消费，下帧才打字）；
-    //   绘制/返回：用“帧末最终聚焦”决定画不画光标、返回值。
     const bool focused_eff = text_focus_.IsHeldBy(b);
 
-    // ---- 绘制（S5.1）：底框 + 占位符/内容文本 + 光标 ----
+    // ---- 绘制（S5.1）：底框 + 选区 + 占位符/内容文本 + 光标 ----
     // 底框：background 底 + border 边框（与其它控件一致的圆角/边框语义）。
     PushPlate(b, theme_.background, theme_.border, theme_.corner_radius_px);
 
-    // 文本内容区（左侧留 padding 内边距，垂直居中）。
-    const float pad = theme_.padding_px;
-    const float text_left = b.pos.x() + pad;
-    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心（文本与光标共用）
+    // 水平滚动：先把滚动量夹到“光标恰可见”的区间（双向），正文/选区/光标
+    // 三者共用同一个值 —— 否则选区或光标会比正文晚一帧、看着像在抖。
+    const float caret_prefix_w =
+        (focused_eff && caret > 0)
+            ? MeasureTextPrefixWidth(buffer, caret, theme_.font_size)
+            : 0.0f;
+    if (focused_eff) {
+        const float max_scroll = caret_prefix_w;
+        const float min_scroll =
+            std::max(0.0f, caret_prefix_w - (text_right - text_left));
+        input_scroll_px_ = std::clamp(input_scroll_px_, min_scroll, max_scroll);
+    }
+
+    // 选区底色：垫在正文下面的一条带 alpha 的板（不画边框、不采样材质）。
+    // 两端按当前滚动量换算，并**夹进文本区域**，不让高亮溢出输入框。
+    const bool show_selection = focused_eff && anchor != caret;
+    if (show_selection && len > 0) {
+        const float sel_x0 =
+            text_left +
+            MeasureTextPrefixWidth(buffer, selection_begin(), theme_.font_size) -
+            input_scroll_px_;
+        const float sel_x1 =
+            text_left +
+            MeasureTextPrefixWidth(buffer, selection_end(), theme_.font_size) -
+            input_scroll_px_;
+        const float sel_left = std::max(sel_x0, text_left);
+        const float sel_right = std::min(sel_x1, text_right);
+        const float sel_h = std::max(2.0f, b.size.y() * 0.62f);
+        if (sel_right > sel_left) {
+            PushPlateInternal(
+                SpRect{{sel_left, cy - sel_h * 0.5f},
+                       {sel_right - sel_left, sel_h}},
+                theme_.selection_background, theme_.selection_background,
+                /*radius=*/0.0f, /*fill_textured=*/false,
+                /*border_textured=*/false, /*fill_layer=*/nullptr,
+                /*draw_border=*/false);
+        }
+    }
 
     if (len > 0) {
         // 内容文本：foreground 色、左对齐、垂直居中（kMidLeft，pos=左缘中点）。
@@ -1047,28 +1351,15 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
         texts_.push_back(c);
     }
 
-    // 光标（S5.1/S5.3）：聚焦时在**光标位置**（字符索引 caret）画一条竖线
-    //（静态，不闪烁保 gold 可测）。水平滚动：把滚动量夹到“光标恰可见”的区间
-    //（双向），保证光标不越出 box 左右缘（S5.3 内部 scroll、不溢出），且
-    //与同样按 input_scroll_px_ 平移的正文保持一致（否则光标漂到字形外）。
-    // 宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽估计。
-    if (focused_eff) {
+    // 光标（S5.1/S5.3）：聚焦且**无选区**时画一条竖线（静态，不闪烁保 gold
+    // 可测）。有选区时不画竖杠 —— 选区高亮就是“当前状态”，单竖杠只在
+    // 折叠/取消选中后出现（Danis：方向键按下直接换到单竖杠状态）。
+    if (focused_eff && anchor == caret) {
         const float caret_w = std::max(1.0f, theme_.border_width_px);
-        const float text_right = b.pos.x() + b.size.x() - pad;
-        // 光标 X（未滚动前）= 文本左缘 + 【0..caret】前缀的绘制宽度。
-        const float prefix_w = (caret > 0)
-                                   ? MeasureTextPrefixWidth(buffer, caret, theme_.font_size)
-                                   : 0.0f;
-        // 滚动量区间：min = 光标贴左缘（0 为下界，不把文本往右推），
-        //            max = 光标贴右缘。当前滚动量夹进该区间（双向修正）。
-        const float max_scroll = prefix_w;
-        const float min_scroll =
-            std::max(0.0f, prefix_w - (text_right - text_left));
-        input_scroll_px_ = std::clamp(input_scroll_px_, min_scroll, max_scroll);
-        const float cx = text_left + prefix_w - input_scroll_px_;
+        const float cx = text_left + caret_prefix_w - input_scroll_px_;
         const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
         PushPlate(SpRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
-                     theme_.accent, theme_.accent, 0.0f);
+                  theme_.accent, theme_.accent, 0.0f);
     }
 
     // 返回本帧聚焦结果（反映本帧点击/失焦处理后的最终状态，供调用方在
@@ -1395,11 +1686,17 @@ float SpUi::MeasureTextWidth(const char* text, float font_size) const {
         return measure_text_(text, font_size,
                              /*font_alias=*/nullptr, measure_userdata_);
     }
-    // 回退：等宽估计（0.6*font_size/字符）。仅无字体回调时用——CPU gold
-    // 测试无渲染层，据此保持确定性（不依赖真实字体度量）。
+    // 回退：按码点估算。仅无字体回调时用——CPU gold 测试无渲染层，据此保持
+    // 确定性（不依赖真实字体度量）。
+    //   ASCII = 0.6em（与历史行为一致，gold 不受影响）；
+    //   非 ASCII = 1.0em（CJK/emoji 是方块字，用 0.6em 会让光标明显偏左）。
     float w = 0.0f;
-    for (const char* p = text; *p; ++p) {
-        w += font_size * 0.6f;
+    const size_t byte_len = std::strlen(text);
+    size_t i = 0;
+    while (i < byte_len) {
+        const int seq_bytes = Utf8CpBytes(text, byte_len, i);
+        w += (seq_bytes == 1) ? font_size * 0.6f : font_size;
+        i += static_cast<size_t>(seq_bytes);
     }
     return w;
 }
@@ -1409,33 +1706,62 @@ float SpUi::MeasureTextPrefixWidth(const char* text, int count,
     if (count <= 0) {
         return 0.0f;
     }
+    const size_t byte_len = std::strlen(text);
+    const size_t prefix_bytes =
+        Utf8ByteOffset(text, byte_len, count);  // 码点索引 → 字节偏移
+    if (prefix_bytes == 0) {
+        return 0.0f;
+    }
     if (measure_text_ == nullptr) {
-        // 等宽估计：直接字符数 × 单字宽（无需拷贝）。
-        return font_size * 0.6f * static_cast<float>(count);
+        // 回退估算：ASCII 0.6em、非 ASCII 1.0em（与 MeasureTextWidth 同规则）。
+        float w = 0.0f;
+        size_t i = 0;
+        while (i < prefix_bytes) {
+            const int seq_bytes = Utf8CpBytes(text, prefix_bytes, i);
+            w += (seq_bytes == 1) ? font_size * 0.6f : font_size;
+            i += static_cast<size_t>(seq_bytes);
+        }
+        return w;
     }
     // 真实字体度量：需对前缀做一次测量（回调只接受终止字符串），
-    // 拷前 count 个字符到临时 buffer。
-    std::string prefix(text, static_cast<size_t>(count));
+    // 拷前 prefix_bytes 个字节到临时 buffer（在码点边界上，不会切字）。
+    std::string prefix(text, prefix_bytes);
     return MeasureTextWidth(prefix.c_str(), font_size);
 }
 
-int SpUi::CaretIndexForX(const char* text, size_t len, float x) const {
-    if (x <= 0.0f || len == 0) {
+int SpUi::CaretIndexForX(const char* text, int len, float x) const {
+    if (x <= 0.0f || len <= 0) {
         return 0;
     }
-    // 在 0..len 共 len+1 个字符边界中，选与 x 距离最小的那个。
+    // 在 0..len 共 len+1 个**码点边界**中，选与 x 距离最小的那个。
     int best = 0;
     float best_dist = std::abs(x);  // 边界 0 的前缀宽 = 0。
-    for (size_t i = 1; i <= len; ++i) {
-        const float w = MeasureTextPrefixWidth(text, static_cast<int>(i),
-                                               theme_.font_size);
+    for (int i = 1; i <= len; ++i) {
+        const float w = MeasureTextPrefixWidth(text, i, theme_.font_size);
         const float dist = std::abs(x - w);
         if (dist < best_dist) {
             best_dist = dist;
-            best = static_cast<int>(i);
+            best = i;
         }
     }
     return best;
+}
+
+const char* SpUi::ClipboardText() const {
+    if (clipboard_.get != nullptr) {
+        return clipboard_.get(clipboard_.userdata);
+    }
+    // 未注入回调：退化为进程内剪贴板（CPU 测试 / 无窗口程序也能 Ctrl+C/V）。
+    return local_clipboard_.c_str();
+}
+
+void SpUi::WriteClipboard(const char* text) {
+    CHECK(text != nullptr) << "WriteClipboard: text must not be null";
+    if (clipboard_.set != nullptr) {
+        clipboard_.set(text, clipboard_.userdata);
+        return;
+    }
+    local_clipboard_ = text;
 }
 
 SpRect SpUi::ResolveBox(const SpRect& box, float ideal_w, float ideal_h,

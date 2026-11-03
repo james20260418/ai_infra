@@ -192,6 +192,15 @@ struct InputSnapshot {
     MouseState right;   // 右键
     MouseState middle;  // 中键
 
+    // 本次左键按下的**起点**（像素坐标，左上角为原点）。
+    // 仅当 left 为 Drag/Hold（即左键仍按住）时有效；松开后是上一次按下的残留值。
+    // 为什么需要它：mouse_x/mouse_y 是**帧末**位置，而「按下 → 移动」可能发生在
+    // 同一帧（低帧率），此后的 Drag 帧已经拿不到按下点。拖拽类交互（文本选区、
+    // 框选）必须用按下点做锚点，否则选区起点会随帧率漂移。
+    // 窗口层在 GLFW_PRESS 时填入；合成输入的调用方须自行填（见 SpUi::InputText）。
+    float left_press_x;
+    float left_press_y;
+
     // 单击详情（每个键独立池）
     // 仅该键为 Click 时有效，窗口层按时间顺序填入
     ClickEvent left_clicks[kMaxClicksPerFrame];
