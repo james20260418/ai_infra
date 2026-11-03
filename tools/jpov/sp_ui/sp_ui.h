@@ -683,7 +683,8 @@ private:
 
     // ---- 跨帧状态（Button 增强皮肤的 hover 渐变）----
     // 每个「用过 SpButtonSkin 的按钮」一条轨道，按 box 识别（同 StateSlot 的
-    // 规则：pos + size 精确相等 = 同一个按钮）。有多条而不是单个槽位：
+    // 规则：pos + size 精确相等 = 同一个按钮；**用调用方的布局坐标**，不含
+    // ui_scale_ —— 运行时改缩放比不会把所有 ratio 重置）。有多条而不是单个槽位：
     // 鼠标从 A 移到 B 时，A 的 ratio 还要继续衰减到 0（只留一个槽位会让 A
     // 卡在半亮）。回收在 Begin 里做：条目由最后一次被绘制的帧号 last_frame
     // 决定，保留「last_frame ≥ 本帧 − 2」的条目 ⇒ 控件消失后还能再活 2 帧
@@ -691,7 +692,7 @@ private:
     // 同一帧内对同一 box 重复调用只会推进一次（last_frame 已是本帧就直接返回
     // 当前 ratio）—— 否则画两遍的按钮渐变速度会翻倍。
     struct HoverTrack {
-        SpRect box{};         // 归属按钮（调用方给的 box，设备像素）
+        SpRect box{};         // 归属按钮（调用方给的 box，布局单位）
         float ratio = 0.0f;   // [0,1]
         int64_t last_frame = 0;
     };

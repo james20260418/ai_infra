@@ -792,6 +792,32 @@ void CheckButtonHoverRatio() {
                   "消失 4 帧后轨道应被回收，重新从 25% 开始");
         LOG(INFO) << "[PASS] 消失 ≥3 帧后 hover 轨道被回收（不带旧状态回来）";
     }
+
+    // i) 跨帧回归：运行时改 ui_scale 不该把所有 hover_ratio 清零。
+    //    轨道若按「缩放后的设备像素」识别，改倍率后所有按钮都会当成新按钮，
+    //    表现为「调整 UI 缩放时悬停状态闪一下」——很轻但确实是个跨帧 bug。
+    {
+        SpUi uis;
+        auto HoverFrame = [&](const jpov::InputSnapshot& in) {
+            RenderCommandList cmds;
+            uis.Begin(in, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+            uis.Button("activate", box, skin);
+            uis.End();
+            uis.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        for (int i = 0; i < 4; ++i) HoverFrame(hover);
+        CheckTint(HoverFrame(hover), skin.hover_tint, "先跑到满亮");
+        uis.SetUiScale(2.0f);
+        const Plate2DCommand scaled = HoverFrame(hover);
+        CheckTint(scaled, skin.hover_tint,
+                  "改 ui_scale 后 ratio 不该归零（轨道按布局坐标识别）");
+        // 再确认缩放真的生效了（否则上面这条会恒真）。
+        CHECK(std::fabs(scaled.pos.x() - box.pos.x() * 2.0f) < 1e-4f)
+            << "ui_scale=2 后板材位置应翻倍：" << scaled.pos.x();
+        LOG(INFO) << "[PASS] 运行时改 ui_scale 不清空 hover_ratio（布局坐标识别 + 缩放确实生效）";
+    }
 }
 
 }  // namespace

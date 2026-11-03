@@ -371,10 +371,13 @@ bool SpUi::ButtonImpl(const char* label, const SpRect& box,
         //
         // hover 渐变：按下时仍继续衰减（按下走 pressed_tint，不看 ratio），
         // 松开后如果鼠标还在按钮上，ratio 从当前值继续往上爬。
-        // 轨道 key 用调用方原始 box（raw，缩放后、布局前）：ResolveBox 的结果
-        // 会随 label 宽度变，不能当身份。
+        // 轨道 key 用**调用方的布局 box**（不含 ui_scale_）：缩放倍率是全局的，
+        // 用缩放后的设备像素当身份，运行时一改 ui_scale 所有按钮的 ratio 都会
+        // 归零重新爬（表现为「换个缩放比，悬停状态闪一下」）。布局坐标在同一
+        // 倍率下与设备坐标一一对应，跨倍率则保持不变。
+        // 不能用 ResolveBox 的结果：它随 label 宽度 / stretch 开关变，不是身份。
         const float ratio = AdvanceHoverRatio(
-            raw, hovered && !pressed_now, skin->normal_to_hover_delay);
+            box, hovered && !pressed_now, skin->normal_to_hover_delay);
         const Color tint =
             pressed_now ? skin->pressed_tint
                         : LerpColor(skin->normal_tint, skin->hover_tint, ratio);
