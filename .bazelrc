@@ -95,6 +95,12 @@ build:windows --extra_toolchains=//toolchains:mingw_windows_toolchain
 build:windows --spawn_strategy=standalone
 build:windows --genrule_strategy=standalone
 build:windows --copt=-static
+# MinGW + `-std=c++20` 打开 __STRICT_ANSI__，M_PI / M_PI_2 只有在包含 <cmath>
+# **之前**定义 _USE_MATH_DEFINES 才可见。geom/common/math_util.h 里那句
+# `#define _USE_MATH_DEFINES` 对「先包含过 <cmath>」的 TU 无效（include guard
+# 已经吃掉），于是同一条 include 链在 Linux 能过、MinGW 报 M_PI 未声明。
+# 在编译期统一定义，比逐个 TU 调整 include 顺序可靠。
+build:windows --copt=-D_USE_MATH_DEFINES
 build:windows --linkopt=-static
 build:windows --linkopt=-lpthread
 

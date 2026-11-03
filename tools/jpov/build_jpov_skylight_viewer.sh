@@ -4,6 +4,7 @@
 #
 # 用法：
 #   ./tools/jpov/build_jpov_skylight_viewer.sh
+#   （本脚本本来就同时产出 Linux + Windows 产物，无需 --windows）
 #
 # 效果：
 #   1. bazel build //tools/jpov:jpov_skylight_viewer（Linux ELF）

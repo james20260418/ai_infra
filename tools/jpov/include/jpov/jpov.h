@@ -11,6 +11,18 @@
 
 #include <GLFW/glfw3.h>
 
+// MinGW / MSVC 的 windows.h（由 GLFW 头在 Windows 上间接包含）把 near / far
+// 定义成**空宏**，而 Camera 的字段就叫 `near` / `far` ⇒ `cmds.camera.near = 0.1f`
+// 会被展开成 `cmds.camera. = 0.1f`（MinGW 报 "expected unqualified-id before '='"）。
+// 引擎自己不用这两个宏，就地撤销，任何 include jpov.h 的 TU 都不必再记着 undef
+// （此前只有个别 src/*.cc 各自 `#undef near` / `#undef far`，demo 侧照样踩）。
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+
 #include "tools/jpov/interface/input_snapshot.h"
 #include "tools/jpov/interface/debug_info.h"
 #include "tools/jpov/interface/gltf_object.h"

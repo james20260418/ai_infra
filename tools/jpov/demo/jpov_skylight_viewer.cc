@@ -37,6 +37,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/skylight_viewer_app.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/src/gltf_loader.h"
@@ -682,7 +683,7 @@ int main(int argc, char** argv) {
     // Windows 导出表里请求高性能 GPU（见 jpov.cc 顶部注释）+ Init 后核对并告警。
     // headless 拍摄**不设**（保持 kAny）：CI / 黄金图本来就跑在 llvmpipe 上，
     // 每次拍摄都刷一条「偏好落空」告警没有意义。
-    cfg.render_preference = jpov::RenderPreference::kPreferGpu;
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_skylight_viewer.sh 同构拷贝）。
     cfg.fonts = {

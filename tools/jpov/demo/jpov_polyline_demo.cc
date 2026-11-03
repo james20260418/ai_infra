@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 
 class PolylineDemo : public JPOV {
 public:
@@ -64,6 +65,7 @@ int main() {
     cfg.height    = 360;
     cfg.headless  = false;
     cfg.target_fps = 30;
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     PolylineDemo app(cfg);
     app.Init();
     app.Run();

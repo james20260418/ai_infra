@@ -23,6 +23,7 @@
 #include "tools/common/utils.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/tools/vegetation_tool_v2/bake/vegetation_glb_baker.h"
@@ -1401,6 +1402,10 @@ int RunViewer(const CliArgs& args) {
   cfg.height = kViewerHeight;
   // 烘焙 / capture 都不需要可见窗口（烘焙其实连 GL 都不用）。
   cfg.headless = args.capture || !args.bake_glb_path.empty();
+  // 交互窗口要硬件光栅；capture / bake 是 headless，保持 kAny。
+  if (!cfg.headless) {
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+  }
   // 阴影级联数：每一级都要把整个场景在光空间重画一遍。森林/植被这类"同 mesh 很多份"
   // 的场景里，级联数是第一性能旋钮（默认 5 ⇒ 主 pass 之外还有 5 趟几何）。
   if (args.shadow_cascades > 0) {

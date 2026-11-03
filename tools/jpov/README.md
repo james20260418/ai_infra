@@ -114,22 +114,57 @@ GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | …
 
 ## 各 viewer 的 Windows 构建现状
 
-目前已构建出 `.exe` 的（可直接拷到 Windows 跑）：
+所有交互式 viewer 都有 `.exe` target（MinGW 交叉编译、静态链接，可直接拷到 Windows 上跑，
+运行时所需的 `fonts/` `models/` `textures/` 由对应脚本一并拷到 exe 旁）。
+
+构建脚本统一接受 `--windows`：**默认只出 Linux ELF**，加 `--windows` 才额外交叉编译 exe
+（Windows 那一趟要多花几十秒，不需要时不必等）。只有
+`build_jpov_demo.sh` / `build_jpov_ui_demo.sh` / `build_jpov_sp_ui_demo.sh` /
+`build_jpov_skylight_viewer.sh` 四个老脚本本来就是双出，保持原样（加不加 `--windows` 都一样）。
 
 | target | 构建脚本 |
 |--------|---------|
-| `//tools/jpov:jpov_demo.exe` | `build_jpov_demo.sh` |
-| `//tools/jpov:jpov_ui_demo.exe` | `build_jpov_ui_demo.sh` |
-| `//tools/jpov:jpov_sp_ui_demo.exe` | `build_jpov_sp_ui_demo.sh` |
-| `//tools/jpov:jpov_skylight_viewer.exe` | `build_jpov_skylight_viewer.sh` |
+| `//tools/jpov:jpov_demo.exe` | `build_jpov_demo.sh`（双出） |
+| `//tools/jpov:jpov_ui_demo.exe` | `build_jpov_ui_demo.sh`（双出） |
+| `//tools/jpov:jpov_sp_ui_demo.exe` | `build_jpov_sp_ui_demo.sh`（双出） |
+| `//tools/jpov:jpov_skylight_viewer.exe` | `build_jpov_skylight_viewer.sh`（双出） |
+| `//tools/jpov:jpov_model_viewer.exe` | `build_jpov_model_viewer.sh --windows` |
+| `//tools/jpov:jpov_pick_highlight_viewer.exe` | `build_jpov_pick_highlight_viewer.sh --windows` |
+| `//tools/jpov:jpov_fire_fog_viewer.exe` | `build_jpov_fire_fog_viewer.sh --windows` |
+| `//tools/jpov:jpov_soft_mesh_viewer.exe` | `build_soft_mesh_simulator.sh --windows` |
+| `//tools/jpov:jpov_particle_viewer.exe` | `build_particle_viewer.sh --windows` |
+| `//tools/jpov:jpov_volume_fire_viewer.exe` | `build_volume_fire_viewer.sh --windows` |
+| `//tools/jpov:jpov_strip_viewer.exe` | `build_jpov_strip_viewer.sh --windows` |
+| `//tools/jpov/demo/fbx_viewer:jpov_fbx_viewer.exe` | `build_jpov_fbx_viewer.sh --windows` |
+| `//tools/jpov/tools/vegetation_tool_v2:jpov_vegetation_v2_viewer.exe` | `build_jpov_vegetation_v2_viewer.sh --windows` |
 
-其余 viewer / 工具目前**只有 Linux target**（`jpov_pick_highlight_viewer`、`jpov_fire_fog_viewer`、
-`jpov_model_viewer`、`jpov_particle_viewer`、`jpov_strip_viewer`、`jpov_volume_fire_viewer`、
-`jpov_soft_mesh_viewer`、`jpov_clothing_tool`、`jpov_fbx_viewer`、`jpov_model_editor`、
-vegetation v2 viewer）。要加一个：照 BUILD 里现有 `.exe` target 复制一份，只把
-`target_compatible_with` 换成 `@platforms//os:windows`，再跑
-`bazel build //tools/jpov:<name>.exe --config=windows` —— 能过就补进 CI 的 windows-build job，
-否则会悄悄腐坏（没人交叉编译的 target 不会自己保持可编译）。
+这 13 个 exe 全部列进了 CI 的 `windows-build` job —— 没人交叉编译的 target 不会自己保持可编译。
+
+还没做 exe 的：`jpov_clothing_tool`、`jpov_model_editor`（编辑器/工具链未做交叉编译验证）。
+要加一个：照 BUILD 里现有 `.exe` target 复制一份，只把 `target_compatible_with` 换成
+`@platforms//os:windows`，跑 `bazel build //tools/jpov:<name>.exe --config=windows`，
+能过就补进 CI 的 windows-build job。
+
+### MinGW 宏坑（都在公共头里一次性处理了）
+
+- `windows.h` 把 `near` / `far` 定义成空宏，而 `Camera` 的字段就叫 `near`/`far`
+  ⇒ `cmds.camera.near = 0.1f` 展开成 `cmds.camera. = 0.1f`。`jpov.h` 与
+  `tools/common/utils.h`（两者都可能最后被 include）分别 `#undef` 一次。
+- `windows.h` 把 `DrawText` 定义成 `DrawTextA`，会劫持 `cmds.DrawText(...)`
+  ⇒ 链接期找不到 `RenderCommandList::DrawTextA`。同样在 `utils.h` 里撤销。
+- MinGW + `-std=c++20` 打开 `__STRICT_ANSI__`，`M_PI` 只有在包含 `<cmath>` **之前**
+  定义 `_USE_MATH_DEFINES` 才可见。`.bazelrc` 的 `build:windows` 统一 `-D_USE_MATH_DEFINES`。
+
+## 渲染设备偏好（prefer GPU / CPU）
+
+交互式 viewer 在**窗口模式**统一走 `jpov_viewer::PreferGpuForInteractiveViewer(cfg)`
+（`demo/viewer_render_preference.h`），即 `RenderPreference::kPreferGpu`；
+`--capture` / `--four_views` / `--ui_shot` 等 headless 路径保持默认 `kAny`
+（CI 与黄金图本来就跑 llvmpipe，刷「偏好落空」告警只是噪音）。
+
+注意 JPOV **不能选显卡**：这个偏好只做「建 context 前的驱动提示 + 建 context 后用
+`glGetString` 核对 + 落空时告警」三件事，最终设备仍由驱动 / 系统 per-app 设置决定。
+语义与判定表见 `interface/render_preference.h`。
 
 ## 设计
 

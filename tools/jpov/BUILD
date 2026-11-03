@@ -67,6 +67,17 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 交互式 viewer 的渲染设备偏好（header-only）：只表达「我是交互式工具」这一事实，
+# 三件事实（驱动提示 / glGetString 核对 / 落空告警）在 interface/render_preference.h。
+# headless 拍摄不调用，保持默认 kAny（CI 跑 llvmpipe，刷告警是噪音）。
+cc_library(
+    name = "viewer_render_preference",
+    hdrs = ["demo/viewer_render_preference.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//tools/jpov/include/jpov:jpov"],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "viewer_capture",
     hdrs = ["demo/viewer_capture.h"],
@@ -85,6 +96,7 @@ cc_binary(
     name = "jpov_model_viewer",
     srcs = ["demo/jpov_model_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
         "//tools/jpov:viewer_capture",
@@ -94,6 +106,27 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_model_viewer.exe",
+    srcs = ["demo/jpov_model_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov:viewer_capture",
+        "//tools/jpov:viewer_output",
+        "//tools/jpov/assets/models:models_path",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )
@@ -177,6 +210,7 @@ cc_binary(
     name = "jpov_skylight_viewer",
     srcs = ["demo/jpov_skylight_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:skylight_viewer_app",
         "//tools/jpov:view_config",
@@ -197,6 +231,7 @@ cc_binary(
     name = "jpov_skylight_viewer.exe",
     srcs = ["demo/jpov_skylight_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:skylight_viewer_app",
         "//tools/jpov:view_config",
@@ -220,6 +255,7 @@ cc_binary(
     name = "jpov_pick_highlight_viewer",
     srcs = ["demo/jpov_pick_highlight_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:skeleton_types",
@@ -228,6 +264,26 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_pick_highlight_viewer.exe",
+    srcs = ["demo/jpov_pick_highlight_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )
@@ -256,6 +312,7 @@ cc_binary(
     name = "jpov_fire_fog_viewer",
     srcs = ["demo/jpov_fire_fog_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:fire_fog_viewer_app",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
@@ -269,13 +326,37 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "jpov_fire_fog_viewer.exe",
+    srcs = ["demo/jpov_fire_fog_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:fire_fog_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # 示例：Rect Demo — 演示窗口坐标与渲染分辨率裁剪
 # ============================================================================
 cc_binary(
     name = "jpov_demo",
     srcs = ["demo/jpov_demo.cc"],
-    deps = ["//tools/jpov/include/jpov:jpov"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:viewer_render_preference",
+    ],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
@@ -285,7 +366,10 @@ cc_binary(
 cc_binary(
     name = "jpov_demo.exe",
     srcs = ["demo/jpov_demo.cc"],
-    deps = ["//tools/jpov/include/jpov:jpov"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:viewer_render_preference",
+    ],
     # Windows 上不要弹控制台黑框（GUI 子系统）。日志仍然落盘到 exe 旁，
     # 见 Config::log_file 与 jpov.cc 的 stderr 重定向。
     linkopts = ["-mwindows"],
@@ -304,6 +388,7 @@ cc_binary(
     name = "jpov_ui_demo",
     srcs = ["demo/jpov_ui_demo.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
@@ -317,6 +402,7 @@ cc_binary(
     name = "jpov_ui_demo.exe",
     srcs = ["demo/jpov_ui_demo.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
@@ -350,6 +436,7 @@ cc_binary(
     name = "jpov_sp_ui_demo",
     srcs = ["demo/sp_ui_demo.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:sp_ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
@@ -363,6 +450,7 @@ cc_binary(
     name = "jpov_sp_ui_demo.exe",
     srcs = ["demo/sp_ui_demo.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:sp_ui_demo_panel",
         "//tools/jpov/include/jpov:jpov",
     ],
@@ -398,6 +486,7 @@ cc_binary(
     name = "jpov_polyline_demo",
     srcs = ["demo/jpov_polyline_demo.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
@@ -465,6 +554,7 @@ cc_binary(
     name = "jpov_soft_mesh_viewer",
     srcs = ["demo/jpov_soft_mesh_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:soft_mesh_viewer_app",
         "//tools/jpov:view_config",
         "//tools/jpov/assets/models:models_path",
@@ -474,6 +564,27 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_soft_mesh_viewer.exe",
+    srcs = ["demo/jpov_soft_mesh_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:soft_mesh_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/assets/models:models_path",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/soft_mesh_simulator",
+        "//tools/jpov/src:gltf_loader",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )
@@ -504,6 +615,7 @@ cc_binary(
     name = "jpov_particle_viewer",
     srcs = ["demo/jpov_particle_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:particle_viewer_app",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
@@ -513,6 +625,27 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_particle_viewer.exe",
+    srcs = ["demo/jpov_particle_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:particle_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )
@@ -539,6 +672,7 @@ cc_binary(
     name = "jpov_volume_fire_viewer",
     srcs = ["demo/jpov_volume_fire_viewer.cc"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov:volume_fire_viewer_app",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
@@ -547,6 +681,26 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_volume_fire_viewer.exe",
+    srcs = ["demo/jpov_volume_fire_viewer.cc"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        "//tools/jpov:volume_fire_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )
@@ -574,6 +728,7 @@ cc_binary(
     # 不在 strip_viewer_app 库里，避免给 gold test 拖进一个 4k 模型。
     data = ["//tools/jpov/assets/models:oak_tripo_negative_data"],
     deps = [
+        "//tools/jpov:viewer_render_preference",
         ":strip_viewer_app",
         ":skylight_scene",
         ":view_config",
@@ -582,6 +737,29 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_strip_viewer.exe",
+    srcs = ["demo/jpov_strip_viewer.cc"],
+    # 玻璃缸场景（sky_light 验收）用的橡树：让 `bazel run` 也能找到资源。
+    # 不在 strip_viewer_app 库里，避免给 gold test 拖进一个 4k 模型。
+    data = ["//tools/jpov/assets/models:oak_tripo_negative_data"],
+    deps = [
+        "//tools/jpov:viewer_render_preference",
+        ":strip_viewer_app",
+        ":skylight_scene",
+        ":view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )

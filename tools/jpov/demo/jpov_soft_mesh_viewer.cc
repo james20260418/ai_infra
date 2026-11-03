@@ -29,6 +29,7 @@
 #include "tools/jpov/assets/models/models_path.h"
 #include "tools/jpov/demo/soft_mesh_viewer_app.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 #include "tools/jpov/src/gltf_loader.h"
 
@@ -183,6 +184,9 @@ int main(int argc, char** argv) {
     cfg.resizable = false;
     cfg.target_fps = static_cast<int>(jpov::soft_mesh_viewer::kViewerFps);
     cfg.headless   = opt.ui_shot;
+    if (!opt.ui_shot) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},

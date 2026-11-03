@@ -31,6 +31,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/common/utils.h"
@@ -326,6 +327,9 @@ JPOV::Config MakeConfig(const std::string& title, bool headless) {
     cfg.resizable = false;
     cfg.target_fps = 30;
     cfg.headless = headless;
+    if (!headless) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     return cfg;
 }
 

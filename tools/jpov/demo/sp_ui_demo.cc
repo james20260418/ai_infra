@@ -28,6 +28,7 @@
 
 #include "tools/jpov/demo/sp_ui_demo_panel.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/sp_ui/sp_ui.h"
 
@@ -585,6 +586,8 @@ int main(int argc, char** argv) {
     cfg.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
     cfg.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
     cfg.target_fps = 30;
+    // 交互窗口：声明想要硬件光栅（headless 才保持 kAny）。
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     // 显式声明字体（路径相对 exe，由 build 脚本同构拷贝）。
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},

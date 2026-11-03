@@ -21,6 +21,7 @@
 #include "tools/jpov/demo/volume_fire_viewer_app.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/common/utils.h"
 
 namespace {
@@ -336,6 +337,7 @@ int main(int argc, char** argv) {
     cfg.resizable = false;
     cfg.target_fps = 30;
     cfg.headless = false;
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
