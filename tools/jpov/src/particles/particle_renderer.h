@@ -132,10 +132,11 @@ void main() {
         right = normalize(r);
         up = normalize(cross(n, right));
     }
-    float c = cos(aMisc.z);
-    float s = sin(aMisc.z);
-    vec3 rr = right * c + up * s;
-    vec3 uu = -right * s + up * c;
+    // kVelocity 下**忽略滚转**：滚转会连「拉伸轴」一起转走（火星的 rotation 是随机的，
+    // 于是拉长方向也随机 —— 看上去只是一堆大小不一的矩形片，而不是沿速度的流线）。
+    vec2 roll = (uAlign == 3) ? vec2(1.0, 0.0) : vec2(cos(aMisc.z), sin(aMisc.z));
+    vec3 rr = right * roll.x + up * roll.y;
+    vec3 uu = -right * roll.y + up * roll.x;
     vec2 size = aMisc.xy;
     if (uStretched == 1) {
         size.y *= (1.0 + length(aVel) * uStretchScale);

@@ -18,9 +18,11 @@
 //   1. 速度沿世界 +Y（⟂ 视线、竖直）：同上
 //   2. 速度沿 +Y 且 stretched=true（stretch_scale=3，|v|=0.5 ⇒ 长度 ×2.5）：
 //      亮区应是**竖长条**（高/宽 ≥ 1.8）—— 这一条同时验证「拉伸轴 = 速度轴」
+//   3. 同 2，但 rotation=1.2rad：kVelocity 必须**忽略滚转**（否则滚转会把拉伸轴转走，
+//      火星变成随机朝向的斜条 —— 实际观感就是"拉长方向不对"）
 //
-// 反向验证（开发时做过）：把 up 改回 cross(right, u) 后，用例 0/1 的宽高比掉到 ~0.05、
-// 用例 2 的高宽比掉到 ~0.05，三条全红；改回 cross(n, right) 后全绿。
+// 反向验证（开发时做过）：把 up 改回 cross(right, u) 后，四个用例全部变成 0 亮像素（全红）；
+// 改回 cross(n, right) 后全绿。另：把「kVelocity 忽略 roll」去掉，用例 3 的高宽比掉到 ~0.69。
 
 #include <algorithm>
 #include <cstdint>
@@ -100,7 +102,8 @@ LitStats MeasureLit(const Image& img) {
     return s;
 }
 
-// 0 = 水平速度（不拉伸）；1 = 竖直速度（不拉伸）；2 = 竖直速度 + 拉伸。
+// 0 = 水平速度（不拉伸）；1 = 竖直速度（不拉伸）；2 = 竖直速度 + 拉伸；
+// 3 = 竖直速度 + 拉伸 + 滚转 1.2rad（应被 kVelocity 忽略）。
 class VelocityAlignApp : public JPOV {
 public:
     using JPOV::JPOV;
@@ -157,7 +160,8 @@ public:
         p.position = {0.0f, 0.0f, 0.0f};
         p.width = kSize;
         p.height = kSize;
-        p.rotation = 0.0f;
+        // 火星的 rotation 是随机的：kVelocity 下必须忽略它，否则拉伸轴会被转走。
+        p.rotation = (case_ == 3) ? 1.2f : 0.0f;
         p.color = {1.0f, 1.0f, 1.0f, 1.0f};
         p.age01 = 0.5f;
         p.velocity = (case_ == 0) ? jpov::Vec3f{kVelocity, 0.0f, 0.0f}
@@ -168,7 +172,7 @@ public:
         pc.texture_id = 0;              // 纯色 texel，不依赖任何贴图
         pc.flipbook = false;
         pc.align = jpov::AlignMode::kVelocity;
-        pc.stretched = (case_ == 2);
+        pc.stretched = (case_ == 2 || case_ == 3);
         pc.stretch_scale = kStretchScale;
         cmds->DrawParticles(std::move(pc));
     }
@@ -231,9 +235,11 @@ int main(int argc, char** argv) {
     const std::string path_flat_x = out_dir + "velocity_x.png";
     const std::string path_flat_y = out_dir + "velocity_y.png";
     const std::string path_stretched = out_dir + "velocity_y_stretched.png";
+    const std::string path_rolled = out_dir + "velocity_y_stretched_roll.png";
     RenderTo(path_flat_x, 0);
     RenderTo(path_flat_y, 1);
     RenderTo(path_stretched, 2);
+    RenderTo(path_rolled, 3);
 
     bool ok = true;
     ok = IsFaceOnSquare(MeasureLit(LoadRgb(path_flat_x)), "速度+X（不拉伸）") && ok;
@@ -262,9 +268,26 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 滚转必须被忽略：加了 1.2rad 的 roll 后，长条仍然是竖的（h/w ≥ 1.8）。
+    const LitStats rolled = MeasureLit(LoadRgb(path_rolled));
+    if (rolled.count <= 0) {
+        LOG(ERROR) << "速度+Y（拉伸+滚转）: 一个亮像素都没有";
+        ok = false;
+    } else {
+        const float ratio = static_cast<float>(rolled.height()) /
+                            static_cast<float>(rolled.width());
+        LOG(INFO) << "速度+Y（拉伸+滚转 1.2rad）: lit=" << rolled.count << " bbox="
+                  << rolled.width() << "x" << rolled.height() << " h/w=" << ratio;
+        if (ratio < 1.8f) {
+            LOG(ERROR) << "速度+Y（拉伸+滚转）: 高宽比 " << ratio
+                       << " < 1.8（滚转把拉伸轴转走了 —— kVelocity 必须忽略 roll）";
+            ok = false;
+        }
+    }
+
     if (!ok) {
         return 1;
     }
-    LOG(INFO) << "kVelocity 对齐像素测试通过：三张图均为正对相机的面片";
+    LOG(INFO) << "kVelocity 对齐像素测试通过：四张图均为正对相机 / 沿速度拉伸的面片";
     return 0;
 }

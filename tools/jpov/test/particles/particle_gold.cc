@@ -10,7 +10,7 @@
 // 覆盖点：
 //   * 火焰：12×6 成对形变 atlas（V7.1）+ 自旋 + 温度调色
 //   * 烟：danis 重绘 12×6 图集，火焰死亡点 spawn，kAlpha over
-//   * 火星：纯色加法**短流线**（kVelocity 对齐 + 拉伸），数量/大小固定
+//   * 火星：软圆点加法**短流线**（kVelocity 对齐 + 拉伸 + 软边 sprite），数量/大小固定
 //   * 软深度：同一场景再渲一张 soft_depth_m=0.08 的 gold；并**断言**它与关闭软深度
 //     的那张确实存在足量像素差 —— 防「uniform 没绑上 / 淡出被短路」时 gold 静默变恒等。
 
@@ -117,13 +117,13 @@ EmitterConfig MakeSmokeConfig() {
 EmitterConfig MakeEmberConfig() {
     EmitterConfig c;
     c.origin = {0.0f, 0.43f, 0.0f};
-    c.rate = 20.0f;
+    c.rate = 30.0f;
     c.shape = jpov::particles::ShapeKind::kCone;
     c.radius = 0.10f;
     c.cone_half_angle_deg = 35.0f;
     c.lifetime = {0.6f, 1.4f};
     c.speed = {0.25f, 0.70f};
-    c.size_start = {0.006f, 0.010f};
+    c.size_start = {0.012f, 0.020f};
     c.rotation = {0.0f, 6.2831853f};
     c.gravity = {0.0f, 0.25f, 0.0f};
     c.drag = 0.70f;
@@ -162,10 +162,13 @@ public:
             "tools/jpov/assets/fire/mp/flames_pairs_v71_12x6.png"));
         smoke_tex_ = RegisterTexture(jpov::ResolveResourcePath(
             "tools/jpov/assets/smoke/danis_repaint_12x6.png"));
+        ember_tex_ = RegisterTexture(jpov::ResolveResourcePath(
+            "tools/jpov/assets/particles/ember_soft_dot.png"));
         fuel_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.5f, 0.5f, 0.5f));
         fuel_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.10f, 0.06f, 1.0f});
         CHECK_NE(fire_tex_, 0u);
         CHECK_NE(smoke_tex_, 0u);
+        CHECK_NE(ember_tex_, 0u);
 
         fire_ = ParticleEmitter(MakeFireConfig());
         smoke_ = ParticleEmitter(MakeSmokeConfig());
@@ -264,7 +267,7 @@ public:
         if (!ember_inst_.empty()) {
             jpov::ParticleRenderCommand ec;
             ec.particles = ember_inst_;
-            ec.texture_id = 0;
+            ec.texture_id = ember_tex_;
             ec.flipbook = false;
             ec.align = jpov::AlignMode::kVelocity;
             ec.stretched = true;
@@ -297,6 +300,7 @@ private:
 
     uint32_t fire_tex_ = 0;
     uint32_t smoke_tex_ = 0;
+    uint32_t ember_tex_ = 0;
     uint32_t fuel_mesh_ = 0;
     jpov::PBRMaterial fuel_mat_;
     ParticleEmitter fire_;

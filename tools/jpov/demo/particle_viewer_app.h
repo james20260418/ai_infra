@@ -100,6 +100,7 @@ inline constexpr int kSmokeTexCount =
 // 2026-11-02 Danis 定稿：**flipbook 只保留 S5 FLOW 这一版**（F5 直出偏硬、
 // S5 PROFILE 会「充气」，两版都删了）。水柱核心与顶点水花共用这一张图集。
 inline constexpr const char* kWaterAtlasFile = "water/water_s5_flow_12x6.png";
+inline constexpr const char* kEmberSpriteFile = "particles/ember_soft_dot.png";
 inline constexpr int kWaterTilesX = 12;
 inline constexpr int kWaterTilesY = 6;
 inline constexpr int kWaterPairLen = 12;
@@ -347,6 +348,7 @@ public:
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     std::array<uint32_t, kSmokeTexCount> smoke_choice_tex_{};
     uint32_t water_tex_ = 0;   // 水花图集（全场景一张）
+    uint32_t ember_tex_ = 0;   // 火星软圆点（单张，纯 alpha 形状）
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
@@ -360,8 +362,8 @@ public:
     float ui_fuel_scale_ = 0.125f;       // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
     float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
-    float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
-    float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
+    float ui_ember_count_ = 60.0f;       // 火星目标数量（0..80）
+    float ui_ember_size_ = 0.020f;       // 火星世界尺寸（米，2..40mm；软圆点核心比 quad 小）
     // 火星朝向：true = kVelocity（沿速度对齐 + 拉伸成短流线，火花的正确画法）；
     // false = kView（旧行为，只做 A/B 用）。
     bool ui_ember_velocity_align_ = true;
@@ -632,8 +634,19 @@ public:
         }
 
         // ── 火星 / 余烬 ──
-        // 简单一层：纯色加法小点，从火焰上方冒出；数量/大小只由 UI 控制。
+        // 一层：软圆点 + 沿速度拉伸（kVelocity），从火焰上方冒出；数量/大小只由 UI 控制。
         {
+            if (ember_tex_ == 0) {
+                const std::string rel = std::string("textures/") + kEmberSpriteFile;
+                const std::string p = FindTexture(rel.c_str());
+                if (!p.empty()) {
+                    // 火星屏幕上只有几像素：不开 mipmap 会闪成噪点。
+                    jpov::TextureOptions opts;
+                    opts.mipmap = true;
+                    ember_tex_ = RegisterTexture(p, opts);
+                    LOG(INFO) << "[particle_viewer] ember tex = " << p;
+                }
+            }
             const float life_avg = 0.5f * (ember_cfg_.lifetime.min + ember_cfg_.lifetime.max);
             ember_cfg_.rate = (ui_scene_ == 0 && ember_enable_)
                 ? ui_ember_count_ / std::max(life_avg, 1e-3f) : 0.0f;
@@ -652,7 +665,7 @@ public:
             if (ui_scene_ == 0 && ember_enable_ && !einst.empty()) {
                 jpov::ParticleRenderCommand ec;
                 ec.particles = std::move(einst);
-                ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
+                ec.texture_id = ember_tex_;   // 0 = 回退纯色（未找到贴图时仍是可见的方块）
                 ec.flipbook = false;
                 ec.align = ui_ember_velocity_align_ ? jpov::AlignMode::kVelocity
                                                     : jpov::AlignMode::kView;
