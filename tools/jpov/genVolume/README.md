@@ -23,6 +23,11 @@ tools/jpov/genVolume/
 ├── vdb_to_jpovvol.py        # 【通用】OpenVDB（单帧/序列）→ JPVOL2，任意 grid→通道映射
 ├── fire_family_bake.py      # 生命周期三段（点火/循环/熄灭）烘焙 → JPVOL2 + sidecar
 ├── make_flipbook.py         # .jpovvol → flipbook PNG（粒子火/烟纹理）
+├── flipbook_s5/             # 【技能】5 张关键帧 → S5 中点 → 12×6 flipbook 图集（火/烟/水花共用）
+│   ├── README.md            #   方法/契约/踩坑/验收清单
+│   ├── extract_keyframes.py #   黑底横排图 → F1..FN（自动切格 + 取 alpha + 归一化）
+│   ├── build_s5_atlas.py    #   F5 → S1..S5 → 6 链 × 12 帧 → 12×6（含行序翻转）
+│   └── morph_flow.py        #   FLOW 光流形变（唯一验收通过的算子）
 │
 ├── # —— 仿真场景（需 Mantaflow 运行时；见 env/）——
 ├── fire_scene.py            # 火（间歇版；旋钮走环境变量）
