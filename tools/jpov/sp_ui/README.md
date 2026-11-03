@@ -115,28 +115,42 @@ ui.MultiPlate(box, skin);
 
 ---
 
-## 增强按钮（flipbook 底板）
+## 增强按钮（两种模式）
 
 普通 `Button` 的底板是三块主题色（normal / hover / pressed）。需要“活着的石头”
 那种观感时，传一个 `SpButtonSkin`：
 
 ```cpp
 SpButtonSkin skin;
+skin.style = SpButtonSkin::Style::kPlate;   // 旧模式：主题板材 + flipbook 填充
 skin.texture_id = marble_tex;      // 图集（0 = 纯色底板）
 skin.tiles_x = skin.tiles_y = 4;   // 4x4 = 16 帧
 skin.fps = 8.0f;                   // normal 态一直在翻书
-skin.material_px = 120.0f;         // 一格图集 = 120 屏幕像素（随 ui_scale 缩放）
-skin.normal_tint  = {0.55f, 0.57f, 0.60f, 1.0f};   // 暗石
-skin.hover_tint   = {0.82f, 0.75f, 0.60f, 1.0f};   // 暖亮
-skin.pressed_tint = {0.30f, 0.33f, 0.38f, 1.0f};   // 沉下去
+skin.material_px = 170.0f;         // 一格图集 = 170 屏幕像素（≈ 控件宽，控件内不平铺）
+skin.normal_tint  = {0.55f, 0.57f, 0.60f, 1.0f};
+skin.hover_tint   = {0.82f, 0.75f, 0.60f, 1.0f};
+skin.pressed_tint = {0.30f, 0.33f, 0.38f, 1.0f};
 skin.normal_to_hover_delay = 0.5f;                 // 0.5s 爬到满
 if (ui.Button("应用", box, skin)) { DoApply(); }
 ```
 
+**两种模式，只差一个字段：**
+
+| `skin.style` | 底板 | 边框 | 适合 |
+|---|---|---|---|
+| `kPlate`（默认） | 主题圆角板材，flipbook 只当**核心填充** | 主题银边/剖面 | 无缝平铺材质（大理石、拉丝） |
+| `kFlipbook` | **整块按钮 = 这张图集**，不画主题边框/填充色 | 无 | 用户 DIY 的**整键皮**（一整块按钮背景图序列） |
+
+`kFlipbook` 模式要注意三点：
+
+1. **`material_px` 保持 0**：一格图正好铺满一颗按钮（`tiling = 1`），整键皮不平铺。
+2. **格子长宽比 = 按钮长宽比**，否则图被非等比拉伸、倒角变形。
+3. **轮廓仍按主题 `corner_radius_px` 做 SDF 裁剪**（想要直角就把主题半径设 0）。
+   边界带宽度强制为 0，不会从整块图里挖掉一圈。
+
 设计要点：
 
-- **normal 态走 flipbook，hover / pressed 只换 tint** —— 状态切换不会换图、不会跳帧，
-  看起来就是同一块石头在呼吸/亮起来/沉下去。
+- **normal 态走 flipbook，hover / pressed 只换 tint** —— 状态切换不会换图、不会跳帧。
 - `normal_to_hover_delay` = 从 normal 到 100% hover tint 的时长（秒），**反向同值**。
   内部是一个跨帧的 `hover_ratio`：悬停且未按下时 `+= dt / delay`，否则 `-= dt / delay`。
   0 = 立即切；`Begin` 传 `frame_dt_ms = 0`（无时钟）时也退化为立即切。
@@ -145,6 +159,7 @@ if (ui.Button("应用", box, skin)) { DoApply(); }
 - 图集/网格/帧率/密度是**逐按钮**的，与主题 `plate_*` 无关（边框层仍取主题）。
 - 默认三个 tint 全是白（= 只翻书、状态不变色）：状态反馈是美术决定，本库不猜。
 - 同 box 的两颗按钮会被当成同一个（跨帧状态按 box 识别，同其它状态槽）。
+- 这两种模式**共用同一套 hover_ratio**（gold 测试里两边都是 25%），不允许分叉。
 
 ---
 
@@ -164,7 +179,7 @@ app.RunOnce(/*frame_count=*/3, in, winfo, "f03.png");   // 帧号原样进 OneIt
   的 `raw` 编码要自己写（见 `interface/input_snapshot.h`）。点按钮 = 先 Hold 再 Click，
   且 Click 要填 `left_clicks[0]` 的位置。
 - `jpov_sp_ui_demo --script` 就是这套东西的现成样板（悬停→按下→松开→移开，
-  后半段还包含一遍翻书按钮的 tint 渐变：逐帧 PNG 能直接看出爬升/到顶/clamp）。
+  上下两排按钮各跑一遍，逐帧 PNG 能直接看出 tint 爬升/到顶/clamp）。
 
 ## 我该怎么写自己的面板
 
@@ -258,10 +273,10 @@ bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY /
 
 ## 目前没做 / 边界
 
-- **`ButtonDelux`**（用户自带整键烘焙皮，状态各自占一张图）仍然没做。现在能做的是
-  **normal 态一条 flipbook + hover/pressed 只调 tint**（见上一节），这是“会呼吸的石头”；
-  烘焙皮要的是“换图”（normal/hover/pressed 各一格），本质不同，得先定 `kReplace` /
-  `kOverlay` 枚举，且**不许开辟第二条渲染路径** —— 必须展开成 `Plate2DCommand` 的组合。
+- **`ButtonDelux`**（每个状态各占一格图集的“换图”皮）仍然没做。现在的
+  `kFlipbook` 模式能做“**整键背景 = 一条动画** + tint 三态”，但不做“normal/hover/pressed
+  各换一帧”。后者要的是**状态 → 帧号**映射，得先定 `kReplace` / `kOverlay` 枚举，
+  且**不许开辟第二条渲染路径** —— 必须展开成 `Plate2DCommand` 的组合。
 - 形状只有矩形 / 圆角矩形 / 胶囊（单一半径），没有每角独立半径、没有任意多边形。
 - 没有外发光 / 内阴影 / 描边动画；没有布局系统、没有 scissor。
 - 每帧每块板做 ~16 次 `glGetUniformLocation`（没走 `ShaderManager` 缓存）；30 块板量级无感，

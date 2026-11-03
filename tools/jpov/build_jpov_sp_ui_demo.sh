@@ -22,6 +22,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BAZEL_BIN="$PROJECT_DIR/bazel-bin/tools/jpov"
 OUTPUT_DIR="$PROJECT_DIR/output/jpov_sp_ui_demo"
 MARBLE_DIR="$PROJECT_DIR/tools/jpov/assets/sp_ui/marble"
+BUTTON_DIR="$PROJECT_DIR/tools/jpov/assets/sp_ui/button"
 
 echo "==> 0. 确保输出目录存在"
 rm -rf "$OUTPUT_DIR"
@@ -51,6 +52,8 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 echo "==> 5. 拷贝材质纹理到 output/jpov_sp_ui_demo/textures/"
 mkdir -p "$OUTPUT_DIR/textures"
 cp -v "$MARBLE_DIR"/plate_*_4x4.png "$OUTPUT_DIR/textures/"
+# 整键按钮图集（kFlipbook 模式用；另一目录、同一搜索路径）
+cp -v "$BUTTON_DIR"/plate_*_4x4.png "$OUTPUT_DIR/textures/"
 
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/textures/"
 

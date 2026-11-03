@@ -370,9 +370,18 @@ bool SpUi::ButtonImpl(const char* label, const SpRect& box,
             pressed_now ? skin->pressed_tint
                         : LerpColor(skin->normal_tint, skin->hover_tint, ratio);
         const PlateLayer fill_layer = MakeButtonLayer(b, *skin);
-        PushPlateInternal(b, tint, theme_.border, theme_.corner_radius_px,
-                          /*fill_textured=*/true, /*border_textured=*/true,
-                          &fill_layer);
+        if (skin->style == SpButtonSkin::Style::kFlipbook) {
+            // 新模式：整块按钮 = 这张 flipbook。不画主题边框、不用主题色，
+            // 轮廓仅靠主题圆角做 SDF 裁剪（形状/倒角/高光都在图里）。
+            PushPlateInternal(b, tint, tint, theme_.corner_radius_px,
+                              /*fill_textured=*/true, /*border_textured=*/false,
+                              &fill_layer, /*draw_border=*/false);
+        } else {
+            // 旧模式：主题的圆角板材 + 银边，flipbook 只当核心填充。
+            PushPlateInternal(b, tint, theme_.border, theme_.corner_radius_px,
+                              /*fill_textured=*/true, /*border_textured=*/true,
+                              &fill_layer);
+        }
     }
     // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
     TextInternal(label, b, /*stretch_w=*/true, /*stretch_h=*/true);
@@ -1606,7 +1615,8 @@ void SpUi::PushPlate(const SpRect& r, Color fill, Color border, float radius) {
 void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
                              float radius, bool fill_textured,
                              bool border_textured,
-                             const PlateLayer* fill_layer) {
+                             const PlateLayer* fill_layer,
+                             bool draw_border) {
     // 规格化 box（负尺寸 clamp 0），圆角 clamp 到合法上限。
     // 注：UI 侧的 clamp 是有意的 —— 控件 box 由调用方的布局算出来，可能任意小；
     //   而 `Plate2DCommand`/渲染层对越界参数是 CHECK 崩的（不静默 clamp），
@@ -1621,8 +1631,10 @@ void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
     const float half_min = std::min(box.size.x(), box.size.y()) * 0.5f;
     const float safe_radius = std::clamp(radius, 0.0f, half_min);
     // 边框带宽不超过短边一半（否则内外环会互相穿过），渐变带也不能宽于边框带。
+    // draw_border = false（整键 flipbook 模式）时边框带宽度为 0：否则 SDF 会
+    // 把「外边→内边」那圈切给边框色，整块图就被挖掉一圈。
     const float safe_border =
-        std::clamp(theme_.border_width_px, 0.0f, half_min);
+        draw_border ? std::clamp(theme_.border_width_px, 0.0f, half_min) : 0.0f;
 
     Plate2DCommand c;
     c.pos = box.pos;

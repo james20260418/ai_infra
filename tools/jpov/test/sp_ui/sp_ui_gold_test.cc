@@ -697,6 +697,49 @@ void CheckButtonHoverRatio() {
                   "dt=0（无时钟）时应直接切到目标值");
         LOG(INFO) << "[PASS] delay=0 / dt=0 都退化为一帧直达";
     }
+
+    // f) kFlipbook 模式：整块按钮 = 图集。与 kPlate 的差别必须体现在指令上：
+    //    没有边框带（border_width=0）、边框层不采材质、圆角跟主题走；
+    //    而 tint 渐变的语义与 kPlate 完全一致（同一套 hover_ratio）。
+    {
+        SpUi uif;
+        SpButtonSkin baked = skin;
+        baked.style = SpButtonSkin::Style::kFlipbook;
+        baked.material_px = 0.0f;   // 整键皮不平铺：一格图铺满整颗按钮
+        auto FrameF = [&](const jpov::InputSnapshot& in, float dt_ms) {
+            RenderCommandList cmds;
+            uif.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+            uif.Button("activate", box, baked);
+            uif.End();
+            uif.Emit(&cmds);
+            CHECK_EQ(cmds.plate2d.size(), 1u);
+            return cmds.plate2d[0];
+        };
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;
+        idle.mouse_y = 350.0f;
+        const Plate2DCommand p = FrameF(idle, kDtMs);
+        CHECK(std::fabs(p.border_width) < 1e-4f)
+            << "kFlipbook 模式不该画边框带（否则整块图被挖掉一圈）："
+            << p.border_width;
+        CHECK_EQ(p.border.texture_id, 0u) << "kFlipbook 模式边框层不该采材质";
+        CHECK_EQ(p.fill.texture_id, kCoreTex) << "整块底板必须是皮肤图集";
+        CHECK_EQ(p.fill.flipbook.tiles_x, 4) << "整键图集的网格必须传下去";
+        // material_px = 0 ⇒ 一格图铺满（tiling = 1，不平铺）。
+        CHECK(std::fabs(p.fill.tiling.x() - 1.0f) < 1e-4f &&
+              std::fabs(p.fill.tiling.y() - 1.0f) < 1e-4f)
+            << "整键皮应当一格铺满：tiling=(" << p.fill.tiling.x() << ","
+            << p.fill.tiling.y() << ")";
+        // 圆角跟主题（本测试主题 6 ⇒ 设备像素仍是 6，scale=1）。
+        CHECK(std::fabs(p.radius - theme.corner_radius_px) < 1e-4f)
+            << "kFlipbook 模式的轮廓应跟主题圆角走";
+        CheckTint(p, skin.normal_tint, "整键模式常态仍用 normal_tint");
+        // 悬停一帧仍然只走到 25%：两种模式共用同一套渐变，不允许分叉。
+        const Plate2DCommand h = FrameF(hover, kDtMs);
+        CheckTint(h, Color{0.2f + 0.8f * 0.25f, 0.2f + 0.4f * 0.25f, 0.2f, 1.0f},
+                  "整键模式的 hover 渐变应与板材模式一致（25%）");
+        LOG(INFO) << "[PASS] kFlipbook 模式：无边框 / 一格铺满 / tint 语义同 kPlate";
+    }
 }
 
 }  // namespace

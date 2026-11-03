@@ -124,7 +124,8 @@ struct SpDemoState {
     uint32_t showcase_core_tex = 0;
     uint32_t showcase_rim_tex = 0;
     // 翻书按钮用的图集 id（由 app 在 Begin 前填；0 = 纯色，按钮退化为 tint 渐变）。
-    uint32_t button_tex = 0;
+    uint32_t button_tex = 0;        // 板材模式（无缝平铺材质，如大理石）
+    uint32_t baked_button_tex = 0;  // 整键模式（DIY 烘培皮，如 metal 扫光）
     // 材质水波方式：0 = 关键帧溶解（旧）/ 1 = 正弦波 / 2 = 涟漪 / 3 = 噪声流。
     // 四种图集都是 4x4 / 16 帧，只是生成方式不同（见 assets/sp_ui/marble/README.md）。
     int wave_mode = 1;
@@ -186,13 +187,25 @@ inline constexpr float kSpUiDemoShowcaseH = 96.0f;
 inline constexpr float kSpUiDemoShowcaseW =
     (kUiDemoLeftW - 2.0f * kUiDemoMotorCardGap) / 3.0f;
 
-// 翻书按钮展示区（左列最下方空位；演示「normal 态走 flipbook、hover/pressed 靠 tint」）。
-inline constexpr float kUiDemoFbBtnHeaderY = 592.0f;
+// 翻书按钮展示区（左列最下方空位；演示两种模式 + hover/pressed 的 tint 渐变）。
+//   Row 1（kPlate）   ：三颗 170x38 —— flipbook 当核心填充，边框/圆角仍取主题。
+//   Row 2（kFlipbook）：三颗 104x52 —— 整块就是图集（无主题边框），形状靠主题圆角裁剪。
+// 行 2 用 2:1 的格子（104x52）⇒ 图集不被拉伸，烘培皮的倒角不会变形。
+inline constexpr float kUiDemoFbBtnHeaderY = 594.0f;
 inline constexpr float kUiDemoFbBtnY = 618.0f;
-inline constexpr float kUiDemoFbBtnH = 46.0f;
+inline constexpr float kUiDemoFbBtnH = 44.0f;
 inline constexpr float kUiDemoFbBtnW = 170.0f;
 inline constexpr float kUiDemoFbBtnGap = 12.0f;
-// 第 i 个翻书按钮的 box（布局坐标）。【对外导出】：脚本回放合成鼠标坐标也用它，
+
+inline constexpr float kUiDemoBakedBtnY = 668.0f;
+inline constexpr float kUiDemoBakedBtnH = 44.0f;
+inline constexpr float kUiDemoBakedBtnGap = 12.0f;
+// 三颗等分铺满左列（与上排同宽），高度 44 ⇒ 173x44，对应图集格的 3.95:1
+// （380x96）⇒ 烘培皮不被拉伸，倒角不变形。
+inline constexpr float kUiDemoBakedBtnW =
+    (kUiDemoLeftW - 2.0f * kUiDemoBakedBtnGap) / 3.0f;
+
+// 第 i 颗按钮的 box（布局坐标）。【对外导出】：脚本回放合成鼠标坐标也用它，
 // 不另写一份坐标（否则面板一改，脚本就默默点空了）。
 inline SpRect UiDemoFlipbookButtonRect(int i) {
     CHECK_GE(i, 0) << "翻书按钮下标必须 >= 0";
@@ -201,6 +214,14 @@ inline SpRect UiDemoFlipbookButtonRect(int i) {
                                     (kUiDemoFbBtnW + kUiDemoFbBtnGap),
                    kUiDemoFbBtnY},
                   {kUiDemoFbBtnW, kUiDemoFbBtnH}};
+}
+inline SpRect UiDemoBakedButtonRect(int i) {
+    CHECK_GE(i, 0) << "整键按钮下标必须 >= 0";
+    CHECK_LT(i, 3) << "整键按钮下标必须 < 3";
+    return SpRect{{kUiDemoPad + static_cast<float>(i) *
+                                    (kUiDemoBakedBtnW + kUiDemoBakedBtnGap),
+                   kUiDemoBakedBtnY},
+                  {kUiDemoBakedBtnW, kUiDemoBakedBtnH}};
 }
 
 
@@ -456,38 +477,64 @@ inline void DrawSpUIDemoPanel(SpUi& ui, RenderCommandList* cmd, SpDemoState& st)
         }
     }
 
-    // ---- 翻书按钮（normal 态播 flipbook；hover / pressed 只改 tint）----
-    // 三颗按钮**只有** normal_to_hover_delay 不同：同一个鼠标动作能直接看出
-    // 悬停亮起 / 离开变暗的快慢（0.1s 一瞬、1.5s 明显拖尾）。
-    ui.Text("翻书按钮（normal 走 flipbook，hover/pressed 靠 tint 渐变）",
+    // ---- 翻书按钮（两种模式）----
+    // 上面一排 kPlate：flipbook 只当核心填充，圆角/边框仍是主题的板材（旧模式）。
+    // 下面一排 kFlipbook：整块按钮就是那张图集（新模式，用户 DIY 的整键皮）。
+    // 两排都只有 normal_to_hover_delay 不同 ⇒ 同一个鼠标动作能看出亮起的快慢。
+    ui.Text("按钮两模式：上=板材（flipbook 填核心 + 主题银边）/ 下=整键 flipbook",
             SpRect{{kUiDemoPad, kUiDemoFbBtnHeaderY}, {kUiDemoLeftW, kUiDemoSectionH}});
     {
-        struct FbButtonDesc {
+        struct BtnDesc {
             const char* label;
             float delay_s;
         };
-        const FbButtonDesc kButtons[3] = {
-            {"翻书按钮 0.1s", 0.1f},
-            {"翻书按钮 0.5s", 0.5f},
-            {"翻书按钮 1.5s", 1.5f},
+        const BtnDesc kPlateButtons[3] = {
+            {"板材 0.1s", 0.1f},
+            {"板材 0.5s", 0.5f},
+            {"板材 1.5s", 1.5f},
         };
         for (int i = 0; i < 3; ++i) {
             SpButtonSkin skin;
+            skin.style = SpButtonSkin::Style::kPlate;
             skin.texture_id = st.button_tex;
             skin.tiles_x = 4;          // 与 assets/sp_ui/marble 的 4x4 图集一致
             skin.tiles_y = 4;
             skin.fps = 8.0f;           // normal 态一直在翻（"活着"的石头）
-            skin.material_px = 120.0f; // 一格图集 = 120 屏幕像素
-            // 三态只差亮度/色温：暗石 → 暖亮 → 沉下去。
-            // hover 不拉到 1.0：白字落在亮底上会烫（对比度降太多），
-            // 0.82 已经明显亮一档，字仍清晰。
+            skin.material_px = 170.0f; // 一格图集 = 按钮宽 ⇒ 控件内无平铺接缝
             skin.normal_tint = {0.55f, 0.57f, 0.60f, 1.0f};
             skin.hover_tint = {0.82f, 0.75f, 0.60f, 1.0f};
             skin.pressed_tint = {0.30f, 0.33f, 0.38f, 1.0f};
-            skin.normal_to_hover_delay = kButtons[i].delay_s;
-            if (ui.Button(kButtons[i].label, UiDemoFlipbookButtonRect(i), skin)) {
-                st.log.Append(st.time_s, "点击【%s】delay=%.1fs", kButtons[i].label,
-                              kButtons[i].delay_s);
+            skin.normal_to_hover_delay = kPlateButtons[i].delay_s;
+            if (ui.Button(kPlateButtons[i].label, UiDemoFlipbookButtonRect(i), skin)) {
+                st.log.Append(st.time_s, "点击【%s】delay=%.1fs",
+                              kPlateButtons[i].label, kPlateButtons[i].delay_s);
+            }
+        }
+
+        // 整键皮（图集自己画好了金属拉丝 + 扫光 + 倒角）：material_px 保持 0，
+        // 让一格图集正好铺满整颗按钮；tint 三态只负责“亮起来/沉下去”。
+        const BtnDesc kBakedButtons[3] = {
+            {"整键 0.1s", 0.1f},
+            {"整键 0.5s", 0.5f},
+            {"整键 1.5s", 1.5f},
+        };
+        for (int i = 0; i < 3; ++i) {
+            SpButtonSkin skin;
+            skin.style = SpButtonSkin::Style::kFlipbook;
+            skin.texture_id = st.baked_button_tex;
+            skin.tiles_x = 4;
+            skin.tiles_y = 4;
+            skin.fps = 10.0f;          // 扫光带一圈 1.6s
+            skin.material_px = 0.0f;   // 一格图铺满整颗按钮（烘培皮不平铺）
+            // tint 是这个图集唯一的“状态语言”：常态压暗、hover 回到本色并偏暖、
+            // pressed 再沉下去。亮到 1.0 就打住 —— 再往上白字会糊在底上。
+            skin.normal_tint = {0.62f, 0.63f, 0.65f, 1.0f};
+            skin.hover_tint = {1.06f, 1.00f, 0.90f, 1.0f};
+            skin.pressed_tint = {0.30f, 0.31f, 0.34f, 1.0f};
+            skin.normal_to_hover_delay = kBakedButtons[i].delay_s;
+            if (ui.Button(kBakedButtons[i].label, UiDemoBakedButtonRect(i), skin)) {
+                st.log.Append(st.time_s, "点击【%s】delay=%.1fs",
+                              kBakedButtons[i].label, kBakedButtons[i].delay_s);
             }
         }
     }

@@ -220,6 +220,19 @@ struct SpRect {
 // 注意：hover_ratio 按**按钮 box**（与其它跨帧状态槽同一套识别规则）归属，
 //       两个同 box 同屏的按钮会被当成同一个 —— 别这么排版。
 struct SpButtonSkin {
+    // 按钮的两种外观（Danis 2026-11-03：就这两种）。
+    enum class Style {
+        // 旧模式：主题的圆角板材（圆角/边框/剖面都是主题的），flipbook 只当**核心填充**。
+        // 适合「无缝平铺材质」（大理石、拉丝等），边框仍由主题银边提供。
+        kPlate,
+        // 新模式：**整块按钮就是这张 flipbook** —— 不画主题边框、不用主题填充色，
+        // 图集得自己把形状/倒角/高光画好（背景全铺满，四角是图里的像素）。
+        // 轮廓仍按主题的 `corner_radius_px` 做 SDF 裁剪（想要直角就把主题半径设 0）。
+        // 适合「用户 DIY 的整键皮」（一块完整的按钮背景图序列）。
+        kFlipbook,
+    };
+    Style style = Style::kPlate;
+
     // 底板图集纹理 id。0 = 不启用材质（纯色 fill），但 hover/pressed 的 tint
     // 渐变仍然生效（tint 就是纯色体本身）。
     uint32_t texture_id = 0;
@@ -228,6 +241,7 @@ struct SpButtonSkin {
     float fps = 0.0f;          // normal 态翻书帧率；0 = 静止在第 0 帧
     float material_px = 0.0f;  // 一格图集对应的屏幕像素（布局单位，随 ui_scale
                                // 一起放大）；0 = 整张图铺满一块按钮
+                               // （kFlipbook 模式**应当**保持 0：整键皮不该被平铺）
 
     // 三种状态的 tint（乘在图集上 / 无材质时即本体色）。
     // 默认全 1 = 只翻书、状态不变色 —— 状态反馈是美术决定，本库不猜。
@@ -458,7 +472,8 @@ private:
     void PushPlateInternal(const SpRect& r, Color fill, Color border,
                            float radius, bool fill_textured,
                            bool border_textured,
-                           const PlateLayer* fill_layer = nullptr);
+                           const PlateLayer* fill_layer = nullptr,
+                           bool draw_border = true);
     // 由主题字段造一层材质（fill / border 共用同一套规则）。
     // textured = false 时该层退回纯色（不采样纹理；图集/帧率仍保留，不影响其它层）。
     PlateLayer MakeLayer(const SpRect& box_device, bool is_border,
