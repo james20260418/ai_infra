@@ -741,6 +741,32 @@ void CheckButtonHoverRatio() {
         LOG(INFO) << "[PASS] kFlipbook 模式：无边框 / 一格铺满 / tint 语义同 kPlate";
     }
 
+    // f2) kFlipbook + texture_id = 0 的降级：纯 tint 色块（文档写明的 fallback）。
+    //      demo 找不到图集时走的就是这条路，所以得钉住：不采样、不留边框带、
+    //      颜色就是 normal_tint（不是黑、也不是白）。
+    {
+        SpUi uin;
+        SpButtonSkin no_tex = skin;
+        no_tex.style = SpButtonSkin::Style::kFlipbook;
+        no_tex.texture_id = 0;
+        no_tex.material_px = 0.0f;
+        jpov::InputSnapshot idle{};
+        idle.mouse_x = 350.0f;
+        idle.mouse_y = 350.0f;
+        RenderCommandList cmds;
+        uin.Begin(idle, theme, 400.0f, 400.0f, kDtMs, 0.0f);
+        uin.Button("activate", box, no_tex);
+        uin.End();
+        uin.Emit(&cmds);
+        CHECK_EQ(cmds.plate2d.size(), 1u);
+        const Plate2DCommand p = cmds.plate2d[0];
+        CHECK_EQ(p.fill.texture_id, 0u) << "texture_id=0 必须退化为不采样";
+        CHECK(std::fabs(p.border_width) < 1e-4f)
+            << "kFlipbook 无图集时也不该有边框带";
+        CheckTint(p, no_tex.normal_tint, "无图集时就是 normal_tint 色块");
+        LOG(INFO) << "[PASS] kFlipbook + texture_id=0：降级为纯 tint 色块（无采样/无边框）";
+    }
+
     // g) 跨帧回归：同一帧里同一个 box 被画两次（两颗按钮叠在同一点、或调用方
     //    不小心画了两遍）只能推进一次。以前的实现会按调用次数累加 dt ⇒ 渐变
     //    速度静默翻倍（0.25 → 0.5 一帧到半亮），肉眼很难发现是「时间尺度错了」。
@@ -820,6 +846,102 @@ void CheckButtonHoverRatio() {
     }
 }
 
+// ---- 11. 跨帧兜底：控件在「按住期间」被移出画面，槽位必须被释放 ----
+//
+// 这是 2026-11-03 第二轮 review **实测复现**的老 bug（不是本 PR 引入）：
+// `ButtonImpl` / `SliderFloat` 在 `OutsideViewport` 早退之后就永远走不到自己的
+// `Release` 分支，于是：按住 A → A 被隐藏/滚出视口 → 松开 → 槽位永久被 A 占着
+// ⇒ 之后所有按钮都按不动（只显示 hover 色），所有滑条也拖不动，直到 A 再被
+// 绘制一次。修复在 `SpUi::Begin`：左键已不是 Drag/Hold ⇒ 无条件释放这两个槽位。
+//
+// 两条断言分别钉按钮与滑条（共用同一类槽位 + 同一种早退路径）。
+void CheckCulledControlReleasesState() {
+    const SpTheme theme = MakeTheme();
+    const SpRect box_a{{10.0f, 10.0f}, {200.0f, 40.0f}};
+    const SpRect box_b{{10.0f, 100.0f}, {200.0f, 40.0f}};
+
+    // --- 按钮 ---
+    {
+        SpButtonSkin skin;
+        skin.texture_id = 0;
+        skin.normal_tint = {0.5f, 0.5f, 0.5f, 1.0f};
+        skin.hover_tint = {0.8f, 0.8f, 0.8f, 1.0f};
+        skin.pressed_tint = {0.1f, 0.1f, 0.1f, 1.0f};
+        skin.normal_to_hover_delay = 10.0f;   // 让 hover 变化极小，按下色可区分
+
+        SpUi ui;
+        auto Frame = [&](const jpov::InputSnapshot& in, bool draw_a,
+                         bool draw_b) {
+            RenderCommandList cmds;
+            ui.Begin(in, theme, 400.0f, 400.0f, 33.0f, 0.0f);
+            if (draw_a) ui.Button("A", box_a, skin);
+            if (draw_b) ui.Button("B", box_b, skin);
+            ui.End();
+            ui.Emit(&cmds);
+            return cmds.plate2d;
+        };
+        jpov::InputSnapshot hold_a{};
+        hold_a.mouse_x = 20.0f;
+        hold_a.mouse_y = 20.0f;
+        hold_a.left.raw = -2;                 // Hold 在 A 内
+        CHECK_EQ(Frame(hold_a, true, false).size(), 1u);
+        CHECK_EQ(Frame(hold_a, false, false).size(), 0u);   // A 消失，仍按住
+        jpov::InputSnapshot released{};
+        released.mouse_x = 350.0f;
+        released.mouse_y = 350.0f;
+        CHECK_EQ(Frame(released, false, false).size(), 0u); // A 仍消失，松开
+
+        jpov::InputSnapshot hold_b{};
+        hold_b.mouse_x = 20.0f;
+        hold_b.mouse_y = 110.0f;
+        hold_b.left.raw = -2;                 // 想在 B 上重新按下
+        const auto cmds = Frame(hold_b, false, true);
+        CHECK_EQ(cmds.size(), 1u);
+        CHECK(std::fabs(cmds[0].fill_color.r - skin.pressed_tint.r) < 1e-4f)
+            << "A 消失后 B 必须能重新按下（槽位被旧持有者卡死）：fill_color.r="
+            << cmds[0].fill_color.r << "，pressed=" << skin.pressed_tint.r;
+        LOG(INFO) << "[PASS] 按住 A 期间 A 消失 → 松开 → B 仍能按下（槽位不被卡死）";
+    }
+
+    // --- 滑条（同一类槽位、同一种早退路径）---
+    {
+        SpUi ui;
+        float value_a = 50.0f;
+        float value_b = 50.0f;
+        auto Frame = [&](const jpov::InputSnapshot& in, bool draw_a,
+                         bool draw_b) {
+            RenderCommandList cmds;
+            ui.Begin(in, theme, 400.0f, 400.0f, 33.0f, 0.0f);
+            if (draw_a) ui.SliderFloat("A", &value_a, box_a, 0.0f, 100.0f);
+            if (draw_b) ui.SliderFloat("B", &value_b, box_b, 0.0f, 100.0f);
+            ui.End();
+            ui.Emit(&cmds);
+        };
+        jpov::InputSnapshot drag_a{};
+        drag_a.mouse_x = box_a.pos.x() + box_a.size.x() * 0.5f;
+        drag_a.mouse_y = box_a.pos.y() + 5.0f;
+        drag_a.left.raw = -1;                 // Drag 在 A 上
+        Frame(drag_a, true, false);
+        const float a_after_drag = value_a;
+        CHECK(a_after_drag > 40.0f && a_after_drag < 60.0f)
+            << "A 的拖拽本身应该生效：" << a_after_drag;
+        Frame(drag_a, false, false);          // A 消失，仍按住
+        jpov::InputSnapshot released{};
+        released.mouse_x = 350.0f;
+        released.mouse_y = 350.0f;
+        Frame(released, false, false);        // A 仍消失，松开
+
+        jpov::InputSnapshot drag_b{};
+        drag_b.mouse_x = box_b.pos.x() + box_b.size.x() * 0.9f;
+        drag_b.mouse_y = box_b.pos.y() + 5.0f;
+        drag_b.left.raw = -1;                 // 想拖 B 到 90%
+        Frame(drag_b, false, true);
+        CHECK(value_b > 80.0f)
+            << "A 消失后 B 必须能重新拖动（槽位被旧持有者卡死）：" << value_b;
+        LOG(INFO) << "[PASS] 拖拽 A 期间 A 消失 → 松开 → B 仍能拖动";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -834,6 +956,7 @@ int main() {
     CheckLayerForScaleInvariance();
     CheckInteractionStateMachine();
     CheckButtonHoverRatio();
+    CheckCulledControlReleasesState();
     CheckDegenerateInputs();
     LOG(INFO) << "===== sp_ui gold 全部通过 =====";
     return 0;

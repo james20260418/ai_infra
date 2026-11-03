@@ -617,6 +617,12 @@ private:
                 held_box = SpRect{};
             }
         }
+        // 无条件释放（跨帧兜底专用）：不看持有者是谁。调用点必须能自己保证
+        // “这个槽位在本帧已经不可能有意义”（例如左键已经松开）—— 见 SpUi::Begin。
+        void ReleaseAny() {
+            is_held = false;
+            held_box = SpRect{};
+        }
 
     private:
         // 字段私有：只有 SpUi 的成员函数能改，外部无法绕过 Acquire/Release

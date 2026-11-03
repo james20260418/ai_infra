@@ -52,9 +52,10 @@ std::string ExeDir() {
 std::string ExeDir() { return std::string(); }
 #endif
 
-// 材质查找顺序：构建产物目录 → 可执行文件目录 → 仓库 assets（两份：marble / button）。
+// 素材查找顺序：构建产物目录 → 可执行文件目录 → 仓库 assets（两份：marble / button）。
 // 与 strip viewer 同一套约定（产物目录里由 build 脚本同构拷贝）。
-std::string ResolveMarbleTexture(const char* file_name) {
+// 名字不叫 ResolveMarbleTexture：它现在也解析 button/ 下的整键皮，叫 marble 会误导。
+std::string ResolveAssetTexture(const char* file_name) {
     const std::string d = ExeDir();
     const std::string rels[] = {
         std::string("textures/") + file_name,
@@ -445,7 +446,7 @@ int main(int argc, char** argv) {
         tex_opt.mipmap = false;
         uint32_t ids[4] = {0, 0, 0, 0};
         for (int i = 0; i < 4; ++i) {
-            const std::string p = ResolveMarbleTexture(kAtlasFiles[i]);
+            const std::string p = ResolveAssetTexture(kAtlasFiles[i]);
             if (p.empty()) {
                 LOG(WARNING) << "找不到材质图集：" << kAtlasFiles[i]
                              << "（该水波选项将退化为纯色）";
@@ -458,7 +459,7 @@ int main(int argc, char** argv) {
 
         // 整键皮图集（kFlipbook 模式的按钮）：专门为本模式生成的金属扫光序列。
         const std::string baked =
-            ResolveMarbleTexture("plate_button_steel_4x4.png");
+            ResolveAssetTexture("plate_button_steel_4x4.png");
         if (baked.empty()) {
             LOG(WARNING) << "找不到整键按钮图集 plate_button_steel_4x4.png"
                          << "（整键模式会退化为纯色 tint 渐变）";

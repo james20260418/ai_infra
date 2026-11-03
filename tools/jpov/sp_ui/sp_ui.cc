@@ -100,6 +100,16 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
         << "SpTheme.plate_border_flipbook_fps 必须 >= 0";
     input_ = &input;
     theme_ = theme;
+    // 跨帧兜底（2026-11-03 review 实测）：按下 / 拖动槽位只在「左键仍按住」时才有
+    // 意义。如果控件在按住期间被隐藏、滚出视口或被换掉，ButtonImpl / SliderFloat
+    // 里的释放分支根本不会被调用 ⇒ 槽位永久卡住。实测症状：按住 A → A 消失 →
+    // 松开 → 之后所有按钮都按不动（只显示 hover 色），直到 A 再次被绘制。
+    // 这里按输入统一清：左键已不是 Drag/Hold ⇒ 两个槽位必然已经无效。
+    // （text_focus_ 不在此列：焦点本来就该跨帧保持，跟“按住”无关。）
+    if (!input.left.IsDrag() && !input.left.IsHold()) {
+        button_press_.ReleaseAny();
+        slider_drag_.ReleaseAny();
+    }
     // 缩放：所有「长度」类主题字段同步乘倍率（计数字段如 plate_tiling/tiles 不乘）。
     // 这样控件 box 放大后，字号/内边距/行高/圆角/线宽/材质尺度仍然互相匹配。
     theme_.font_size *= ui_scale_;
@@ -288,6 +298,16 @@ bool SpUi::Button(const char* label, const SpRect& box, const SpButtonSkin& skin
     CHECK_GE(skin.material_px, 0.0f) << "SpButtonSkin.material_px 必须 >= 0";
     CHECK_GE(skin.normal_to_hover_delay, 0.0f)
         << "SpButtonSkin.normal_to_hover_delay 必须 >= 0";
+    // inf 会绕过上面的 >= 0（CHECK_GE(inf, 0) 成立，但语义是垃圾）：
+    //   fps = inf        → time * fps = inf → wrap 算出 NaN 帧号 → UV 全 NaN；
+    //   material_px = inf → tiling ≈ 0 → 整张图被挤成一个点；
+    //   delay = inf      → 每帧 step = 0 → hover 永远不亮（静默失效）。
+    // NaN 已被 CHECK_GE 拦住（NaN >= 0 为假），这里只补 inf。
+    CHECK(std::isfinite(skin.fps)) << "SpButtonSkin.fps 必须是有限值";
+    CHECK(std::isfinite(skin.material_px))
+        << "SpButtonSkin.material_px 必须是有限值";
+    CHECK(std::isfinite(skin.normal_to_hover_delay))
+        << "SpButtonSkin.normal_to_hover_delay 必须是有限值";
     // 格数是 int 乘法（FlipbookDesc::frame_count）：两个大数相乘会溢出成负数，
     // 后面 ResolveFlipbookFrame 的 wrap 会算出负帧号、UV 直接乱掉。这里先用
     // int64 校验一遍乘积 —— 不额外设艺术上限，只拒绝会让算术失效的输入。
