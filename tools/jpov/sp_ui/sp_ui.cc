@@ -1048,11 +1048,17 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
             caret = CaretIndexForX(buffer, cp_len, mouse_text_x);
         }
     } else if (press_elsewhere) {
-        // 按在别处（含被弹层盖住的区域）：失焦。仅当本框正是持有者时生效。
+        // 按在别处（含被弹层盖住的区域）：失焦。
+        // select_anchor_ 是「聚焦框」的共享字段：只有**本帧开始前真的持有**
+        // 焦点、且在 Release 里成功放手的那个框才有权清它。若焦点已被本帧
+        // 先画的另一个框抢走（同帧按下另一个框），这里再写就会踩掉对方的锚点。
         if (is_focused) {
+            const bool was_owner = text_focus_.IsHeldBy(b);
             text_focus_.Release(b);
-            select_anchor_ = input_caret_;  // 失焦即取消选区（不变量：anchor == caret）
-            owns_caret = false;
+            owns_caret = false;  // 本框本帧不再回写光标（哪怕槽位已易主）。
+            if (was_owner) {
+                select_anchor_ = input_caret_;  // 失焦即取消选区（anchor == caret）
+            }
         }
     }
 
@@ -1080,10 +1086,13 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
                 anchor = caret;
                 owns_caret = true;
             } else {
+                // 同上：共享的光标/锚点只由「原持有者」清，避免踩掉同帧
+                // 先画、已经接管焦点的另一个输入框。
+                const bool was_owner = text_focus_.IsHeldBy(b);
                 text_focus_.Release(b);
-                if (!text_focus_.IsHeldBy(b)) {
+                owns_caret = false;
+                if (was_owner) {
                     select_anchor_ = input_caret_;
-                    owns_caret = false;
                 }
             }
         }
@@ -1096,9 +1105,12 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
         const KeyState& enter = in.GetKey(KeyCode::Enter);
         const KeyState& esc = in.GetKey(KeyCode::Escape);
         if (enter.IsClick() || esc.IsClick()) {
-            text_focus_.Release(b);  // 回车/取消 → 失焦（本框为持有者）。
-            select_anchor_ = input_caret_;
+            const bool was_owner = text_focus_.IsHeldBy(b);
+            text_focus_.Release(b);  // 回车/取消 → 失焦（仅当本框为持有者）。
             owns_caret = false;
+            if (was_owner) {
+                select_anchor_ = input_caret_;  // 失焦即取消选区
+            }
         } else {
             // 某键本帧的动作次数（Click 帧 = click_count；Hold 帧 = 阈值重复）。
             const auto actions_of = [&](KeyCode key) -> int {

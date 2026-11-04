@@ -342,7 +342,8 @@ public:
     //     剪贴板通过 SetClipboard 注入（见下）；未注入时退化为**进程内剪贴板**，
     //     所以 Ctrl+C/V 在无窗口的 CPU 测试里也能用。粘贴会剔除/替换换行、Tab 等
     //     控制字符（单行控件），并按整码点截断到 buffer 容量（不会切出半个字）。
-    //   - Ctrl/Alt/Super 按住时**不插入字母**（否则 Ctrl+C 会同时插入一个 'c'）。
+    //   - Ctrl/Alt/Super 按住时**不插入任何可打印字符**（否则 Ctrl+C 会同时
+    //     插入一个 'c'、Ctrl+Shift+1 会插个 '!'）。
     //   - Enter/Escape → 失焦（不改变 buffer），选区一并清掉。
     //   - 键盘 hold 重复（150ms 阈值）对可打印字符/Backspace/Delete/方向键均生效。
     // 返回：本帧**帧末**是否聚焦（用于感知回车/焦点丧失；字符改动经 buffer 体现）。
