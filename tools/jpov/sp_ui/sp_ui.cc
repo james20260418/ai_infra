@@ -47,13 +47,13 @@ int Utf8SeqLen(unsigned char lead) {
         return 1;
     }
     if ((lead & 0xE0) == 0xC0) {
-        return 2;
+        return (lead >= 0xC2) ? 2 : 1;  // C0/C1 = overlong，非法。
     }
     if ((lead & 0xF0) == 0xE0) {
         return 3;
     }
     if ((lead & 0xF8) == 0xF0) {
-        return 4;
+        return (lead <= 0xF4) ? 4 : 1;  // F5..F7 超出 U+10FFFF。
     }
     return 1;
 }
@@ -74,6 +74,26 @@ int Utf8CpBytes(const char* s, size_t byte_len, size_t byte_off) {
         const unsigned char c = static_cast<unsigned char>(s[byte_off + i]);
         if ((c & 0xC0) != 0x80) {
             return 1;  // 续字节不合规：首个字节自成一个“坏字符”。
+        }
+    }
+    // 语义合法性（防止把 overlong / 代理区 / 超出 U+10FFFF 的串整段搬进 buffer）：
+    //   2 字节：C0/C1 是 overlong → Utf8SeqLen 已按 1 处理。
+    //   3 字节：E0 的次字节必须 >= A0；ED 的次字节必须 < A0（避开 U+D800..DFFF）。
+    //   4 字节：F0 的次字节必须 >= 90；F4 的次字节必须 < 90（<= U+10FFFF）；F5+ 非法。
+    const unsigned char c1 = static_cast<unsigned char>(s[byte_off + 1]);
+    if (n == 3) {
+        if (lead == 0xE0 && c1 < 0xA0) {
+            return 1;
+        }
+        if (lead == 0xED && c1 >= 0xA0) {
+            return 1;
+        }
+    } else if (n == 4) {
+        if (lead == 0xF0 && c1 < 0x90) {
+            return 1;
+        }
+        if (lead == 0xF4 && c1 >= 0x90) {
+            return 1;
         }
     }
     return n;
@@ -108,20 +128,26 @@ size_t Utf8ByteOffset(const char* s, size_t byte_len, int cp_index) {
 // 把外部剪贴板文本整理成「可安全插进单行 UTF-8 buffer」的内容：
 //   - 换行 / 回车 / Tab / 其它 C0 控制字符 / DEL → 单个空格（单行控件）；
 //   - 非法/截断的 UTF-8 字节直接丢弃（宁可少几个字，也不能把 buffer 弄坏）。
-std::string SanitizePastedText(const char* text) {
+std::string SanitizePastedText(const char* text, size_t max_bytes) {
     std::string out;
-    if (text == nullptr) {
+    if (text == nullptr || max_bytes == 0) {
         return out;
     }
     const size_t byte_len = std::strlen(text);
+    // 扫描上限：输出已满就没必要继续读；每字节最多产出一个码点，4 倍 + 8 足够
+    // 覆盖“全是 4 字节 emoji/CJK”的情况，也防止被几百 MB 的剪贴板拖死。
+    const size_t scan_limit = std::min(byte_len, max_bytes * 4 + 8);
     size_t i = 0;
-    while (i < byte_len) {
+    while (i < scan_limit && out.size() < max_bytes) {
         const unsigned char c = static_cast<unsigned char>(text[i]);
         if (c < 0x20 || c == 0x7F) {
             // \r\n 只出一个空格，避免 Windows 剪贴板在行尾多吐一个空格。
             if (c == '\r' && i + 1 < byte_len && text[i + 1] == '\n') {
                 ++i;
                 continue;
+            }
+            if (out.size() + 1 > max_bytes) {
+                break;
             }
             out.push_back(' ');
             ++i;
@@ -136,6 +162,9 @@ std::string SanitizePastedText(const char* text) {
         if (n == 1) {
             ++i;  // 非法序列：丢弃这个字节。
             continue;
+        }
+        if (out.size() + static_cast<size_t>(n) > max_bytes) {
+            break;  // 放不下完整码点：停在码点边界。
         }
         out.append(text + i, static_cast<size_t>(n));
         i += static_cast<size_t>(n);
@@ -939,6 +968,10 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
     CHECK(buffer != nullptr) << "InputText buffer must not be null";
     CHECK_GE(buffer_size, 2u) << "InputText requires buffer_size >= 2 "
                               << "(1 char + null terminator), got " << buffer_size;
+    // 光标/锚点/码点长度都是 int（与渲染层的像素精度一样，没必要上 64 位）：
+    // 超过 int 的文本字段不是本控件的使用场景，直接崩掉比静默溢出好。
+    CHECK_LT(buffer_size, static_cast<size_t>(std::numeric_limits<int>::max()))
+        << "InputText: buffer_size 超过 int 上限（码点索引是 int）";
     const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不聚焦、不写值。
@@ -1038,6 +1071,9 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
             const bool hits =
                 !PopupCoversPoint(cx, cy_click) && PointInRect(b, cx, cy_click);
             if (hits) {
+                if (!is_focused) {
+                    input_scroll_px_ = 0.0f;  // 新聚焦：滚动归零（与按下路径一致）。
+                }
                 text_focus_.Acquire(b);
                 caret = CaretIndexForX(buffer, cp_len,
                                        cx - text_left + input_scroll_px_);
@@ -1163,7 +1199,8 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
                 }
                 if (paste_key > 0) {
                     // 单行控件：换行/Tab 变空格；非法 UTF-8 字节丢弃（不弄坏 buffer）。
-                    const std::string pasted = SanitizePastedText(ClipboardText());
+                    const std::string pasted =
+                        SanitizePastedText(ClipboardText(), cap);
                     if (!pasted.empty()) {
                         insert_utf8(pasted.c_str());
                     }
@@ -1290,29 +1327,35 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
 
     // 水平滚动：先把滚动量夹到“光标恰可见”的区间（双向），正文/选区/光标
     // 三者共用同一个值 —— 否则选区或光标会比正文晚一帧、看着像在抖。
+    // ⚠️ input_scroll_px_ 是**当前聚焦框**的跨帧状态：非聚焦框必须按 0 画，
+    // 否则它会跟着另一个框滚，长文本时横向错位（本次一并修）。
     const float caret_prefix_w =
         (focused_eff && caret > 0)
             ? MeasureTextPrefixWidth(buffer, caret, theme_.font_size)
             : 0.0f;
     if (focused_eff) {
+        // visible_w 先 clamp 到 >= 0：box 比左右 padding 还窄时 text_right <
+        // text_left，直接算会让 min_scroll > max_scroll —— std::clamp 要求
+        // lo <= hi，否则是 UB（这种退化 box 不该把滚动量变成垃圾值）。
+        const float visible_w = std::max(0.0f, text_right - text_left);
         const float max_scroll = caret_prefix_w;
-        const float min_scroll =
-            std::max(0.0f, caret_prefix_w - (text_right - text_left));
+        const float min_scroll = std::max(0.0f, caret_prefix_w - visible_w);
         input_scroll_px_ = std::clamp(input_scroll_px_, min_scroll, max_scroll);
     }
 
     // 选区底色：垫在正文下面的一条带 alpha 的板（不画边框、不采样材质）。
     // 两端按当前滚动量换算，并**夹进文本区域**，不让高亮溢出输入框。
+    const float scroll = focused_eff ? input_scroll_px_ : 0.0f;
     const bool show_selection = focused_eff && anchor != caret;
     if (show_selection && len > 0) {
         const float sel_x0 =
             text_left +
             MeasureTextPrefixWidth(buffer, selection_begin(), theme_.font_size) -
-            input_scroll_px_;
+            scroll;
         const float sel_x1 =
             text_left +
             MeasureTextPrefixWidth(buffer, selection_end(), theme_.font_size) -
-            input_scroll_px_;
+            scroll;
         const float sel_left = std::max(sel_x0, text_left);
         const float sel_right = std::min(sel_x1, text_right);
         const float sel_h = std::max(2.0f, b.size.y() * 0.62f);
@@ -1333,7 +1376,7 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
         // 与字形错位）。
         Text2DCommand c;
         c.text = buffer;
-        c.pos = {text_left - input_scroll_px_, cy};
+        c.pos = {text_left - scroll, cy};
         c.font_size = theme_.font_size;
         c.color = theme_.foreground;
         c.alignment = TextAlignment::kMidLeft;
@@ -1356,7 +1399,7 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
     // 折叠/取消选中后出现（Danis：方向键按下直接换到单竖杠状态）。
     if (focused_eff && anchor == caret) {
         const float caret_w = std::max(1.0f, theme_.border_width_px);
-        const float cx = text_left + caret_prefix_w - input_scroll_px_;
+        const float cx = text_left + caret_prefix_w - scroll;
         const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
         PushPlate(SpRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
                   theme_.accent, theme_.accent, 0.0f);

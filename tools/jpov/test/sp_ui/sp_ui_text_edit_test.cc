@@ -430,7 +430,9 @@ void CheckTwoInputBoxesIsolation() {
     CHECK_EQ(std::string(buf_a), std::string("helloX"));
     CHECK_EQ(std::string(buf_b), std::string("world"));
 
-    // 再聚焦 B（点 B 内部）并输入 Y：A 的文本不能变。
+    // A 里做一次全选，然后点 B：A 失焦时选区必须一起清掉（否则回到 A 时
+    // 那个旧选区会突然生效，一次退格删掉整段）。
+    frame(KeyTap(KeyCode::A, /*ctrl=*/true));
     press.mouse_x = box_b.pos.x() + kPad + kFontSize * 0.6f * 5.0f + 1.0f;
     press.mouse_y = box_b.pos.y() + 15.0f;
     press.left_press_x = press.mouse_x;
@@ -440,7 +442,95 @@ void CheckTwoInputBoxesIsolation() {
     frame(KeyTap(KeyCode::Y, /*ctrl=*/false, /*shift=*/true));
     CHECK_EQ(std::string(buf_a), std::string("helloX")) << "焦点转到 B 后 A 仍被改动";
     CHECK_EQ(std::string(buf_b), std::string("worldY"));
-    LOG(INFO) << "[PASS] 双输入框隔离：光标/选区不串框";
+
+    // 回到 A 的末尾按一次退格：只应删掉刚输入的 X（而不是 A 的旧全选）。
+    press.mouse_x = box_a.pos.x() + kPad + kFontSize * 0.6f * 6.0f + 1.0f;
+    press.mouse_y = box_a.pos.y() + 15.0f;
+    press.left_press_x = press.mouse_x;
+    press.left_press_y = press.mouse_y;
+    frame(press);
+    frame(Released());
+    frame(KeyTap(KeyCode::Backspace));
+    CHECK_EQ(std::string(buf_a), std::string("hello"))
+        << "失焦时旧选区没清掉：一次退格删了整段";
+    LOG(INFO) << "[PASS] 双输入框隔离：光标/选区不串框，失焦清选区";
+}
+
+// ---- 10. 非聚焦框不能跟着聚焦框横向滚动（共享 scroll 的老 bug）----
+void CheckUnfocusedBoxDoesNotScroll() {
+    const SpRect box_a = {{20.0f, 20.0f}, {60.0f, 30.0f}};
+    const SpRect box_b = {{20.0f, 70.0f}, {60.0f, 30.0f}};
+    char buf_a[32] = "abcdefghij";
+    char buf_b[32] = "0123456789";
+    SpUi ui;
+    SpTheme theme = SpTheme::Default(kFontSize);
+    jpov::RenderCommandList cmds;
+
+    auto frame = [&](const InputSnapshot& in) {
+        ui.Begin(in, theme, kWidth, kHeight, 1000.0f / 30.0f);
+        ui.InputText("a", buf_a, sizeof(buf_a), box_a);
+        ui.InputText("b", buf_b, sizeof(buf_b), box_b);
+        ui.End();
+        cmds.Clear();
+        ui.Emit(&cmds);
+    };
+
+    // 点 B 的右缘 → B 聚焦且光标靠后，触发 B 自身的横向滚动。
+    InputSnapshot press = Base();
+    press.mouse_x = box_b.pos.x() + box_b.size.x() - 1.0f;
+    press.mouse_y = box_b.pos.y() + 15.0f;
+    press.left.raw = -2;
+    press.left_press_x = press.mouse_x;
+    press.left_press_y = press.mouse_y;
+    frame(press);
+    frame(Released());
+
+    // 本帧 A 未聚焦：正文必须画在 text_left（scroll = 0），不跟着 B 滚。
+    const float expected_x = box_a.pos.x() + kPad;
+    bool found = false;
+    for (const jpov::Text2DCommand& t : cmds.text2d) {
+        if (t.text == "abcdefghij") {
+            found = true;
+            CHECK(std::fabs(t.pos.x() - expected_x) < 0.01f)
+                << "非聚焦框用了别人的滚动量：期望 x=" << expected_x
+                << "，实际 " << t.pos.x();
+        }
+    }
+    CHECK(found) << "没找到 A 框的正文指令";
+    LOG(INFO) << "[PASS] 非聚焦框不跟着聚焦框横向滚动";
+}
+
+// ---- 11. 超大剪贴板：按容量截断（不整段复制、不切半个字）----
+void CheckHugeClipboardIsBounded() {
+    std::string huge;
+    for (int i = 0; i < 1000; ++i) {
+        huge += "中";  // 3 字节/字，共 3000 字节
+    }
+    TextFixture f("", /*capacity=*/8);   // cap = 7 字节
+    FakeClipboard clip;
+    clip.text = huge;
+    f.EnableFakeClipboard(&clip);
+    Focus(&f);
+    f.Run(KeyTap(KeyCode::V, /*ctrl=*/true));
+    CHECK_EQ(std::string(f.buffer()), std::string("中中"))
+        << "超大剪贴板应按容量截断到整码点边界（cap=7 → 两个 3 字节汉字）";
+    CHECK_LE(std::strlen(f.buffer()), f.capacity() - 1);
+    LOG(INFO) << "[PASS] 超大剪贴板按容量截断";
+}
+
+// ---- 12. 非法 UTF-8（overlong / 代理区 / 超范围）粘贴时丢弃 ----
+void CheckInvalidUtf8Rejected() {
+    TextFixture f("");
+    FakeClipboard clip;
+    // C0 AF = overlong '/', ED A0 80 = U+D800（代理区）, F4 90 80 80 = > U+10FFFF。
+    clip.text = std::string("ok") + "\xC0" "\xAF" + "\xED" "\xA0" "\x80" +
+                "\xF4" "\x90" "\x80" "\x80";
+    f.EnableFakeClipboard(&clip);
+    Focus(&f);
+    f.Run(KeyTap(KeyCode::V, /*ctrl=*/true));
+    CHECK_EQ(std::string(f.buffer()), std::string("ok"))
+        << "overlong/代理区/超范围序列必须被丢弃（不能写进 buffer）";
+    LOG(INFO) << "[PASS] 非法 UTF-8 粘贴被拒绝";
 }
 
 }  // namespace
@@ -455,6 +545,9 @@ int main() {
     CheckPasteSanitizeAndCapacity();
     CheckCtrlDoesNotType();
     CheckTwoInputBoxesIsolation();
+    CheckUnfocusedBoxDoesNotScroll();
+    CheckHugeClipboardIsBounded();
+    CheckInvalidUtf8Rejected();
     LOG(INFO) << "===== sp_ui 输入框选区/剪贴板测试全部通过 =====";
     return 0;
 }
