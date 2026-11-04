@@ -141,4 +141,56 @@ bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4,
 #endif
 }
 
+bool RunFfmpegHstack(const std::string& left_mp4, const std::string& right_mp4,
+                     const std::string& out_mp4) {
+#ifndef _WIN32
+    const std::string crf = "18";
+    const std::string filter = "hstack=inputs=2";
+    std::vector<const char*> argv;
+    argv.reserve(20);
+    argv.push_back("ffmpeg");
+    argv.push_back("-y");
+    argv.push_back("-i");
+    argv.push_back(left_mp4.c_str());
+    argv.push_back("-i");
+    argv.push_back(right_mp4.c_str());
+    argv.push_back("-filter_complex");
+    argv.push_back(filter.c_str());
+    argv.push_back("-c:v");
+    argv.push_back("libx264");
+    argv.push_back("-pix_fmt");
+    argv.push_back("yuv420p");
+    argv.push_back("-crf");
+    argv.push_back(crf.c_str());
+    argv.push_back("-preset");
+    argv.push_back("medium");
+    argv.push_back(out_mp4.c_str());
+    argv.push_back(nullptr);
+
+    const int pid = fork();
+    if (pid == 0) {
+        execvp("ffmpeg", const_cast<char* const*>(argv.data()));
+        fprintf(stderr, "execvp ffmpeg 失败（未安装 ffmpeg？）: %s\n", strerror(errno));
+        _exit(127);
+    }
+    if (pid < 0) {
+        LOG(ERROR) << "fork() 启动 ffmpeg(hstack) 失败 (errno=" << errno << ")";
+        return false;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) {
+        LOG(ERROR) << "ffmpeg hstack 失败, exit="
+                   << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
+                   << ", 输出=" << out_mp4;
+    }
+    return ok;
+#else
+    (void)left_mp4; (void)right_mp4; (void)out_mp4;
+    LOG(ERROR) << "RunFfmpegHstack 暂不支持 Windows";
+    return false;
+#endif
+}
+
 }  // namespace jpov_viewer

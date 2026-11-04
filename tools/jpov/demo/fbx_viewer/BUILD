@@ -27,6 +27,8 @@ cc_library(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:animation_sampler",
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:mixamo23_skeleton",
+        "//tools/jpov/interface:skeleton_mannequin",
         "//tools/jpov/interface:skeleton_mesh",
         "//tools/jpov/interface:skeleton_retarget",
         "//tools/jpov/interface:skeleton_types",
@@ -43,6 +45,7 @@ cc_binary(
     srcs = ["jpov_fbx_viewer.cc"],
     deps = [
         ":fbx_viewer_app",
+        "//tools/jpov:viewer_output",
         "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",
