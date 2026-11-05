@@ -23,8 +23,12 @@
 | ⑤ | 写文件 | `fit/export_fbx_ascii.py` | `poses.json` | ASCII FBX 7.4（骨架 + 逐帧 `Lcl Rotation` 曲线） | **直接写文件，不经 Blender**：`Lcl Translation = rest_offset`、`Lcl Rotation = bind·pose`，bind 与官方 Mixamo 逐骨一致（§6 第 6 条） |
 | ⑥ | 回放/验收 | `jpov_fbx_viewer` | `.fbx`（+ 可选目标资产 `.glb`） | 交互窗口 / 单帧 PNG / 逐帧序列 / 双角度 mp4 / 指标 | Viewer 自带 GPU 双帧插值蒙皮；`--view 9` 蓝人模特（不依赖 glb）、`--view 10` 真皮角色、`--view 5` 红骨人 + 真皮对照 |
 
-> 两个入口都产出同一份契约的数据：Python（`fit/mocap_fit.py`）与 C++（`algo/`）输出的
-> `poses.json` **字段同构**，都能直接喂 `export_fbx_ascii.py`。日常产线走 C++；Python 保留作算法实验。
+> 两个入口的 `poses.json` **只有 `quat` 是同一语义**（每骨相对 bind 的局部旋转，可直接喂
+> `export_fbx_ascii.py`），其余不同：C++ 是完整产线（整体 yaw + 水平根位移 + 最低脚钉 `y=0`，
+> 额外多 `yaw_deg` / `foot_clearance_m` 两个诊断字段），Python 只有旋转 + 髖中心位移（无 yaw、无钉地）。
+> 所以：**算法实验可以用 Python，交付 FBX 一律用 C++**。
+> 另：两边的 `lift2d_t` 也不是逐位一致（平滑实现不同，主要差在单目不可观测的深度分量上；
+> 指标与 2D 叠图一致，别拿两份 JSON 逐骨对比）。
 
 ### 0.2 这套东西的基本属性（决定它能干什么、不能干什么）
 
@@ -73,13 +77,13 @@
 |---|---|
 | `extract/pose_extract.py` | 视频或图片目录 → `track.json`（MediaPipe，33 点 + 置信度） |
 | `fit/mixamo23.py` | Mixamo23 骨架的 Python 镜像（与 `interface/mixamo23_skeleton.h` 同表）+ FK |
-| `fit/mocap_fit.py` | **算法核心的 Python 版**：关键点 → 每骨方向 → swing 拟合 → 每帧 pose（4 种算法，与 C++ 同源） |
+| `fit/mocap_fit.py` | **算法实验的 Python 版**：关键点 → 每骨方向 → swing 拟合（`worldz` / `lift2d` / `lift2d_t` 三种；**不含整体朝向与脚钉地**，见 §0.1 注） |
 | `fit/export_fbx_ascii.py` | **pose → FBX（ASCII 7.4），直接写文件**，不经 Blender（推荐） |
 | `fit/export_fbx.py` / `export_fbx_template.py` | 早期 Blender 路线，**已弃用**（见 §6 第 6 条） |
 | `fit/render_check.py` | 把 pose 叠回原视频帧（2D 比对图），算法调试用 |
 | `fit/render_fbx_video.sh` | 旧的外部逐帧脚本（保留作对照；新流程用 viewer 的 `--video`） |
 | `algo/` | **C++ 动捕算法核心**（GL-free）：方向场注册表 / fit（yaw + root + 钉地）/ 批量报告 CLI |
-| `testdata/` | 测试素材（Wikimedia CC 拳击片段 + 拉弓射箭） |
+| `testdata/` | 测试素材（`archery/拉弓射箭.mp4`，121 帧 @24fps；早期拳击片段未入库） |
 
 ## 3. 四种方向场算法（本次实验的对比对象）
 
@@ -106,6 +110,8 @@
   （Mixamo23 是 1.60m 官方比例，被测者比例不同 ⇒ 肩/肘天生偏 50~60px）。这条是本次踩过的坑。
 - `jitter` = 关节位置二阶差分均方；`lift2d_t` 比 `worldz` 低一个量级，且**零相位无滞后**
   （普通滑动平均会把动作推后 (win−1)/2 帧，24fps 下 7 帧窗 = 0.13s，足够让“拉满”和“起手”错位）。
+- 上表是 **C++ 产线**的数（`mocap_report.csv`）。Python 版同量级但**不是逐位一致**（平滑实现不同，
+  如 `lift2d_t` 的 jitter：Python 3.2mm / C++ 4.7mm）；对应交付以 C++ 为准。
 
 ## 4. retarget 数学（与 C++ 侧同一套）
 
@@ -170,9 +176,12 @@ output/jpov_fbx_viewer/jpov_fbx_viewer output/archery.fbx \
 
 ### 5.3 Python 实验链（算法对照用）
 
+> ⚠️ Python 版只有 `worldz` / `lift2d` / `lift2d_t` 三种算法，且**不含整体朝向与钉地**
+> （`worldz_t`、yaw、root、脚钉地都只在 C++ 侧）——它的产物不要拿来当交付 FBX。
+
 ```bash
-# 四种算法各跑一遍（输出字段与 C++ 一致，可直接喂 export_fbx_ascii.py）
-for a in worldz worldz_t lift2d lift2d_t; do
+# 三种算法各跑一遍（输出字段与 C++ 同构到 quat/root/t 这一层）
+for a in worldz lift2d lift2d_t; do
   python3 tools/jpov/mocap/fit/mocap_fit.py --track output/archery_track.json \
       --out output/pose_$a.json --algo $a --height 1.78
 done

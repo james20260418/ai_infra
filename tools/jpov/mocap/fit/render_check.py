@@ -10,7 +10,6 @@
 """
 import argparse
 import json
-import math
 import os
 import subprocess
 import sys
@@ -20,7 +19,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mixamo23 as mk
-from mocap_fit import SEG, point, to_px
+from mocap_fit import point, to_px
 
 EDGES = [(mk.PAR[j], j) for j in range(1, mk.NB)]
 

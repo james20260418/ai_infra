@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
                   p.view_mode == static_cast<int>(jpov_fbx_viewer::ViewMode::kMannequinOnly) ||
                   app.has_glb_)
                 << "--view 选了含蓝骨的模式但未给 glb 路径（第二位置参数；"
-                   "只有 --view 8 蓝人模特不需要 glb）";
+                   "只有 --view 8/9（蓝人模特）不需要 glb）";
             app.view_mode_ = static_cast<jpov_fbx_viewer::ViewMode>(p.view_mode);
             // --view 在装配之后才定：机位按最终模式重算（“只看真皮”不该按并列布局取景）。
             app.RefitViewForMode();

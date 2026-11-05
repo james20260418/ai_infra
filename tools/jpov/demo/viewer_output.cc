@@ -187,7 +187,9 @@ bool RunFfmpegHstack(const std::string& left_mp4, const std::string& right_mp4,
     }
     return ok;
 #else
-    (void)left_mp4; (void)right_mp4; (void)out_mp4;
+    (void)left_mp4;
+    (void)right_mp4;
+    (void)out_mp4;
     LOG(ERROR) << "RunFfmpegHstack 暂不支持 Windows";
     return false;
 #endif
