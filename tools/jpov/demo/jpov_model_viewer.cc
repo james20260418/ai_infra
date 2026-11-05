@@ -26,6 +26,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/demo/viewer_app.h"
 #include "tools/jpov/assets/models/models_path.h"
 #include "tools/jpov/demo/viewer_capture.h"
@@ -115,6 +116,11 @@ int main(int argc, char** argv) {
     cfg.resizable = false;             // 需求：窗口不可 resize
     cfg.target_fps = static_cast<int>(jpov_viewer::kViewerFps);
     cfg.headless   = capture;          // 拍摄 headless 出图不弹窗
+    // 窗口模式要硬件光栅；--four_views / --round_video 是 headless 拍摄，保持 kAny
+    // （CI 本来就跑 llvmpipe，每次拍摄刷「偏好落空」告警没意义）。
+    if (!capture) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_model_viewer.sh 同构拷贝）。
     cfg.fonts = {

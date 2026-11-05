@@ -20,6 +20,7 @@
 
 #include <glog/logging.h>
 
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/model_editor/model_editor_app.h"
 
@@ -253,6 +254,10 @@ int main(int argc, char** argv) {
     cfg.resizable = true;
     cfg.target_fps = static_cast<int>(jpov::model_editor::kViewerFps);
     cfg.headless = opt.ui_shot;
+    // 交互（有可见窗口）才声明想要硬件光栅；--ui_shot 是 headless 单帧截图，保持 kAny。
+    if (!opt.ui_shot) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},

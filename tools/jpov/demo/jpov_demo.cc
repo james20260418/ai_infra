@@ -17,6 +17,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 
 class DemoApp : public JPOV {
 public:
@@ -73,6 +74,8 @@ int main() {
     cfg.width = 1280;
     cfg.height = 720;
     cfg.target_fps = 30;
+    // 交互窗口：声明想要硬件光栅（headless 才保持 kAny）。
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     DemoApp app(cfg);
     app.Init();
     app.Run();

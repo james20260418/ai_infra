@@ -19,6 +19,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/demo/ui_demo_panel.h"
@@ -89,6 +90,8 @@ int main() {
     cfg.width = static_cast<int>(jpov::kUiDemoWidth);
     cfg.height = static_cast<int>(jpov::kUiDemoHeight);
     cfg.target_fps = 30;
+    // 交互窗口：声明想要硬件光栅（headless 才保持 kAny）。
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     // 显式声明字体：CJK 显中文，Latin 做拉丁回退（两者都注册，别名见渲染命令）。
     // JPOV 不提供隐式默认字体，必须在此声明 path/alias。
     // 路径为相对 exe 的字体目录（ui_demo 是窗口程序，从 output/ 目录运行，

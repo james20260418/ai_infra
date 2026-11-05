@@ -14,6 +14,21 @@
 #include <unistd.h>
 #else
 #include <windows.h>
+// windows.h 把 near / far 定义成空宏，和 jpov::Camera 的字段名（cmds.camera.near）
+// 冲突：展开后变成 `cmds.camera. = 0.1f`。本头在多个 viewer 的 include 列表里排在
+// jpov.h 之后，会把 jpov.h 里撤销掉的宏又装回来，所以这里也撤销一次。
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+// windows.h 还会把 DrawText 定义成 DrawTextA（GDI 的 ANSI 变体），于是
+// `cmds.DrawText(...)` 被展开成 `cmds.DrawTextA(...)` —— 链接期找不到
+// RenderCommandList::DrawTextA。同理就地撤销。
+#ifdef DrawText
+#undef DrawText
+#endif
 #endif
 
 namespace jpov {

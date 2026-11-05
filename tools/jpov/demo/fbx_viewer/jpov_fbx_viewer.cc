@@ -39,6 +39,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/fbx_viewer/fbx_viewer_app.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 
 namespace {
 
@@ -166,6 +167,9 @@ int main(int argc, char** argv) {
     cfg.resizable = false;
     cfg.target_fps = static_cast<int>(jpov_fbx_viewer::kViewerFps);
     cfg.headless = capture;
+    if (!capture) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     // 显式声明字体：CJK 显中文面板标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
     // build_jpov_fbx_viewer.sh 同构拷贝）。
     cfg.fonts = {

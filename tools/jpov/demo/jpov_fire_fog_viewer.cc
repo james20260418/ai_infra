@@ -29,6 +29,7 @@
 #include "tools/jpov/demo/fire_fog_viewer_app.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/common/utils.h"
 
 namespace {
@@ -345,6 +346,7 @@ int main(int argc, char** argv) {
     // froxel 管线较重（全分辨率 inject/scatter）⇒ 交互降到 30fps（Danis 2026-10-09）。
     cfg.target_fps = 30;
     cfg.headless   = false;
+    jpov_viewer::PreferGpuForInteractiveViewer(cfg);
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},

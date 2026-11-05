@@ -163,15 +163,12 @@ cc_library(
         ":vegetation_glb_baker",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:ui",
         "//third_party/stb:stb_image",
         "//third_party/stb:stb_image_write",
         "@com_google_protobuf//:protobuf",
-    ],
-    target_compatible_with = [
-        "@platforms//os:linux",
-        "@platforms//cpu:x86_64",
     ],
 )
 
@@ -184,6 +181,22 @@ cc_binary(
     ],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_vegetation_v2_viewer.exe",
+    srcs = ["viewer/vegetation_v2_viewer.cc"],
+    deps = [
+        ":vegetation_v2_app",
+        "@glog_static//:glog",
+    ],
+    # Windows 版（MinGW 交叉编译）：不弹控制台黑框（GUI 子系统）；日志仍落盘到
+    # exe 旁，见 Config::log_file 与 jpov.cc 的 stderr 重定向。
+    linkopts = ["-mwindows"],
+    target_compatible_with = [
+        "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
 )

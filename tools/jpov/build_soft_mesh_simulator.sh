@@ -3,10 +3,11 @@
 # build_soft_mesh_simulator.sh — 编译 jpov_soft_mesh_viewer（JPOV 软体仿真查看器）
 #
 # 用法（在仓库根或本目录下均可）：
-#   ./tools/jpov/build_soft_mesh_simulator.sh
+#   ./tools/jpov/build_soft_mesh_simulator.sh [--windows]
 #
 # 效果：
 #   1. bazel build //tools/jpov:jpov_soft_mesh_viewer（Linux ELF）
+#   1b. 加 --windows 时额外：`bazel build //tools/jpov:jpov_soft_mesh_viewer.exe --config=windows`（Windows PE，同目录）
 #   2. 产物拷贝到工程 output/jpov_soft_mesh_viewer/ 下（含 exe 旁 fonts/）
 #   3. 打印用法提示
 #
@@ -31,6 +32,27 @@
 
 set -euo pipefail
 
+# ── 参数 ─────────────────────────────────────────────────────────────────────
+# --windows：额外交叉编译 Windows 版 .exe（MinGW，静态链接，可直接拷到真卡上跑）。
+# 默认只出 Linux ELF —— Windows 交叉编译要多花几十秒，不需要时不必等。
+BUILD_WINDOWS=0
+for arg in "$@"; do
+    case "$arg" in
+        --windows)
+            BUILD_WINDOWS=1
+            ;;
+        -h|--help)
+            echo "用法：$0 [--windows]"
+            echo "  --windows  额外编译 Windows 版 .exe（MinGW 交叉编译，产物放同一目录）"
+            exit 0
+            ;;
+        *)
+            echo "未知参数：$arg（只支持 --windows / --help）" >&2
+            exit 2
+            ;;
+    esac
+done
+
 # 本脚本位于 <repo>/tools/jpov/，故工程根 = 上溯两级（与兄弟脚本
 # build_jpov_model_viewer.sh 等同构）。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,6 +70,17 @@ cd "$PROJECT_DIR"
 bazel build //tools/jpov:jpov_soft_mesh_viewer 2>&1
 echo ""
 echo "OK: Linux 编译完成"
+
+if [ "$BUILD_WINDOWS" -eq 1 ]; then
+    echo ""
+    echo "==> 1b. 编译 Windows 版 jpov_soft_mesh_viewer.exe（MinGW 交叉编译）"
+    bazel build //tools/jpov:jpov_soft_mesh_viewer.exe --config=windows 2>&1
+    cp -v "$BAZEL_BIN/jpov_soft_mesh_viewer.exe" "$OUTPUT_DIR/jpov_soft_mesh_viewer.exe"
+    # 本地代码签名（可选）：消除 SmartScreen「未查到此应用的发布信息」。
+    # 没有 osslsigncode 时脚本自己静默跳过，不阻塞构建。
+    "$SCRIPT_DIR/sign_windows_exe.sh" "$OUTPUT_DIR/jpov_soft_mesh_viewer.exe" || true
+    echo "OK: Windows 编译完成"
+fi
 
 echo ""
 echo "==> 2. 拷贝产物到 output/jpov_soft_mesh_viewer/"
@@ -96,3 +129,14 @@ echo "   架构："
 echo "     · 物理：tools/jpov/soft_mesh_simulator/（独立包，纯 CPU、GL-free、可单测）"
 echo "     · 显示：tools/jpov/demo/soft_mesh_viewer_app.h + jpov_soft_mesh_viewer.cc"
 echo "     · 单测：bazel test //tools/jpov/soft_mesh_simulator:soft_mesh_simulator_test"
+
+if [ "$BUILD_WINDOWS" -eq 1 ]; then
+    echo ""
+    echo "📂 Windows 产物："
+    echo "   $OUTPUT_DIR/jpov_soft_mesh_viewer.exe   (Windows PE，静态链接，无 .dll 依赖)"
+    echo "🪟 跑法：把整个 $OUTPUT_DIR 目录拷到 Windows，双击 jpov_soft_mesh_viewer.exe"
+    echo "   （字体/贴图/模型都是相对 exe 的路径，必须连目录一起拷）"
+else
+    echo ""
+    echo "🪟 需要 Windows 版 exe：$0 --windows（额外交叉编译，产物落在同一目录）"
+fi

@@ -54,9 +54,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
 
       - name: Build (Windows cross-compile)
+        # 每个交互式 viewer 都有 .exe 变体（build_<viewer>.sh --windows 编的就是它）。
+        # 全列在这里，免得某个 viewer 的 Windows 链路（MinGW 宏冲突 / 缺符号）烂掉
+        # 却没人发现 —— 这类问题在 Linux 侧一次都不会暴露。
         run: |
-          bazel build //demo/... //tools/jpov:jpov_demo.exe \
-            //tools/jpov:jpov_skylight_viewer.exe --config=windows
+          bazel build --config=windows \
+            //demo/... \
+            //tools/jpov:jpov_demo.exe \
+            //tools/jpov:jpov_skylight_viewer.exe \
+            //tools/jpov:jpov_ui_demo.exe \
+            //tools/jpov:jpov_sp_ui_demo.exe \
+            //tools/jpov:jpov_model_viewer.exe \
+            //tools/jpov:jpov_pick_highlight_viewer.exe \
+            //tools/jpov:jpov_fire_fog_viewer.exe \
+            //tools/jpov:jpov_soft_mesh_viewer.exe \
+            //tools/jpov:jpov_particle_viewer.exe \
+            //tools/jpov:jpov_volume_fire_viewer.exe \
+            //tools/jpov:jpov_strip_viewer.exe \
+            //tools/jpov/demo/fbx_viewer:jpov_fbx_viewer.exe \
+            //tools/jpov/tools/vegetation_tool_v2:jpov_vegetation_v2_viewer.exe
 
   genvolume:
     # 体积资产生成工具的 Python 单测（不参与 bazel；纯 unittest + pyopenvdb）。

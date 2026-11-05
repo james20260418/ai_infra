@@ -28,6 +28,7 @@
 
 #include "tools/jpov/demo/sp_ui_demo_panel.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_render_preference.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/sp_ui/sp_ui.h"
 
@@ -585,6 +586,14 @@ int main(int argc, char** argv) {
     cfg.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
     cfg.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
     cfg.target_fps = 30;
+    // 只有真交互（Run() 帧循环）才声明「想要硬件光栅」。--script / --script-text /
+    // --capture 都是逐帧出图的拍摄路径（CI 与 gold 跑在 llvmpipe 上），保持默认
+    // kAny —— 每次拍摄刷一条「prefer-gpu 落空」告警只是噪音。
+    const bool interactive_viewer =
+        !opt.script && !opt.script_text && capture_dir.empty();
+    if (interactive_viewer) {
+        jpov_viewer::PreferGpuForInteractiveViewer(cfg);
+    }
     // 显式声明字体（路径相对 exe，由 build 脚本同构拷贝）。
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},

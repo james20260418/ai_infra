@@ -4,10 +4,11 @@
 #                                        （JPOV 拾取/高亮查看器）
 #
 # 用法：
-#   ./tools/jpov/build_jpov_pick_highlight_viewer.sh
+#   ./tools/jpov/build_jpov_pick_highlight_viewer.sh [--windows]
 #
 # 效果：
 #   1. bazel build //tools/jpov:jpov_pick_highlight_viewer（Linux ELF）
+#   1b. 加 --windows 时额外：`bazel build //tools/jpov:jpov_pick_highlight_viewer.exe --config=windows`（Windows PE，同目录）
 #   2. 产物拷贝到工程 output/jpov_pick_highlight_viewer/
 #   3. 拷贝所需模型资产到 exe 旁 models/（保持仓库相对子路径，供 exe-旁路径解析）
 #
@@ -18,6 +19,27 @@
 # =============================================================================
 
 set -euo pipefail
+
+# ── 参数 ─────────────────────────────────────────────────────────────────────
+# --windows：额外交叉编译 Windows 版 .exe（MinGW，静态链接，可直接拷到真卡上跑）。
+# 默认只出 Linux ELF —— Windows 交叉编译要多花几十秒，不需要时不必等。
+BUILD_WINDOWS=0
+for arg in "$@"; do
+    case "$arg" in
+        --windows)
+            BUILD_WINDOWS=1
+            ;;
+        -h|--help)
+            echo "用法：$0 [--windows]"
+            echo "  --windows  额外编译 Windows 版 .exe（MinGW 交叉编译，产物放同一目录）"
+            exit 0
+            ;;
+        *)
+            echo "未知参数：$arg（只支持 --windows / --help）" >&2
+            exit 2
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -35,6 +57,17 @@ cd "$PROJECT_DIR"
 bazel build //tools/jpov:jpov_pick_highlight_viewer 2>&1
 echo ""
 echo "OK: Linux 编译完成"
+
+if [ "$BUILD_WINDOWS" -eq 1 ]; then
+    echo ""
+    echo "==> 1b. 编译 Windows 版 jpov_pick_highlight_viewer.exe（MinGW 交叉编译）"
+    bazel build //tools/jpov:jpov_pick_highlight_viewer.exe --config=windows 2>&1
+    cp -v "$BAZEL_BIN/jpov_pick_highlight_viewer.exe" "$OUTPUT_DIR/jpov_pick_highlight_viewer.exe"
+    # 本地代码签名（可选）：消除 SmartScreen「未查到此应用的发布信息」。
+    # 没有 osslsigncode 时脚本自己静默跳过，不阻塞构建。
+    "$SCRIPT_DIR/sign_windows_exe.sh" "$OUTPUT_DIR/jpov_pick_highlight_viewer.exe" || true
+    echo "OK: Windows 编译完成"
+fi
 
 echo ""
 echo "==> 2. 拷贝产物到 output/jpov_pick_highlight_viewer/"
@@ -76,3 +109,14 @@ echo "   headless 出图（确定性、自动化核对）："
 echo "       $OUTPUT_DIR/jpov_pick_highlight_viewer --capture <out_dir>"
 echo "   —— 输出 scene.png（无高亮）/ highlighted.png（三 renderer 各高亮一个）/"
 echo "      probe.png（屏幕中心拾取自检）。"
+
+if [ "$BUILD_WINDOWS" -eq 1 ]; then
+    echo ""
+    echo "📂 Windows 产物："
+    echo "   $OUTPUT_DIR/jpov_pick_highlight_viewer.exe   (Windows PE，静态链接，无 .dll 依赖)"
+    echo "🪟 跑法：把整个 $OUTPUT_DIR 目录拷到 Windows，双击 jpov_pick_highlight_viewer.exe"
+    echo "   （字体/贴图/模型都是相对 exe 的路径，必须连目录一起拷）"
+else
+    echo ""
+    echo "🪟 需要 Windows 版 exe：$0 --windows（额外交叉编译，产物落在同一目录）"
+fi

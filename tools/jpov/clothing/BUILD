@@ -368,6 +368,7 @@ cc_binary(
     srcs = ["jpov_clothing_tool.cc"],
     deps = [
         ":clothing_tool_app",
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
     ],
     target_compatible_with = [
