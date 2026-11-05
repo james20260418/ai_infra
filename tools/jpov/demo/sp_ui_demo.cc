@@ -91,6 +91,7 @@ struct PlateOptions {
     float scale = 1.5f;       // 整体 UI 缩放（1.5 = 线框、字号、内边距全部× 1.5）
     int wave = 1;             // 水波方式（对应 SpDemoState::wave_mode）
     bool script = false;      // true = 跑「伪造输入 + 多帧输出」的脚本回放
+    bool script_text = false; // true = 文本编辑脚本（选区 / 剪贴板 / 中文粘贴）
 };
 
 class SpUiDemoApp : public JPOV {
@@ -107,6 +108,24 @@ public:
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SpUiDemoApp::DemoTextWidth, this);
+    }
+
+    // 剪贴板：sp_ui 是纯 CPU 指令层，不链接窗口库 —— Ctrl+C/V 通过回调取系统
+    // 剪贴板（UTF-8）。headless 拍摄时 JPOV 侧返回 nullptr / 无操作，不会崩。
+    static const char* ClipboardGet(void* userdata) {
+        SpUiDemoApp* app = static_cast<SpUiDemoApp*>(userdata);
+        return app->GetClipboardText();
+    }
+    static void ClipboardSet(const char* text, void* userdata) {
+        SpUiDemoApp* app = static_cast<SpUiDemoApp*>(userdata);
+        app->SetClipboardText(text);
+    }
+    void InstallClipboard() {
+        jpov::sp_ui::SpUi::SpClipboard cb;
+        cb.get = &SpUiDemoApp::ClipboardGet;
+        cb.set = &SpUiDemoApp::ClipboardSet;
+        cb.userdata = this;
+        ui_.SetClipboard(cb);
     }
 
     // 整体 UI 缩放（布局坐标 → 设备像素）。需在 RunOnce/Run 之前设。
@@ -134,6 +153,8 @@ public:
     void SetAutoAdvance(bool on) { auto_advance_ = on; }
     // 实时 log 条数：脚本回放时用来判定「点击真的进了业务逻辑」。
     int log_count() const { return st_.log.Count(); }
+    // 输入框内容（文本编辑脚本回放时逐帧打印，证明编辑真的落到了 buffer）。
+    const char* name_text() const { return st_.name; }
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -262,7 +283,36 @@ struct ScriptFrame {
     float mouse_y = 0.0f;
     int8_t left = 0;       // MouseState::raw
     bool emit_click = false;  // true → left_clicks[0] 填本帧位置（left 应为 >=1）
+    // 左键按下的起点（Drag/Hold 时有效）。缺省 = 帧末鼠标位置（原地按下）；
+    // 拖拽脚本必须显式写——引擎靠它还原“从哪开始拉”，帧末位置只是活动端。
+    bool has_press_origin = false;
+    float press_x = 0.0f;
+    float press_y = 0.0f;
+    // 本帧按一下的键（Unknown = 不按键）。ctrl/shift 是**本帧**修饰键状态。
+    jpov::KeyCode key = jpov::KeyCode::Unknown;
+    bool ctrl = false;
+    bool shift = false;
+    // 非空：先把系统剪贴板设成它（用于演示 Ctrl+V 粘贴中文）。
+    const char* set_clipboard = nullptr;
 };
+
+// 把一条 ScriptFrame 套到 InputSnapshot 上。两个脚本模式共用，避免帧语义分叉。
+void ApplyScriptFrame(const ScriptFrame& sf, jpov::InputSnapshot* in /*output*/) {
+    *in = jpov::InputSnapshot{};
+    in->mouse_x = sf.mouse_x;
+    in->mouse_y = sf.mouse_y;
+    in->left.raw = sf.left;
+    in->left_press_x = sf.has_press_origin ? sf.press_x : sf.mouse_x;
+    in->left_press_y = sf.has_press_origin ? sf.press_y : sf.mouse_y;
+    if (sf.emit_click) {
+        in->left_clicks[0] = {sf.mouse_x, sf.mouse_y, 0.5f};
+    }
+    if (sf.key != jpov::KeyCode::Unknown) {
+        in->keys[static_cast<int>(sf.key)].raw = 1;
+    }
+    in->mods.ctrl = sf.ctrl;
+    in->mods.shift = sf.shift;
+}
 
 // 把 "重置" 按钮以及「翻书按钮」走一遍交互脚本：
 //   重置：悬停 → 按下 → 松开（验证点击语义）
@@ -316,6 +366,134 @@ std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
     for (int i = 0; i < 4; ++i) {           // 25..28 移开衰减
         out.push_back({mouse_out_x, mouse_out_y, 0, false});
     }
+    return out;
+}
+
+// 文本编辑脚本：在「电机命名」输入框上走一遍两批新功能，逐帧出图 + 打印 buffer。
+//
+//   f0       鼠标在空白处（未聚焦）
+//   f1..f2   点进输入框（按下 → 松开）获得焦点
+//   f3..f7   键入 "Hello"（Shift+H）
+//   f9..f11  从框内左侧拖到右侧 → 拉出一段选区（高亮 + 无竖杠）
+//   f12      Ctrl+C 复制选区
+//   f13..f14 点框尾（取消选中、光标到末尾）
+//   f15      Ctrl+V 粘回选区内容（“复制粘贴”闭环）
+//   f16      Ctrl+A 全选
+//   f17..f18 先设系统剪贴板为中文，再 Ctrl+V → 整段变成中文
+//
+// 坐标是**设备像素**（布局坐标 × scale），与窗口坐标一致。
+std::vector<ScriptFrame> MakeTextEditScript(float scale) {
+    // 「电机命名」输入框 = GlobalRow(3, 360)：pos(16, 186)，size(360, 26)。
+    const float box_x = 16.0f;
+    const float box_y = 186.0f;
+    const float box_h = 26.0f;
+    const float cy = (box_y + box_h * 0.5f) * scale;   // 行中心（设备像素）
+    // 文本从 box 左边 + padding 起排；"Hello" 在 16px 字体下只占 ~45px 宽，
+    // 所以拖拽点必须落在**文字实际覆盖的区间**里，用整框比例会拖到空白处
+    // （锚点=光标=行尾 ⇒ 没有选区，Ctrl+C 复制不到东西）。
+    const auto text_x = [&](float dx) { return (box_x + 6.0f + dx) * scale; };
+    const float out_x = 900.0f * scale;
+    const float out_y = 600.0f * scale;
+
+    std::vector<ScriptFrame> out;
+    // 按下点（拖拽起点）与松开帧共用同一坐标。
+    const float drag_from = text_x(2.0f);   // 第 1 个字符附近
+    const float drag_to = text_x(60.0f);    // 越过 "Hello" 末尾
+    const float type_start = text_x(2.0f);
+    const float tail = text_x(100.0f);      // 行尾空白处
+
+    ScriptFrame idle;
+    idle.mouse_x = out_x;
+    idle.mouse_y = out_y;
+
+    // f0：未聚焦。
+    out.push_back(idle);
+
+    // f1：按下（Hold，按下起点 = 当前位置）→ f2 松开。
+    ScriptFrame press = idle;
+    press.mouse_x = type_start;
+    press.mouse_y = cy;
+    press.left = -2;
+    press.has_press_origin = true;
+    press.press_x = type_start;
+    press.press_y = cy;
+    out.push_back(press);
+    ScriptFrame release = idle;
+    release.mouse_x = type_start;
+    release.mouse_y = cy;
+    out.push_back(release);
+
+    // f3..f7：键入 Hello。
+    for (const char* p = "Hello"; *p != '\0'; ++p) {
+        ScriptFrame k = idle;
+        // 输入框的映射是「键码 + Shift」：大写字母 = 同一键码 + shift。
+        const char lower = (*p >= 'A' && *p <= 'Z')
+                               ? static_cast<char>(*p - 'A' + 'a')
+                               : *p;
+        k.key = static_cast<jpov::KeyCode>(
+            static_cast<int>(jpov::KeyCode::A) + (lower - 'a'));
+        k.shift = (*p != lower);
+        out.push_back(k);
+    }
+
+    // f8：静止一帧（看清 Hello）。
+    out.push_back(idle);
+
+    // f9..f11：拖拽选字。按下帧定位锚点，拖动帧拉出选区，松开帧保留选区。
+    ScriptFrame drag_press = press;
+    drag_press.mouse_x = drag_from;
+    drag_press.press_x = drag_from;
+    out.push_back(drag_press);
+    ScriptFrame drag_move = idle;
+    drag_move.mouse_x = drag_to;
+    drag_move.mouse_y = cy;
+    drag_move.left = -1;
+    drag_move.has_press_origin = true;
+    drag_move.press_x = drag_from;
+    drag_move.press_y = cy;
+    out.push_back(drag_move);
+    ScriptFrame drag_release = idle;
+    drag_release.mouse_x = drag_to;
+    drag_release.mouse_y = cy;
+    out.push_back(drag_release);
+
+    // f12：Ctrl+C（复制选区）。
+    ScriptFrame copy = idle;
+    copy.key = jpov::KeyCode::C;
+    copy.ctrl = true;
+    out.push_back(copy);
+
+    // f13..f14：点框尾 → 取消选中、光标到末尾。
+    ScriptFrame tail_press = press;
+    tail_press.mouse_x = tail;
+    tail_press.press_x = tail;
+    out.push_back(tail_press);
+    ScriptFrame tail_release = idle;
+    tail_release.mouse_x = tail;
+    tail_release.mouse_y = cy;
+    out.push_back(tail_release);
+
+    // f15：Ctrl+V（粘回选区内容）。
+    ScriptFrame paste = idle;
+    paste.key = jpov::KeyCode::V;
+    paste.ctrl = true;
+    out.push_back(paste);
+
+    // f16：Ctrl+A 全选。
+    ScriptFrame select_all = idle;
+    select_all.key = jpov::KeyCode::A;
+    select_all.ctrl = true;
+    out.push_back(select_all);
+
+    // f17：先设剪贴板为中文，再 Ctrl+V → 覆盖整段（验证中文/UTF-8 粘贴）。
+    ScriptFrame paste_cjk = idle;
+    paste_cjk.key = jpov::KeyCode::V;
+    paste_cjk.ctrl = true;
+    paste_cjk.set_clipboard = "中文粘贴 测试";
+    out.push_back(paste_cjk);
+
+    // f18：静止一帧（看清中文结果）。
+    out.push_back(idle);
     return out;
 }
 
@@ -390,6 +568,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--script") {
             opt.script = true;
+        } else if (a == "--script-text") {
+            opt.script_text = true;
         } else if (a == "--dark") {
             opt.light = false;
         } else if (a == "--no-texture") {
@@ -423,6 +603,7 @@ int main(int argc, char** argv) {
     SpUiDemoApp app(cfg);
     app.Init();
     app.InstallTextMeasure();
+    app.InstallClipboard();
     app.SetPlateOptions(opt);
     app.SetUiScale(opt.scale);
     app.SetWaveMode(opt.wave);
@@ -469,32 +650,37 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (opt.script) {
+    if (opt.script || opt.script_text) {
         // ---- 伪造输入 + 多帧输出（单帧仿真）----
         // 每帧：换一份 InputSnapshot → RunOnce(帧号, …) → 一张 PNG。
         // 帧号显式传下去（OneIteration 能据此自计时）；材质时间这里仍由本文件推进
         // （+1/30 秒/帧），因为材质时间轴允许与帧号脱钩（暂停/慢放）。
-        const std::string dir = capture_dir.empty() ? "output/shots/sp_ui_script"
-                                                    : capture_dir;
+        const std::string dir =
+            capture_dir.empty()
+                ? (opt.script_text ? "output/shots/sp_ui_script_text"
+                                   : "output/shots/sp_ui_script")
+                : capture_dir;
         const std::string mk = "mkdir -p '" + dir + "'";
         CHECK_EQ(std::system(mk.c_str()), 0) << "创建输出目录失败：" << dir;
 
         jpov::WindowInfo winfo;
         winfo.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
         winfo.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
-        const std::vector<ScriptFrame> script = MakeResetClickScript(
-            opt.scale, /*mouse_out_x=*/winfo.width * 0.75f,
-            /*mouse_out_y=*/winfo.height * 0.75f);
+        const std::vector<ScriptFrame> script =
+            opt.script_text
+                ? MakeTextEditScript(opt.scale)
+                : MakeResetClickScript(opt.scale,
+                                       /*mouse_out_x=*/winfo.width * 0.75f,
+                                       /*mouse_out_y=*/winfo.height * 0.75f);
 
         int prev_log = app.log_count();
         for (size_t i = 0; i < script.size(); ++i) {
             const ScriptFrame& sf = script[i];
             jpov::InputSnapshot in{};
-            in.mouse_x = sf.mouse_x;
-            in.mouse_y = sf.mouse_y;
-            in.left.raw = sf.left;
-            if (sf.emit_click) {
-                in.left_clicks[0] = {sf.mouse_x, sf.mouse_y, 0.5f};
+            ApplyScriptFrame(sf, &in);
+            // 剪贴板演示：先设系统剪贴板，再让这一帧的 Ctrl+V 去读它。
+            if (sf.set_clipboard != nullptr) {
+                app.SetClipboardText(sf.set_clipboard);
             }
             app.SetTimeSeconds(static_cast<float>(i) / 30.0f);
             char path[1024];
@@ -506,6 +692,9 @@ int main(int argc, char** argv) {
                       << sf.mouse_y << ") left=" << static_cast<int>(sf.left)
                       << " log=" << now_log
                       << (now_log > prev_log ? "  ← 新增 log（点击进了逻辑）" : "")
+                      << (opt.script_text ? std::string("  text=[") +
+                                                app.name_text() + "]"
+                                          : std::string())
                       << "  -> " << path;
             prev_log = now_log;
         }

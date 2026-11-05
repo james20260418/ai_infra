@@ -131,7 +131,7 @@ struct SpDemoState {
     int wave_mode = 1;
     int profile = 1;           // 运行模式 Combo 选中 index
     int view_mode = 0;         // 显示模式 Combo 选中 index（第二个下拉，同屏）
-    char name[32] = "";        // 电机命名输入框
+    char name[64] = "";        // 电机命名输入框（UTF-8 字节；中文占 3 字节/字）
     // ---- 多电机（函数包装复用）----
     static constexpr int kMotorCount = 3;  // 2~3 份同一子面板（S7.3）
     UiDemoMotor motors[kMotorCount];

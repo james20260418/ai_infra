@@ -138,6 +138,10 @@ struct SpTheme {
     Color foreground;  // 文本/图标默认色
     Color accent;      // 高亮（选中、活动状态、按钮主色、下拉悬停项）
     Color selected;    // "已选中/按下"的沉稳深色（下拉选中项、按钮按下态）
+    // 文本选区底色（InputText 选中文字时垫在字形下的矩形）。
+    // 建议带 alpha < 1（渲染层走预乘 alpha，半透明会与底下板材混合）；
+    // alpha = 1 也能用（等于不透明色块，会盖住材质观感）。
+    Color selection_background = {0.20f, 0.45f, 0.85f, 0.35f};
     Color hover;       // 悬停态填充（浅高亮，跟随鼠标）
     Color border;      // 边框
     Color disabled;    // 禁用态文字/图标
@@ -321,14 +325,26 @@ public:
                      bool stretch_h = true);
 
     // 文本输入框。buffer 为 in/out（C 字符串 + 容量上限 buffer_size）。
+    // buffer 必须是**合法 UTF-8**（纯 ASCII 也是合法 UTF-8）；本控件按码点编辑，
+    // 不会把一个多字节字符切成半个（中文/emoji 可安全退格、粘贴、选区删除）。
     //
-    // 编辑模型（2026-09-29 重做）：
+    // 编辑模型（2026-11-03 增加选区与剪贴板）：
     //   - 光标可在**任意字符间**定位（不是只能在末尾）：Left/Right 移动一位，
-    //     Home/End 移到行首/行尾；光标为**跨帧状态**（input_caret_，跟踪当前聚焦框）。
+    //     Home/End 移到行首/行尾；光标为**跨帧状态**（input_caret_，码点索引）。
     //   - 字符**插入在光标处**，Backspace 删光标左侧、Delete 删光标右侧。
-    //   - 可输入字符集：字母（Shift 决定大小写）/ 数字 / 空格 / 标点
-    //     （`.,-+/;'[]\`=` 等，Shift 派生上档符号）。可用它输入小数/负数。
-    //   - Enter/Escape → 失焦（不改变 buffer）。
+    //   - 左键**按下**即聚焦（不要求松开）：按下点决定光标位置；随后拖动 = 拉选区
+    //     （锚点取按下点，所以低帧率下选区起点也不漂）。松开后选区保留。
+    //   - 有选区时：Backspace/Delete/输入可打印字符都**先删掉选区**再执行；
+    //     Left 折叠到选区头、Right 折叠到选区尾（只折叠，不再多走一格；
+    //     hold 的第 2 次起才开始正常移动）；Home/End 清选区后跳转。
+    //   - 在框内任意位置**再按一次左键** → 光标落到按下点、选区取消。
+    //   - Ctrl+A 全选 / Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴。
+    //     剪贴板通过 SetClipboard 注入（见下）；未注入时退化为**进程内剪贴板**，
+    //     所以 Ctrl+C/V 在无窗口的 CPU 测试里也能用。粘贴会剔除/替换换行、Tab 等
+    //     控制字符（单行控件），并按整码点截断到 buffer 容量（不会切出半个字）。
+    //   - Ctrl/Alt/Super 按住时**不插入任何可打印字符**（否则 Ctrl+C 会同时
+    //     插入一个 'c'、Ctrl+Shift+1 会插个 '!'）。
+    //   - Enter/Escape → 失焦（不改变 buffer），选区一并清掉。
     //   - 键盘 hold 重复（150ms 阈值）对可打印字符/Backspace/Delete/方向键均生效。
     // 返回：本帧**帧末**是否聚焦（用于感知回车/焦点丧失；字符改动经 buffer 体现）。
     bool InputText(const char* label, char* buffer /*inout*/,
@@ -449,6 +465,28 @@ public:
         measure_userdata_ = userdata;
     }
 
+    // ---- 剪贴板回调（可选） ----
+    //
+    // InputText 的 Ctrl+C/X/V 需要读写外部剪贴板。sp_ui 是纯 CPU 指令层，不链接
+    // 窗口库，所以用回调注入（与 SetTextMeasure 同一套路）：
+    //   - 窗口程序：接 JPOV::GetClipboardText / SetClipboardText（UTF-8）。
+    //   - 无窗口的 CPU 测试：两个回调都给 nullptr 即可 —— 控件退化为
+    //     **进程内剪贴板**（实例成员 local_clipboard_），Ctrl+C/V 依旧可用。
+    // 两个回调可独立为空：为空的那一侧走进程内剪贴板。
+    //
+    // get：返回当前剪贴板文本（UTF-8，nullptr = 无内容）。指针只需在本帧内有效，
+    //      SpUi 不保留它。
+    // set：写入剪贴板（UTF-8，保证非空）。由调用方负责拷贝/持有。
+    struct SpClipboard {
+        const char* (*get)(void* userdata) = nullptr;
+        void (*set)(const char* text, void* userdata) = nullptr;
+        void* userdata = nullptr;
+    };
+    // Pre-condition: get/set 为 nullptr 或其 userdata 可用；本函数不做非空校验。
+    void SetClipboard(const SpClipboard& clipboard) {
+        clipboard_ = clipboard;
+    }
+
     // ---- 容错辅助 ----
     // 规格化 box：宽/高负值 clamp 到 0；圆角半径 clamp 到 ≤ min(宽,高)/2。
     static SpRect SanitizeBox(const SpRect& r);
@@ -510,20 +548,26 @@ private:
     void PushLabelText(const char* s, float left, float cy, Color color);
 
     // 文本宽度测量：优先用调用方注入的回调（真实字体进宽，光标贴合文本末尾）；
-    // 未注入时回退到 0.6*font_size/字符 的等宽估计（供无字体的 CPU gold 测试）。
+    // 未注入时回退到按码点估算（ASCII = 0.6em，非 ASCII = 1.0em，供无字体的
+    // CPU gold 测试保持确定性）。
     // return：文本绘制后 pen 落到的水平终点（像素，相对文本左缘）。
     float MeasureTextWidth(const char* text, float font_size) const;
 
-    // 量文本**前 count 个字符**（前缀）的绘制宽度（像素）。用于光标定位：
-    // 光标在第 caret 个字符边界时，其相对文本左缘的 X = 前 caret 字符的宽度。
+    // 量文本**前 count 个码点**（前缀）的绘制宽度（像素）。用于光标/选区定位：
+    // 光标在第 caret 个码点边界时，其相对文本左缘的 X = 前 caret 个码点的宽度。
     // （真实字体的前缀宽 ≠ 单字宽×count，故必须按前缀实测，不能简单按字符数乘。）
-    // Pre-condition: text 非空且 strlen(text) >= count。
+    // Pre-condition: text 非空且码点数 >= count（内部按 UTF-8 算字节偏移）。
     float MeasureTextPrefixWidth(const char* text, int count,
                                  float font_size) const;
 
-    // 给定点击的相对文本左缘 X（像素），返回光标应落的**字符索引**（0..len）：
-    // 逐字符累加前缀宽度，取与 x 最接近的字符边界。用于“点哪插哪”。
-    int CaretIndexForX(const char* text, size_t len, float x) const;
+    // 给定点击的相对文本左缘 X（像素），返回光标应落的**码点索引**（0..len）：
+    // 逐码点累加前缀宽度，取与 x 最接近的码点边界。用于“点哪插哪”。
+    // len 是码点数（不是字节数）。
+    int CaretIndexForX(const char* text, int len, float x) const;
+
+    // 剪贴板读写：回调为空的一侧退化为进程内剪贴板（local_clipboard_）。
+    const char* ClipboardText() const;
+    void WriteClipboard(const char* text);
 
     // 布局解析（C1）：根据 stretch 开关把给定 box 解析成控件实际占用的矩形。    //   - stretch 方向非拉伸时，用 ideal（控件理想尺寸）在该方向收缩。
     //     ideal.w/h 为负表示该方向不可收缩（始终保持 box 尺寸）。
@@ -642,10 +686,30 @@ private:
     // 归属上面聚焦的那个文本框（面板内同时至多一个聚焦框）。
     float input_scroll_px_ = 0.0f;
 
-    // 输入框光标位置（**字符索引**，0..文本长度，插在 buffer[caret-1] 与
-    // buffer[caret] 之间）。跨帧保持；点框内新聚焦时按点击 x 定位光标（见实现）。
+    // 输入框光标位置（**码点索引**，0..文本码点数，插在 buffer 的第 caret 个
+    // 码点之前）。跨帧保持；按下框内时按按下点 x 定位光标（见实现）。
+    // 为什么是码点而不是字节：buffer 是 UTF-8，按字节移动/删除会把中文切成
+    // 半个字符（粘贴/退格必现）。码点索引是唯一不破坏编码的编辑单位。
     // 与 text_focus_ 同属一个聚焦框。
     int input_caret_ = 0;
+
+    // 选区锚点（码点索引，与 input_caret_ 同一所有权）。
+    // 不变量：无选区时 select_anchor_ == input_caret_；
+    //         有选区时选区 = [min(anchor,caret), max(anchor,caret))。
+    // 拖拽选择时锚点固定、光标跟随鼠标；方向键折叠时两者一起走到边界。
+    int select_anchor_ = 0;
+
+    // ---- 跨帧状态（InputText 拖拽选择）----
+    // 左键在框内按下后持有（按住期间），用按下起点定位锚点、帧末鼠标位置
+    // 拖出选区。松开即释放（选区保留，供 Ctrl+C/X 使用）。
+    // 与 button_press_/slider_drag_ 同一套语义：一旦开始就不校验鼠标是否还在
+    // 框内（允许把选区拖出框外），只在左键松开时结束。
+    StateSlot text_select_drag_;
+
+    // 剪贴板回调（SetClipboard 注入；空 = 用进程内剪贴板）。
+    SpClipboard clipboard_;
+    // 进程内剪贴板：无回调时 Ctrl+C/V 的落点（也让 CPU gold 测试无需窗口）。
+    std::string local_clipboard_;
 
     // 本帧时长（毫秒），Begin 设置；<=0 表示无时钟（不产生 hold 重复）。
     float frame_dt_ms_ = 0.0f;

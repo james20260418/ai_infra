@@ -33,3 +33,19 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# sp_ui 输入框选区 / 剪贴板测试（纯 CPU，无窗口、无 GL）。
+# 覆盖拖拽选字、选中后的删除/输入语义、方向键折叠、Ctrl+A/C/X/V、
+# 中文粘贴与 UTF-8 码点安全、单行粘贴 sanitize、双输入框隔离。
+cc_test(
+    name = "sp_ui_text_edit_test",
+    srcs = ["sp_ui_text_edit_test.cc"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/sp_ui:sp_ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

@@ -283,6 +283,20 @@ public:
     // Pre-condition: Init() 已调用
     void ReleaseTexture(uint32_t texture_id);
 
+    // ---- 剪贴板（窗口系统级，UTF-8）----
+    //
+    // 给 UI 控件（如 SpUi::InputText 的 Ctrl+C/V）读写系统剪贴板。
+    // 文本编码一律 UTF-8（与 GLFW 一致）：中文/emoji 都能原样进出。
+    //
+    // GetClipboardText：当前剪贴板文本；无窗口（headless / 未 Init）或剪贴板为空
+    //   时返回 nullptr。返回的指针由窗口库持有，**只保证到下一次剪贴板调用之前
+    //   有效** —— 需要留存请自行拷贝成 std::string。
+    // SetClipboardText：写入剪贴板；无窗口时无操作（headless 拍摄/测试不会崩）。
+    //
+    // Pre-condition: text != nullptr（允许空串 = 清空剪贴板）
+    const char* GetClipboardText() const;
+    void SetClipboardText(const char* text);
+
     // RegisterVolumeTexture: 从 .jpovvol 文件（JPVOL2）加载**体积纹理**到 GPU。
     //
     // 返回体积 id，供 cmds->DrawVolumeFire(VolumeFireCommand{volume_id=...}) 引用。
@@ -442,6 +456,10 @@ private:
         bool released_this_frame = false;
         double press_time = 0.0;
         bool moved_since_press = false;
+        // 本次按下的起点（窗口像素坐标）。GLFW_PRESS 时从 mouse_x_/mouse_y_ 记录，
+        // 供 InputSnapshot::left_press_x/y 输出（拖拽锚点）。
+        double press_x = 0.0;
+        double press_y = 0.0;
     };
     struct KeyButtonState {
         bool is_down = false;

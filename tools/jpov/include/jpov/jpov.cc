@@ -582,6 +582,23 @@ void JPOV::ReleaseTexture(uint32_t texture_id) {
     renderer_->GetTextureManager().Release(texture_id);
 }
 
+const char* JPOV::GetClipboardText() const {
+    // 无窗口（headless 拍摄 / 未 Init）时剪贴板不存在：返回 nullptr 而不是空串，
+    // 让调用方（UI）能把“没有剪贴板”与“剪贴板是空的”区分开（两者对粘贴都是无内容）。
+    if (window_ == nullptr) {
+        return nullptr;
+    }
+    return glfwGetClipboardString(window_);
+}
+
+void JPOV::SetClipboardText(const char* text) {
+    CHECK(text != nullptr) << "SetClipboardText: text must not be null";
+    if (window_ == nullptr) {
+        return;  // headless：无窗口可写，静默跳过（测试/拍摄不会崩）。
+    }
+    glfwSetClipboardString(window_, text);
+}
+
 uint32_t JPOV::RegisterVolumeTexture(const std::string& filepath) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK(!filepath.empty()) << "RegisterVolumeTexture: filepath is empty";
@@ -851,6 +868,9 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     mouse_last_x_ = mouse_x_;
     mouse_last_y_ = mouse_y_;
     input->scroll_delta = static_cast<float>(scroll_delta_);
+    // 左键按下的起点（仅左键；本帧按住时有效，松开后是残留值）。
+    input->left_press_x = static_cast<float>(left_btn_.press_x);
+    input->left_press_y = static_cast<float>(left_btn_.press_y);
     frame_start_time_ = glfwGetTime();
 
     FlushMouseButton(left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail,
@@ -903,6 +923,8 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
         slot.s->press_time = now;
         slot.s->is_down = true;
         slot.s->moved_since_press = false;
+        slot.s->press_x = mouse_x_;
+        slot.s->press_y = mouse_y_;
     } else if (action == GLFW_RELEASE) {
         slot.s->released_this_frame = true;
         bool should_click = !slot.s->moved_since_press;

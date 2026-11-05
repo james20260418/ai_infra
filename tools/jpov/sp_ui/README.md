@@ -96,6 +96,27 @@ bool AccordionHeader(label, bool* open, box, ...); // 返回本帧的展开态
 void ColorSwatch(label, color, box, ...);          // 纯色填充 + 纹理边框
 ```
 
+### InputText 的编辑能力（2026-11-03）
+
+```cpp
+// 文本按 UTF-8 码点编辑：中文/emoji 可安全退格、删除、粘贴，不会切出半个字。
+bool InputText(label, char* buf, size_t cap, box, ...);
+
+// 剪贴板：sp_ui 是纯 CPU 指令层，不链接窗口库 —— 用回调注入（同 SetTextMeasure）。
+// 窗口程序接 JPOV::GetClipboardText / SetClipboardText；不给回调则退化为
+// **进程内剪贴板**（无窗口的 CPU 测试也能 Ctrl+C/V）。
+jpov::sp_ui::SpUi::SpClipboard cb;
+cb.get = &MyApp::ClipboardGet;   // const char* (*)(void*)
+cb.set = &MyApp::ClipboardSet;   // void (*)(const char*, void*)
+cb.userdata = this;
+ui.SetClipboard(cb);
+```
+
+- 左键**按下**即聚焦；按下点决定光标，拖动拉选区（锚点 = 按下点，低帧率不漂）。
+- 有选区时 Backspace/Delete/输入都先删选区；Left/Right 折叠到选区头/尾（单竖杠）。
+- Ctrl+A 全选 / Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴（粘贴会清理换行/Tab 等控制字符）。
+- 选区颜色由主题 `selection_background`（带 alpha）控制；有选区时不画竖线光标。
+
 两个辅助：
 
 ```cpp
