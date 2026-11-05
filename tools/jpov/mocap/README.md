@@ -132,8 +132,9 @@ P(j) = B(j)⁻¹ · W(parent)⁻¹ · W(j)      // P = 相对 bind 的 local 旋
 ### 5.1 依赖（一次）
 
 ```bash
-# 提取器只需要 numpy/mediapipe；拟合与回放都是 C++，无需 Python
-python3 -m venv /tmp/mpvenv && /tmp/mpvenv/bin/pip install mediapipe opencv-python numpy
+# 提取器只需要 numpy/mediapipe；拟合与回放都是 C++，无需 Python。
+# 版本统一由仓库根的 requirements.txt 钉死（mediapipe↔opencv↔numpy 互相钳制）。
+python3 -m venv /tmp/mpvenv && /tmp/mpvenv/bin/pip install -r requirements.txt
 
 # MediaPipe 模型（≈9.4MB，一次）
 curl -L -o /tmp/pose_full.task \

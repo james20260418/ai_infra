@@ -8,3 +8,6 @@ __pycache__/
 # Compiled library output (rebuild from source when needed)
 third_party/glog-install/
 output/
+
+# 工具产出的中间目录（植被工具 out/、各类 --capture 落盘目录）
+out/
