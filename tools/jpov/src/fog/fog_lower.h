@@ -1,4 +1,4 @@
-// JPOV Fire-Fog — GL-free CPU 工具：命令层点雾 → 后端团（FogBody）+ 屏幕 tile 剪枝表
+// JPOV Fog — GL-free CPU 工具：命令层点雾 → 后端团（FogBody）+ 屏幕 tile 剪枝表
 //
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。本文件只做**纯 CPU** 的两件事，
 // 与 GL 无关、可单测：
@@ -9,10 +9,10 @@
 //
 // MVP 约定：只有 kRoundBox（圆角盒，替换早期点雾/球）；PointFog.sigma 为消光系数（点处
 // σ = sigma·w，w 由圆角盒距离 + 剖面给出），albedo 为散射色（乘光照），emission 为自发光
-// （与密度无关）。这些语义在 fire_fog_shader.h 里与之对应（光照始终开启）。
+// （与密度无关）。这些语义在 fog_shader.h 里与之对应（光照始终开启）。
 
-#ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
-#define JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
+#ifndef JPOV_SRC_FOG_FOG_LOWER_H_
+#define JPOV_SRC_FOG_FOG_LOWER_H_
 
 #include <algorithm>
 #include <cmath>
@@ -23,8 +23,8 @@
 #include "glog/logging.h"
 
 #include "tools/jpov/interface/render_command.h"  // PointFog / Vec3f
-#include "tools/jpov/src/fire_fog/convex_hull_tiles.h"
-#include "tools/jpov/src/fire_fog/fog_body.h"
+#include "tools/jpov/src/fog/convex_hull_tiles.h"
+#include "tools/jpov/src/fog/fog_body.h"
 
 namespace jpov {
 
@@ -224,8 +224,8 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
 // ⚠️ 索引为 uint8 + sentinel ⇒ **全局至多 sentinel 个光源**（索引 0..sentinel-1）；
 //    超出者直接丢弃（否则 static_cast<uint8_t> 回绕 → 指到错误光源）。
 //
-// 用途：fire_fog inject 的**点光源内散射**按 froxel 的 Nxy 栅格做 tile culling
-//（与雾团 TC **解耦**：光源表用 fire_fog 自己的网格，不共用渲染器的 16px 光表）。
+// 用途：fog inject 的**点光源内散射**按 froxel 的 Nxy 栅格做 tile culling
+//（与雾团 TC **解耦**：光源表用 fog 自己的网格，不共用渲染器的 16px 光表）。
 //
 // 输出布局：宽 = grid_w*texels_per_tile，高 = grid_h；每 tile 的 texels_per_tile 个 texel
 // 依次接排；每 texel 的 RGBA 各放一个 uint8 光索引；空槽填 sentinel。
@@ -439,4 +439,4 @@ inline std::vector<float> BuildTileRayData(const float inv_vp[16],
 
 }  // namespace jpov
 
-#endif  // JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
+#endif  // JPOV_SRC_FOG_FOG_LOWER_H_

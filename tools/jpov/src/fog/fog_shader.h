@@ -1,32 +1,32 @@
-// JPOV Fire-Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
+// JPOV Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
 //
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。趟（前两趟跑在 froxel 纹理上，最后一趟全屏）：
-//   inject  （fire_fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
+//   inject  （fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
 //                                  视线，在 [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
-//   reduce  （fire_fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
+//   reduce  （fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
 //                                  得到「每块 = 4^j 个切片」的粗粒度块，供 scatter「大块跳」。
-//   scatter （fire_fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
+//   scatter （fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
 //                                  用金字塔 + **base-4 分解** ⇒ 每 texel **O(log Nz)** 次合成。
-//   composite（fire_fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
+//   composite（fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
 //                                  切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
 //
 // froxel 网格：每个 Nxy 单元 = froxel 纹理上一块 sblock×sblock texel（sblock=√nz），
 // 承载 nz 个 z 切片（指数分布，近密远疏）；texel 索引 k = iy*uBlockSide + ix（行主序）。
-// 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FireFogParams.nz / tile_px）。
+// 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FogParams.nz / tile_px）。
 //
 // 存储语义（inject / 各级 / scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
 //   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))。
 //   - reduce 级 j 每个 cell = 上一级 4 个 cell（z 序）的 over 合成，覆盖 4^j 个切片。
 //   - scatter 的 texel k 存**累积**「覆盖 [z_near, z_{k+1})」的 (τ, S)，其自然位置 = z_{k+1}。
-// ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fire_fog_renderer.h 对应。
+// ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fog_renderer.h 对应。
 
-#ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
-#define JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
+#ifndef JPOV_SRC_FOG_FOG_SHADER_H_
+#define JPOV_SRC_FOG_FOG_SHADER_H_
 
 namespace jpov {
 
 // 全屏三角形 VS（gl_VertexID 覆盖 NDC，无 VAO/VBO；与 horizon_fog 同款）。
-inline constexpr const char* kFireFogVs = R"glsl(
+inline constexpr const char* kFogVs = R"glsl(
 #version 330 core
 out vec2 vTexCoord;
 void main() {
@@ -40,21 +40,21 @@ void main() {
 )glsl";
 
 // 各趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
-inline constexpr const char* kFireFogCommonGlsl = R"glsl(
+inline constexpr const char* kFogCommonGlsl = R"glsl(
 
-// ── 团 tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
+// ── 团 tile 索引纹理布局常量（编译期，与 fog_renderer.h 对应）──
 #define MAX_FOGS_PER_TILE    8
 #define TEXELS_PER_TILE      2
 #define FOG_INDEX_SENTINEL   255u
 
-// ── 点光源 tile 索引纹理布局常量（fire_fog 自持；与 fire_fog_renderer.h 对应）──
+// ── 点光源 tile 索引纹理布局常量（fog 自持；与 fog_renderer.h 对应）──
 // 每个 Nxy 单元至多 8 个光源（与最大团数同值），每 texel RGBA 各 1 个 uint8 索引。
 #define MAX_LIGHTS_PER_TILE    8
 #define LIGHT_TEXELS_PER_TILE  2
 #define MAX_TOTAL_LIGHTS       255
 #define LIGHT_INDEX_SENTINEL   255u
 
-// ── froxel 网格（运行期 uniform；见 FireFogParams.nz / tile_px）──
+// ── froxel 网格（运行期 uniform；见 FogParams.nz / tile_px）──
 //   uNz        每柱 z 切片数（= uBlockSide²）
 //   uBlockSide 每柱在 froxel 纹理上的 texel 边长（= √uNz）
 //   uTilePx    每个 Nxy 单元对应的**屏幕**像素边长（每轴）
@@ -293,13 +293,13 @@ FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
 )glsl";
 
 // ── 趟 1：inject —— 逐 froxel 局部 (τ, S) ──
-inline constexpr const char* kFireFogInjectBody = R"glsl(
+inline constexpr const char* kFogInjectBody = R"glsl(
 
 uniform sampler2D uTileFogIndices;
 uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, zmax)
 uniform sampler2D uTileRayTex;   // RGBA32F：每 tile 中心视线方向（单位向量，CPU 预算）
 uniform sampler2D uZSlicesTex;   // R32F：z 切片边界 z_0..z_Nz（CPU 预算）
-uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fire_fog 自持网格）
+uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fog 自持网格）
 uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
 uniform int   uTotalFogs;
@@ -404,7 +404,7 @@ void main() {
         }
     }
 
-    // 本 tile 的点光源候选（≤ MAX_LIGHTS_PER_TILE；fire_fog 自持网格，与团的网格同尺寸）。
+    // 本 tile 的点光源候选（≤ MAX_LIGHTS_PER_TILE；fog 自持网格，与团的网格同尺寸）。
     uint light_idx[MAX_LIGHTS_PER_TILE];
     int nl = 0;
     for (int t = 0; t < LIGHT_TEXELS_PER_TILE; ++t) {
@@ -473,7 +473,7 @@ void main() {
 
 // ── 趟 2：reduce —— 金字塔一级（每柱边长 uLevelSide，由上一级 4 合 1）──
 // 输出 cell m = 上一级 cell 4m..4m+3（z 序）的 over 合成 = 覆盖 4^level 个切片。
-inline constexpr const char* kFireFogReduceBody = R"glsl(
+inline constexpr const char* kFogReduceBody = R"glsl(
 
 uniform sampler2D uSrcLevel;
 uniform int uLevelSide;   // 本级每柱 texel 边长 S_j
@@ -506,7 +506,7 @@ void main() {
 // 块大小 4^j）。n = k+1（累积覆盖切片 [0, n)）：把 n 按 base-4 分解，
 // 级 j 取块 [ (n>>2j)&~3 , +((n>>2j)&3) )，**从大块到小块按 z 序** over 合成。
 // 每级 ≤3 块 ⇒ 总 ≤3·(uLevelsCount+1) 次合成 = O(log Nz)。
-inline constexpr const char* kFireFogScatterBody = R"glsl(
+inline constexpr const char* kFogScatterBody = R"glsl(
 
 uniform sampler2D uLevels[6];   // [0]=L1（inject），[1..5]=缩减级（块 4^1..4^5）
 uniform int uLevelsCount;        // 缩减级数 = log4(uNz)
@@ -595,7 +595,7 @@ void main() {
 )glsl";
 
 // ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 + （可选）玻璃层合成 → 就地混合 ──
-inline constexpr const char* kFireFogCompositeBody = R"glsl(
+inline constexpr const char* kFogCompositeBody = R"glsl(
 
 uniform sampler2D uScatter;
 uniform sampler2D uSceneDepthTex;
@@ -683,4 +683,4 @@ void main() {
 
 }  // namespace jpov
 
-#endif  // JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
+#endif  // JPOV_SRC_FOG_FOG_SHADER_H_

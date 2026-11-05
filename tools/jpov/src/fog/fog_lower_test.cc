@@ -1,10 +1,10 @@
-// FireFogLower 单测 — GL-free CPU 工具：命令层点雾 → 团（FogBody）+ tile 剪枝表；
-// 以及点光源 tile 索引表（fire_fog 自持的 Nxy 网格光源 culling）。
+// FogLower 单测 — GL-free CPU 工具：命令层点雾 → 团（FogBody）+ tile 剪枝表；
+// 以及点光源 tile 索引表（fog 自持的 Nxy 网格光源 culling）。
 //
 // 覆盖：LowerPointFog 字段映射；BuildTileFogIndexData / BuildTileLightIndexData 的空输入 /
 // 居中投影覆盖 / 每 tile cap（先到先得）/ 打包布局 / 近平面后保守全屏；z 范围表；tile 射线。
 
-#include "tools/jpov/src/fire_fog/fire_fog_lower.h"
+#include "tools/jpov/src/fog/fog_lower.h"
 
 #include <array>
 #include <cmath>
@@ -60,7 +60,7 @@ PointFog MakeFog(const Vec3f& center, float half, FogAttenuation atten) {
     return fog;
 }
 
-TEST(FireFogLower, LowerPointFogMapsFields) {
+TEST(FogLower, LowerPointFogMapsFields) {
     PointFog fog;
     fog.center = Vec3f(1.0f, 2.0f, 3.0f);
     fog.size = Vec3f(2.0f, 4.0f, 6.0f);       // 长宽高（各轴不等 ⇒ 验半尺寸换算）
@@ -95,7 +95,7 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.params[1], 0.5f);
 }
 
-TEST(FireFogLower, EmptyBodiesAllSentinel) {
+TEST(FogLower, EmptyBodiesAllSentinel) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -113,7 +113,7 @@ TEST(FireFogLower, EmptyBodiesAllSentinel) {
     }
 }
 
-TEST(FireFogLower, CenteredBodyCoversExpectedTiles) {
+TEST(FogLower, CenteredBodyCoversExpectedTiles) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -149,7 +149,7 @@ TEST(FireFogLower, CenteredBodyCoversExpectedTiles) {
     EXPECT_EQ(covered, 4);
 }
 
-TEST(FireFogLower, PerTileCapFirstComeFirstServed) {
+TEST(FogLower, PerTileCapFirstComeFirstServed) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -180,7 +180,7 @@ TEST(FireFogLower, PerTileCapFirstComeFirstServed) {
     }
 }
 
-TEST(FireFogLower, BehindCameraCoversWholeScreen) {
+TEST(FogLower, BehindCameraCoversWholeScreen) {
     constexpr int kGridW = 4;
     constexpr int kGridH = 4;
     constexpr int kTile = 16;
@@ -214,7 +214,7 @@ TEST(FireFogLower, BehindCameraCoversWholeScreen) {
     }
 }
 
-TEST(FireFogLower, ZRangeEmptyBodiesAllZero) {
+TEST(FogLower, ZRangeEmptyBodiesAllZero) {
     float mvp[16];
     IdentityMvp(mvp);
     const std::vector<float> zr =
@@ -225,7 +225,7 @@ TEST(FireFogLower, ZRangeEmptyBodiesAllZero) {
     }
 }
 
-TEST(FireFogLower, ZRangeCenteredBodyCoversExpectedTiles) {
+TEST(FogLower, ZRangeCenteredBodyCoversExpectedTiles) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -261,7 +261,7 @@ TEST(FireFogLower, ZRangeCenteredBodyCoversExpectedTiles) {
     EXPECT_EQ(hit, 4);
 }
 
-TEST(FireFogLower, ZRangeBehindCameraCoversWholeScreen) {
+TEST(FogLower, ZRangeBehindCameraCoversWholeScreen) {
     constexpr int kGridW = 4;
     constexpr int kGridH = 4;
     constexpr int kTile = 16;
@@ -290,7 +290,7 @@ TEST(FireFogLower, ZRangeBehindCameraCoversWholeScreen) {
     }
 }
 
-TEST(FireFogLower, TileRayDirectionsAreUnitAndCentered) {
+TEST(FogLower, TileRayDirectionsAreUnitAndCentered) {
     // 恒等 inv_vp + 相机在原点：tile 中心 NDC 的 far 点方向即 NDC 方向。
     float inv_vp[16];
     IdentityMvp(inv_vp);
@@ -327,7 +327,7 @@ TEST(FireFogLower, TileRayDirectionsAreUnitAndCentered) {
     }
 }
 
-TEST(FireFogLower, ZRangeBodyOutsideDepthRangeAllZero) {
+TEST(FogLower, ZRangeBodyOutsideDepthRangeAllZero) {
     float mvp[16];
     IdentityMvp(mvp);
 
@@ -342,9 +342,9 @@ TEST(FireFogLower, ZRangeBodyOutsideDepthRangeAllZero) {
     }
 }
 
-// ── 点光源 tile 索引表（fire_fog 自持网格）──────────────────────────────────
+// ── 点光源 tile 索引表（fog 自持网格）──────────────────────────────────
 
-TEST(FireFogLower, LightIndexEmptyAllSentinel) {
+TEST(FogLower, LightIndexEmptyAllSentinel) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -362,7 +362,7 @@ TEST(FireFogLower, LightIndexEmptyAllSentinel) {
     }
 }
 
-TEST(FireFogLower, LightIndexCenteredCoversExpectedTiles) {
+TEST(FogLower, LightIndexCenteredCoversExpectedTiles) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -401,7 +401,7 @@ TEST(FireFogLower, LightIndexCenteredCoversExpectedTiles) {
     EXPECT_EQ(covered, 4);
 }
 
-TEST(FireFogLower, LightIndexPerTileCapFirstComeFirstServed) {
+TEST(FogLower, LightIndexPerTileCapFirstComeFirstServed) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kGridW = 4;
@@ -434,7 +434,7 @@ TEST(FireFogLower, LightIndexPerTileCapFirstComeFirstServed) {
     }
 }
 
-TEST(FireFogLower, LightIndexZeroRadiusSkipped) {
+TEST(FogLower, LightIndexZeroRadiusSkipped) {
     float mvp[16];
     IdentityMvp(mvp);
     constexpr int kMaxPer = 8;
@@ -456,7 +456,7 @@ TEST(FireFogLower, LightIndexZeroRadiusSkipped) {
     }
 }
 
-TEST(FireFogLower, LightIndexBehindCameraCoversWholeScreen) {
+TEST(FogLower, LightIndexBehindCameraCoversWholeScreen) {
     constexpr int kGridW = 4;
     constexpr int kGridH = 4;
     constexpr int kTile = 16;
@@ -493,7 +493,7 @@ TEST(FireFogLower, LightIndexBehindCameraCoversWholeScreen) {
     }
 }
 
-TEST(FireFogLower, LightIndexOverTotalCapDroppedNotWrapped) {
+TEST(FogLower, LightIndexOverTotalCapDroppedNotWrapped) {
     // 超过 sentinel 个光源（uint8 索引上限）时，多出的光源必须**被丢弃**
     //（而非 static_cast<uint8_t> 回绕指到错误光源）。
     float mvp[16];

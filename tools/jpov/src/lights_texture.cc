@@ -9,7 +9,7 @@
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）。
 // ⚠️ MinGW 也要显式包含 <GL/glext.h>：RGBA32F / CLAMP_TO_EDGE 等 GL3 枚举不在
-//    <GL/gl.h>（仅 GL 1.1）里，gl_loader.h 也不提供（同 fire_fog_renderer.cc）。
+//    <GL/gl.h>（仅 GL 1.1）里，gl_loader.h 也不提供（同 fog_renderer.cc）。
 #include <GL/gl.h>
 #include <GL/glext.h>
 

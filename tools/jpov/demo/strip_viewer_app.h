@@ -689,7 +689,7 @@ public:
     bool bloom_ = true;                     // 辉光（把 HDR 高亮模糊加回）
 
     // ── 玻璃缸 + 橡树（天光消费的验收场景）──
-    // 用 fire-fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
+    // 用 fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
     // 它会随天光/太阳变亮变暗。**默认关**，所以 gold 的 8 张图完全不受影响。
     // ── 采样对比场景（4 / 8 / 16 / 32 四档，沿 Z 排开）──
     bool sampling_visible_ = false;
@@ -1067,7 +1067,7 @@ private:
 
     // ── 玻璃缸场景（sky_light 的验收）─────────────────────────────────────
     //
-    // 树 = fire-fog viewer 同款橡树（build 脚本把 glb 拷到 exe 旁 models/）。
+    // 树 = fog viewer 同款橡树（build 脚本把 glb 拷到 exe 旁 models/）。
     // 缸 = 四条带围成的**开口**筒（底面 + 内外立壁；顶面丢掉，方便看树冠从上面出来）。
     //
     // 懒加载：gold 的 8 张图都不用这个场景，所以**绝不在 Setup 里加载** —— 否则
@@ -1099,7 +1099,7 @@ private:
                             "缸壁仍会画，但里面是空的";
             return;
         }
-        // 归一化到 6m（与 fire-fog viewer 同一目标高度；bounds 无效则不缩放）。
+        // 归一化到 6m（与 fog viewer 同一目标高度；bounds 无效则不缩放）。
         if (oak_.bounds_valid) {
             const float hgt = oak_.bounds_max[1] - oak_.bounds_min[1];
             if (hgt > 1.0e-6f) {

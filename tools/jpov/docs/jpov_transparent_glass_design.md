@@ -89,7 +89,7 @@ Cg   = Cavg · (1 − Tg)             // 预乘段色
 
 ## 4. 与体积雾联合积分（composite 合并）
 
-`fire_fog_shader.h` 的 `kFireFogCompositeBody`。设：
+`fog_shader.h` 的 `kFogCompositeBody`。设：
 
 - `S_f, T_f = fog(0→z_g)`（用 froxel 区间反解，`T_f = exp(−τ_f)`）；
 - `S_op, T_op = fog(0→z_op)`（`z_op` = 不透明场景深度）；
@@ -187,7 +187,7 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 
 ## 8. 验收（本地）
 
-- `fire_fog` 全量单测 + 2 张 gold：**全过**，god ray / pointlight gold `max-channel-mean-diff=0`（零回归）。
+- `fog` 全量单测 + 2 张 gold：**全过**，god ray / pointlight gold `max-channel-mean-diff=0`（零回归）。
 - `object3d` / `ui` / `interface` gold：**全过**（`DrawObject3D` 抽公共 helper 后 opaque/cutout 逐字节不变）。
 - ff viewer headless：round box 雾场景 + 树一侧 **MakeBox 浅红玻璃墙**（`70_glass_off` /
   `71_glass_on` / `72_glass_alpha60` / `73_glass_alpha15`）：树与雾透过玻璃可见，红色吸收
@@ -206,11 +206,11 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 | `interface/pbr_material.h` | `AlphaMode::kBlend` 枚举值 |
 | `src/object3d/object3d_renderer.{h,cc}` | `JPOV_ALPHA_BLEND` 变体（FS 输出/手动作深度测试/WBO 权重）、`uAlpha`、`uGlassSceneDepth`、`DrawObject3DBlend` |
 | `src/renderer.{h,cc}` | 玻璃 FBO（`EnsureGlassFBO`/`ClearGlassFBO`/`DestroyGlassFBO`）、`DrawTransparentPass`、`HasBlendObjects`、两个 blend program、shadow/pick/highlight 里的 kBlend 跳过分支 |
-| `src/fire_fog/*` | `FireFogGlass` 参数与 composite 里的玻璃段积分（回落到纯雾路径） |
+| `src/fog/*` | `FogGlass` 参数与 composite 里的玻璃段积分（回落到纯雾路径） |
 | `src/texture_units.h` | `kTexUnitGlassSceneDepth` |
 | `test/object3d/` | `jpov_transparent_gold_{common.h,generator.cc,test.cc}` + `transparent_1280x720.png` |
 | `test/wbo/` | `wbo_weight_contract_test`（它钉的是「玻璃 shader 的内联权重副本 vs 权威副本」，副本不再存在） |
-| `demo/fire_fog_viewer*` | 玻璃墙 / 玻璃人 / 对应面板与截图档 |
+| `demo/fog_viewer*` | 玻璃墙 / 玻璃人 / 对应面板与截图档 |
 
 **没变的东西**：条带 / 粒子 / 体积火三条 WBO 路径一个字节没动；`WboTarget` 与
 `kWboWeightGlsl` 保持原样（现在只有一份权重实现，双份契约测试因此失去意义）。

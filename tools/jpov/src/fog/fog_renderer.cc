@@ -1,15 +1,15 @@
-// JPOV FireFogRenderer 成员函数实现（froxel 版）
+// JPOV FogRenderer 成员函数实现（froxel 版）
 //
-// 见 fire_fog_renderer.h / fire_fog_shader.h / tools/jpov/docs/jpov_froxel_design.md。
+// 见 fog_renderer.h / fog_shader.h / tools/jpov/docs/jpov_froxel_design.md。
 //
 // 趟：inject → reduce×num_levels（金字塔）→ scatter → composite（就地混合进调用方 HDR FBO）。
 //
-// ⚠️ GL 状态机契约见 fire_fog_renderer.h 顶部。本文件自行保存/复原 FBO 绑定 / viewport /
+// ⚠️ GL 状态机契约见 fog_renderer.h 顶部。本文件自行保存/复原 FBO 绑定 / viewport /
 //    活动纹理单元 / 使用的纹理单元绑定 / blend func；其余 enable 位由调用方 glPushAttrib 兜底。
 
 #define GL_GLEXT_PROTOTYPES
 
-#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/fog/fog_renderer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,10 +41,10 @@
 
 #include <glog/logging.h>
 
-#include "tools/jpov/src/fire_fog/fire_fog_lower.h"
+#include "tools/jpov/src/fog/fog_lower.h"
 #include "tools/jpov/src/csm_shadow_glsl.h"
 #include "tools/jpov/src/texture_units.h"
-#include "tools/jpov/src/fire_fog/fire_fog_shader.h"
+#include "tools/jpov/src/fog/fog_shader.h"
 
 namespace {
 
@@ -66,7 +66,7 @@ int TexUnitsTouched() {
 }
 
 // 4x4 列主序求逆（Gauss-Jordan + 部分主元）。无法求逆返回 false。
-//（与 horizon_fog_renderer.cc / 点雾版 fire_fog_renderer.cc 同款实现。）
+//（与 horizon_fog_renderer.cc / 点雾版 fog_renderer.cc 同款实现。）
 bool Mat4Invert(const float m[16], float out[16]) {
     float a[16];
     for (int i = 0; i < 16; ++i) {
@@ -121,7 +121,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 // 组装一趟的 FS 源码（#version 330 core + 公共前置 + 趟体）。
 std::string AssembleFragmentShader(const char* body) {
     std::string s = "#version 330 core\n";
-    s += jpov::kFireFogCommonGlsl;
+    s += jpov::kFogCommonGlsl;
     s += jpov::kCsmSingleTapGlsl;   // CSM 采样唯一一份实现（与 strip 共用）
     s += body;
     return s;
@@ -157,25 +157,25 @@ bool CreateRgba32fTarget(int w, int h, unsigned int* out_tex /*output*/,
 
 namespace jpov {
 
-FireFogRenderer::~FireFogRenderer() {
+FogRenderer::~FogRenderer() {
     Finalize();
 }
 
-void FireFogRenderer::Init(ShaderManager* shader_mgr) {
+void FogRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(shader_mgr != nullptr);
     shader_mgr_ = shader_mgr;
-    fs_inject_ = AssembleFragmentShader(kFireFogInjectBody);
-    fs_reduce_ = AssembleFragmentShader(kFireFogReduceBody);
-    fs_scatter_ = AssembleFragmentShader(kFireFogScatterBody);
-    fs_composite_ = AssembleFragmentShader(kFireFogCompositeBody);
+    fs_inject_ = AssembleFragmentShader(kFogInjectBody);
+    fs_reduce_ = AssembleFragmentShader(kFogReduceBody);
+    fs_scatter_ = AssembleFragmentShader(kFogScatterBody);
+    fs_composite_ = AssembleFragmentShader(kFogCompositeBody);
     prog_inject_ = shader_mgr_->GetOrCreate(
-        "fire_fog_inject", {kFireFogVs, fs_inject_.c_str()});
+        "fog_inject", {kFogVs, fs_inject_.c_str()});
     prog_reduce_ = shader_mgr_->GetOrCreate(
-        "fire_fog_reduce", {kFireFogVs, fs_reduce_.c_str()});
+        "fog_reduce", {kFogVs, fs_reduce_.c_str()});
     prog_scatter_ = shader_mgr_->GetOrCreate(
-        "fire_fog_scatter", {kFireFogVs, fs_scatter_.c_str()});
+        "fog_scatter", {kFogVs, fs_scatter_.c_str()});
     prog_composite_ = shader_mgr_->GetOrCreate(
-        "fire_fog_composite", {kFireFogVs, fs_composite_.c_str()});
+        "fog_composite", {kFogVs, fs_composite_.c_str()});
 
     // 1×1 深度哑元（值=1.0）：供调用方传 scene_depth_tex==0 时使用。
     const float one = 1.0f;
@@ -189,7 +189,7 @@ void FireFogRenderer::Init(ShaderManager* shader_mgr) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void FireFogRenderer::Finalize() {
+void FogRenderer::Finalize() {
     if (inject_tex_ != 0) {
         glDeleteTextures(1, &inject_tex_);
         inject_tex_ = 0;
@@ -271,7 +271,7 @@ void FireFogRenderer::Finalize() {
     shader_mgr_ = nullptr;
 }
 
-void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
+void FogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
     CHECK_GE(grid_cols, 1);
     CHECK_GE(grid_rows, 1);
     const int tex_w = grid_cols * kTexelsPerTile;
@@ -337,7 +337,7 @@ void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
         tile_ray_tex_h_ = grid_rows;
     }
     // 点光源 tile 索引纹理（RGBA8；宽 = grid_cols*kLightTexelsPerTile，高 = grid_rows）——
-    // fire_fog **自持**一套光源 TC（不共用渲染器 16px 光表）；同样随 Nxy 栅格尺寸重建。
+    // fog **自持**一套光源 TC（不共用渲染器 16px 光表）；同样随 Nxy 栅格尺寸重建。
     const int light_tex_w = grid_cols * kLightTexelsPerTile;
     const bool light_need_rebuild = (tile_light_tex_ == 0) ||
                                     (light_tex_w != tile_light_tex_w_) ||
@@ -362,7 +362,7 @@ void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
     grid_h_ = grid_rows;
 }
 
-void FireFogRenderer::EnsureZSlices(int nz) {
+void FogRenderer::EnsureZSlices(int nz) {
     CHECK_GE(nz, 2);
     const int count = nz + 1;   // 边界 z_0..z_Nz
     if (z_slices_tex_ != 0 && z_slices_count_ == count) {
@@ -383,7 +383,7 @@ void FireFogRenderer::EnsureZSlices(int nz) {
     z_slices_count_ = count;
 }
 
-void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
+void FogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
                                     int num_levels) {
     CHECK_GE(grid_cols, 1);
     CHECK_GE(grid_rows, 1);
@@ -415,7 +415,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
         }
         std::string err;
         const bool ok = CreateRgba32fTarget(froxel_w, froxel_h, texs[s], fbos[s], &err);
-        CHECK(ok) << "FireFogRenderer: " << err
+        CHECK(ok) << "FogRenderer: " << err
                   << "（RGBA32F 颜色附件不可渲染？w=" << froxel_w << " h=" << froxel_h << "）";
     }
 
@@ -439,7 +439,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
         std::string err;
         const bool ok =
             CreateRgba32fTarget(w, h, &level_tex_[j - 1], &level_fbo_[j - 1], &err);
-        CHECK(ok) << "FireFogRenderer: 金字塔级 " << j << " " << err
+        CHECK(ok) << "FogRenderer: 金字塔级 " << j << " " << err
                   << "（w=" << w << " h=" << h << "）";
         level_w_[j - 1] = w;
         level_h_[j - 1] = h;
@@ -454,7 +454,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
     level_grid_h_ = grid_rows;
 }
 
-void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
+void FogRenderer::Draw(const std::vector<PointFog>& fogs,
                            const std::vector<PointLight>& point_lights,
                            unsigned int light_data_tex,
                            const Camera& cam,
@@ -462,9 +462,9 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            int viewport_w,
                            int viewport_h,
                            unsigned int scene_depth_tex,
-                           const FireFogParams& params,
-                           const FireFogLighting& light) {
-    CHECK(shader_mgr_ != nullptr) << "FireFogRenderer::Init 未调用";
+                           const FogParams& params,
+                           const FogLighting& light) {
+    CHECK(shader_mgr_ != nullptr) << "FogRenderer::Init 未调用";
     if (fogs.empty()) {
         return;   // 零开销：无雾体
     }
@@ -472,31 +472,31 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     CHECK_GT(viewport_h, 0);
     CHECK_GT(cam.near, 0.0f);
     CHECK_GT(cam.far, cam.near);
-    CHECK_GT(params.z_near, 0.0f) << "FireFogParams.z_near 必须 > 0";
-    CHECK_GT(params.z_far, params.z_near) << "FireFogParams.z_far 必须 > z_near";
+    CHECK_GT(params.z_near, 0.0f) << "FogParams.z_near 必须 > 0";
+    CHECK_GT(params.z_far, params.z_near) << "FogParams.z_far 必须 > z_near";
     CHECK_GE(params.sun_phase_g, 0.0f);
-    CHECK_LT(params.sun_phase_g, 0.95f) << "FireFogParams.sun_phase_g 必须 ∈ [0, 0.95)";
+    CHECK_LT(params.sun_phase_g, 0.95f) << "FogParams.sun_phase_g 必须 ∈ [0, 0.95)";
     // ── froxel 网格分辨率：nz（4 的幂）+ tile_px（屏幕像素）→ 派生量 ──
     //   sblock = √nz（须为 2 的幂，金字塔才能整齐 4 合 1）；
     //   Nxy    = ceil(W/tile_px) × ceil(H/tile_px)；
     //   froxel 纹理 = Nxy.x·sblock × Nxy.y·sblock。
     // 不合法直接 crash（不静默回退）。
-    CHECK_GE(params.nz, kMinNz) << "FireFogParams.nz 必须 >= " << kMinNz;
-    CHECK_LE(params.nz, kMaxNz) << "FireFogParams.nz 必须 <= " << kMaxNz;
+    CHECK_GE(params.nz, kMinNz) << "FogParams.nz 必须 >= " << kMinNz;
+    CHECK_LE(params.nz, kMaxNz) << "FogParams.nz 必须 <= " << kMaxNz;
     const int sblock =
         static_cast<int>(std::lround(std::sqrt(static_cast<double>(params.nz))));
     CHECK_EQ(sblock * sblock, params.nz)
-        << "FireFogParams.nz 必须完全平方（sblock=√nz 需为整数），得到 " << params.nz;
+        << "FogParams.nz 必须完全平方（sblock=√nz 需为整数），得到 " << params.nz;
     CHECK((sblock & (sblock - 1)) == 0)
-        << "FireFogParams.nz 必须是 4 的幂（sblock=√nz 需为 2 的幂），得到 " << params.nz;
+        << "FogParams.nz 必须是 4 的幂（sblock=√nz 需为 2 的幂），得到 " << params.nz;
     int num_levels = 0;
     for (int s = sblock; s > 1; s >>= 1) {
         ++num_levels;
     }
     CHECK_GE(num_levels, 1);
     CHECK_LE(num_levels, kMaxLevels) << "金字塔级数 " << num_levels << " 超上限 " << kMaxLevels;
-    CHECK_GE(params.tile_px, kMinTilePx) << "FireFogParams.tile_px 必须 >= " << kMinTilePx;
-    CHECK_LE(params.tile_px, kMaxTilePx) << "FireFogParams.tile_px 必须 <= " << kMaxTilePx;
+    CHECK_GE(params.tile_px, kMinTilePx) << "FogParams.tile_px 必须 >= " << kMinTilePx;
+    CHECK_LE(params.tile_px, kMaxTilePx) << "FogParams.tile_px 必须 <= " << kMaxTilePx;
     const int grid_cols = (viewport_w + params.tile_px - 1) / params.tile_px;
     const int grid_rows = (viewport_h + params.tile_px - 1) / params.tile_px;
     const int froxel_w = grid_cols * sblock;
@@ -555,7 +555,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     GL_RG, GL_FLOAT, zrange_data.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // ── 点光源 tile 剪枝（fire_fog 自持网格；每 Nxy ≤ kMaxLightsPerTile 个光源）──
+    // ── 点光源 tile 剪枝（fog 自持网格；每 Nxy ≤ kMaxLightsPerTile 个光源）──
     const std::vector<uint8_t> light_data = BuildTileLightIndexData(
         point_lights, view_proj, grid_w_, grid_h_, params.tile_px,
         kMaxLightsPerTile, kLightTexelsPerTile, kFogIndexSentinel);
@@ -626,7 +626,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
 
     float inv_vp[16];
     CHECK(Mat4Invert(view_proj, inv_vp))
-        << "FireFogRenderer: 相机矩阵不可逆（near/far 非法或退化）";
+        << "FogRenderer: 相机矩阵不可逆（near/far 非法或退化）";
 
     // ── 预烘两张小纹理：把 inject 原本**逐 texel** 的昂贵标量运算挪到 CPU / 每 tile 一次 ──
     //   ① 每 tile 中心视线方向（Nxy×1，单位向量）：省掉 inject 每 texel 两次 uInvVP 乘 + normalize。
@@ -705,7 +705,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         // 太阳方向在 CPU 归一：shader 的 HG 相位假设已归一，省掉逐 texel normalize。
         const Vec3f sd = light.sun->direction;
         const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() + sd.z() * sd.z());
-        CHECK_GT(sl, 1e-8f) << "FireFog: 太阳方向为零向量";
+        CHECK_GT(sl, 1e-8f) << "Fog: 太阳方向为零向量";
         glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uSunDir"),
                     sd.x() / sl, sd.y() / sl, sd.z() / sl);
     } else {
@@ -717,7 +717,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uCascadeCount"), cascade_count);
     if (cascade_count > 0) {
         CHECK_EQ(light.shadow_fbos.size(), static_cast<size_t>(cascade_count))
-            << "FireFog: shadow_fbos 与 cascade_count 不一致";
+            << "Fog: shadow_fbos 与 cascade_count 不一致";
         const ShadowConfig& sc = light.shadow_cfg;
         glUniform1fv(shader_mgr_->GetUniform(prog_inject_, "uCascadeRanges"),
                      cascade_count, sc.cascade_ranges);

@@ -66,7 +66,7 @@ echo "==> 3. 条带纹理"
 mkdir -p "$OUTPUT_DIR/textures"
 cp -v "$PROJECT_DIR/tools/jpov/assets/strip/ribbon_test.png" "$OUTPUT_DIR/textures/"
 
-echo "==> 4. 橡树模型（玻璃缸天光场景用；与 fire-fog viewer 同款）"
+echo "==> 4. 橡树模型（玻璃缸天光场景用；与 fog viewer 同款）"
 mkdir -p "$OUTPUT_DIR/models"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb" \
       "$OUTPUT_DIR/models/"

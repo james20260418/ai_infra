@@ -1,4 +1,4 @@
-// JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fire_fog 平级）
+// JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fog 平级）
 //
 // 定位（Danis 2026-10-14 定）：用户给出粒子的 flipbook + 一票信息（ParticleRenderCommand），
 // 本渲染器把结果画进 **WBO 半透明累积纹理**（覆盖集 accum/reveal + 加法集 add），
@@ -27,7 +27,7 @@
 //   两种模式**都**发生在 WBO 写入之前，故覆盖率解析 1−Π(1−α) 始终自洽。
 //
 // 合成：Composite() 全屏把半透 WBO 解析（C=accum.rgb/accum.a，覆盖=1−reveal）并以 over 混合
-//   写进**当前绑定的目标**（HDR），随后由 fire_fog 合成雾+玻璃 → 再后续。
+//   写进**当前绑定的目标**（HDR），随后由 fog 合成雾+玻璃 → 再后续。
 
 #ifndef JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
 #define JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_

@@ -15,7 +15,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
-#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
@@ -378,8 +378,8 @@ private:
     SkeletonRenderer skeleton_renderer_;
 
     // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
-    // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
-    FireFogRenderer fire_fog_renderer_;
+    // 单一自包含，与 object3d / horizon_fog 平级。见 src/fog/。
+    FogRenderer fog_renderer_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。
