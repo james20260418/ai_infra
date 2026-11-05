@@ -49,7 +49,7 @@ tools/jpov/genVolume/
 - **JPVOL2**：`magic "JPVOL2\0\0"`, `ver=2`, `nx,ny,nz`, `nframes`, `channels(=2)`, `dtype(0 f32/1 u8)`, `reserved`（40B 头）。
 - **体素序**：帧内 **x 最快 → y → z**，通道交错（R=density, G=temperature）；JPVOL2 帧间顺序排列（帧最慢）。
   ⇒ 与「每帧一层 2D 数组（宽=nx、高=ny*nz）」的 GPU 上传布局一致。
-- 通道归一化 `[0,1]`。引擎读取器：`tools/jpov/src/volume_manager.cc`（GL）+ `src/fire_fog/fire_volume.h`（GL-free）。
+- 通道归一化 `[0,1]`。引擎读取器：`tools/jpov/src/volume_manager.cc`（GL）+ `src/fog/fire_volume.h`（GL-free）。
 
 > ⚠️ **pyopenvdb 陷阱**：`grid.copyToArray(a, ijk)` 的 numpy 约定是 **`a[i][j][k] = voxel(i,j,k)`（首轴 = x，
 > 形状须 `(nx,ny,nz)`）**，**不是** `[z][y][x]`。按 `(nz,ny,nx)` 分配会 **x/z 对调 + 在 `nz>nx` 时静默截断 z**。

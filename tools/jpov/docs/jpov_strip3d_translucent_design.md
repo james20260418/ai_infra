@@ -1137,7 +1137,7 @@ L_out = α·C + (1−α)·L_bg                      // WBO over 合成
 
 **验收场景：橡树 + 开口玻璃缸（Danis 指定）**
 
-- 树 = fire-fog viewer 同款 `models/tripo_oak_4k.glb`（归一化到 6m）。
+- 树 = fog viewer 同款 `models/tripo_oak_4k.glb`（归一化到 6m）。
 - 缸 = `MakeStripRing` 的**底面 + 内外立壁**（顶面丢掉 ⇒ 开口缸，树冠从上面冒出来），
   当前尺寸：外半径 2.32m / 壁厚 0.04m / 高 4.32m / 中心高 2.16m（见 §19.15 的 -20%）。
   缸壁一条批（3 条带），平滑 pass + fresnel。
@@ -1233,7 +1233,7 @@ skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不�
   + `ShadowConfig`）。shadow map 绑在 `kTexUnitShadowMapBase`（7..11）——与主链路同段，
   因为本 pass 与 object3d 不同时活跃（和 tile/材质同一约定）。
 - **单级联单次采样、无 PCF**，按片元到相机距离选级联，末尾按 `fade_start/end` 淡出 ——
-  与 fire_fog 的雾体阴影**同一套写法与理由**：条带是薄片、片元多，PCF 的 9~64 次采样换不来
+  与 fog 的雾体阴影**同一套写法与理由**：条带是薄片、片元多，PCF 的 9~64 次采样换不来
   可见收益；而且 shadow map 是按**不透明几何**生成的，对半透明片做精细 PCF 没有物理意义。
   因此阴影边缘是「软块状」而非清晰（这是**取舍**，不是 bug）。
 - 深度偏置用 **tanθ=1 的保守值**（`max(0.01, 1.5·texelW)`），理由同雾：薄片法线与阴影深度轴
@@ -1244,7 +1244,7 @@ skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不�
 （`CsmTap`）+ 2 次 mat4×vec4（`uShadowVP` / `uShadowDepthVP`）+ 一次级联选择循环。
 `sun_intensity == 0`（纯天光 / 入夜）时整段太阳项跳过 ⇒ 没有额外采样。
 **不开天光的批仍然是原来那两个 program** —— 10 张 gold 逐字节不变、41/41 单测绿。
-实现上 CSM 采样只有一份（`src/csm_shadow_glsl.h`，与 fire_fog 共用），避免两处漂移。
+实现上 CSM 采样只有一份（`src/csm_shadow_glsl.h`，与 fog 共用），避免两处漂移。
 
 **验收（缸景）**：405/410 里树在缸壁内侧投出**可见的软影**，朝阳侧亮、背阴侧暗；
 400（不开天光）没有任何阴影。缸的默认尺寸同时按 Danis 要求**整体缩小 20%**

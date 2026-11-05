@@ -2,7 +2,7 @@
 
 > 日期：2026-10-14 ｜ 状态：**设计（待实现 MVP）** ｜ 目标工作区：`/james_pm/ai_infra_4`
 > 方向：**偷师 UE / Unity 的成熟火特效做法** —— 「广告牌粒子 + flipbook 序列帧 + 生命周期曲线 + 多发射器分层」。
-> 关联：`tools/jpov/docs/jpov_fire_fog_design.md`（环境雾火 froxel，已实现）；`/james_pm/fire_hero/`（资产 + Mantaflow 烘焙管线 + 逐像素 raymarch 设计）。
+> 关联：`tools/jpov/docs/jpov_fog_design.md`（环境雾火 froxel，已实现）；`/james_pm/fire_hero/`（资产 + Mantaflow 烘焙管线 + 逐像素 raymarch 设计）。
 > 上一版方向（逐像素体素 raymarch）见 `/james_pm/fire_hero/DESIGN.md` —— **本轮改为广告牌粒子**，raymarch 降级为「可选增强」保留。
 
 ---
@@ -273,8 +273,8 @@ struct ParticleEmitter {
 - **混合**：`kAdditive` = `(GL_SRC_ALPHA, GL_ONE)`（或预乘 `GL_ONE, GL_ONE`）；`kAlpha` = `(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`。
 - **排序**：`kAlpha` 层按视深**背→前**逐实例排序；`kAdditive` 层**不排**（无顺序依赖，省排序）。层间顺序 = 命令内 emitter 顺序（先烟后焰？错 —— **先画烟、后画焰**让焰压在烟上；加法层通常在 alpha 层之后画）。
 - **HDR**：输出到 3D HDR FBO，可被现有 **bloom** 消费 → 火自动发光。
-- **GL 状态机**：自行保存/复原 FBO / viewport / 活动纹理单元 / blend func（同 fire_fog 约定；调用方 `glPushAttrib` 兜底）。
-- **集成点**：新 `src/particles/particle_renderer.{h,cc}`（与 object3d / skeleton / fire_fog 平级、单一自包含）；`Renderer` 调它；拾取/高亮 **MVP 不接**（后续再加）。
+- **GL 状态机**：自行保存/复原 FBO / viewport / 活动纹理单元 / blend func（同 fog 约定；调用方 `glPushAttrib` 兜底）。
+- **集成点**：新 `src/particles/particle_renderer.{h,cc}`（与 object3d / skeleton / fog 平级、单一自包含）；`Renderer` 调它；拾取/高亮 **MVP 不接**（后续再加）。
 
 ### 5.4 资源（flipbook 火序列图）
 
@@ -309,12 +309,12 @@ struct ParticleEmitter {
 
 **复用（别重造）**：
 - `InstanceBuffer`（per-instance 布局 spec + Attach/Detach 配对）与既有 instancing 链路。
-- HDR / bloom / MRT 场景深度（软粒子用）/ 混合状态机约定（fire_fog 同款）。
+- HDR / bloom / MRT 场景深度（软粒子用）/ 混合状态机约定（fog 同款）。
 - viewer 框架（`demo/*_viewer_app.h`、`jpov_*_viewer.cc`、build 脚本模式）。
 - **Mantaflow 烘焙管线**（`tools/jpov/genVolume/` + `env/`）→ 出 flipbook 序列帧。
 
 **分工**：
-- **环境雾 / 烟 / 远景火** → `fire_fog`（froxel，已实现）。
+- **环境雾 / 烟 / 远景火** → `fog`（froxel，已实现）。
 - **主角「燃料火」** → **本方案（广告牌粒子）**。
 - **逐像素体渲染**（`fire_hero/DESIGN.md`）→ 可选增强，暂缓。
 
@@ -362,7 +362,7 @@ src_a *= fade            // 加法混合：乘 RGB；alpha 混合：乘 A
 ```
 - Unity：Renderer 的 **Soft Particles** 勾选（需相机 depth texture）；UE：材质 **Depth Fade**（或 Pixel Depth Offset 做写深度）。
 - **JPOV 落点（已明确）**：
-  1. **深度来源 = MRT#1 的场景深度颜色纹理（float）**，不是 depth texture —— llvmpipe 不能采 depth texture，这是既有约定（fire_fog 同款）。绑定 resolve 后的场景深度纹理给粒子 shader 采样。
+  1. **深度来源 = MRT#1 的场景深度颜色纹理（float）**，不是 depth texture —— llvmpipe 不能采 depth texture，这是既有约定（fog 同款）。绑定 resolve 后的场景深度纹理给粒子 shader 采样。
   2. **绘制顺序**：粒子**必须在所有不透明几何之后**画，此时 MRT#1 深度 = 纯不透明深度（透明不写深度）。
   3. **只对不透明几何淡出**（天然满足：透明层不写深度）。
   4. **面板参数**：每 emitter `soft_distance`（世界单位，0 = 关，等价 Unity 的软边因子）。

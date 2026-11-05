@@ -21,7 +21,7 @@
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/lights_texture.h"
-#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
@@ -589,8 +589,8 @@ static_assert(Object3DRenderer::kMaxTotalLights == jpov::kMaxPointLights,
               "Object3DRenderer::kMaxTotalLights 必须等于 kMaxPointLights（光源纹理宽度）");
 static_assert(InstancedObjectRenderer::kMaxTotalLights == jpov::kMaxPointLights,
               "InstancedObjectRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
-static_assert(FireFogRenderer::kMaxTotalLights == jpov::kMaxPointLights,
-              "FireFogRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
+static_assert(FogRenderer::kMaxTotalLights == jpov::kMaxPointLights,
+              "FogRenderer::kMaxTotalLights 必须等于 kMaxPointLights");
 
 const Color kColorRed         = {1.0f, 0.0f, 0.0f, 1.0f};
 const Color kColorGreen       = {0.0f, 1.0f, 0.0f, 1.0f};
@@ -613,7 +613,8 @@ Renderer::~Renderer() {
     DestroyBloomChain();
     DestroySkyColorFBO();
     DestroySkyEnvCube();
-    fire_fog_renderer_.Finalize();
+    fog_renderer_.Finalize();
+    fog_composite_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1356,7 +1357,8 @@ void Renderer::Init(
     ValidateShadowConfig(shadow_cfg);
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
-    fire_fog_renderer_.Init(&shader_mgr_);
+    fog_renderer_.Init(&shader_mgr_);
+    fog_composite_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
@@ -1877,7 +1879,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
                 // CSM 资源：只有「本帧有开天光的条带批」时才整理这份拷贝（几个 POD + ≤5 个
                 // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
-                // StripRenderer::Draw（与 fire_fog 的 FireFogLighting 同一模式）。
+                // StripRenderer::Draw（与 fog 的 FogLighting 同一模式）。
                 const bool strips_need_csm = StripBatchesNeedCsm(cmds);
                 StripCsmShadow strips_csm;
                 if (strips_need_csm && cmds.sun.has_value() && !shadow_fbos_.empty()) {
@@ -1956,8 +1958,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                                        GL_TEXTURE_2D, 0, 0);
                 // 物理光照：内散射源 = 天光单色 ambient + 太阳经 CSM 阴影
                 // （god ray 来自后者）。ambient 走 sky 的单色推导函数。
-                const FireFogParams ff_params = cmds.fire_fog.value_or(FireFogParams{});
-                FireFogLighting ff_light;
+                const FogParams ff_params = cmds.fog.value_or(FogParams{});
+                FogLighting ff_light;
                 if (cmds.sky.has_value()) {
                     ff_light.ambient_color = cmds.sky->AmbientColor();
                     ff_light.ambient_intensity = cmds.sky->AmbientIntensity();
@@ -1977,10 +1979,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
                 // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
                 //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
-                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights,
-                                        light_data_tex_, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
-                                        ff_params, ff_light);
+                // 烘场（inject/reduce/scatter）与合成（雾场 + 透明层交替积分）是两个类：
+                // 前者产出 FogField，后者按场把所有层一次合成进当前 HDR FBO。
+                FogField fog_field;
+                fog_renderer_.Build(cmds.point_fogs, cmds.point_lights, light_data_tex_,
+                                    cam, mvp_, fbo_3d_w, fbo_3d_h, ff_params,
+                                    ff_light, &fog_field);
+                fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
+                                    ff_params, TransparentLayerSet{});
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

@@ -17,7 +17,7 @@
   ⇒ 与「每帧一层 2D 数组（宽=nx、高=ny*nz）」的 GPU 上传布局一致。
   通道语义：R=density(火), G=temperature/flames，均归一化 [0,1]；
   **可选第 3 通道 B = 烟密度**（3 通道文件用于「火/温度/烟」三场分离，见 vdb_to_jpovvol.py）。
-  引擎读取器：tools/jpov/src/volume_manager.cc（GL）+ src/fire_fog/fire_volume.h（GL-free）。
+  引擎读取器：tools/jpov/src/volume_manager.cc（GL）+ src/fog/fire_volume.h（GL-free）。
 
 numpy 数组约定：本模块一律用 **[F][z][y][x]**（x 最快）表示体积。
 ⚠️ pyopenvdb 的 `copyToArray` 用的是 **array[x][y][z]**（首轴 = x）；两者不同，转换时须 transpose。

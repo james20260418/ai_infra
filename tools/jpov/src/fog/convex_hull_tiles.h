@@ -1,7 +1,7 @@
-// JPOV Fire-Fog — 屏幕空间凸包 → 它交叠的 tile（栅格）集合
+// JPOV Fog — 屏幕空间凸包 → 它交叠的 tile（栅格）集合
 //
-// ⚠️ 这是 **fire_fog tile culling 专用**的 util（不是通用几何）：把「一个 box 的屏幕投影点
-//    （≤ 8 个）」转成「它凸包交叠了哪些 tile」。故放在 fire_fog 路径下，namespace jpov。
+// ⚠️ 这是 **fog tile culling 专用**的 util（不是通用几何）：把「一个 box 的屏幕投影点
+//    （≤ 8 个）」转成「它凸包交叠了哪些 tile」。故放在 fog 路径下，namespace jpov。
 //    （可复用的通用部分——定长分段线性函数——在 geom/math/SizeLimitedPiecewiseLinearFunction。）
 //
 // 做法（context 无关、无 GL、可单测）：
@@ -33,14 +33,14 @@ using Vec2d = geom::Vec2d;
 // 等距 tile 栅格：单元边长 cell（> 0），列数 cols、行数 rows（>= 1）。
 // 覆盖区域 = [0, cols*cell) × [0, rows*cell)；tile 索引 (x=列, y=行) ∈ [0,cols)×[0,rows)。
 // （geom 的 Grid2d 是「无界、格宽恒 1.0 的坐标↔索引换算」，不含本 util 需要的 cols/rows 边界，
-//   故这里用 fire_fog 自己的有界 tile 栅格。）
+//   故这里用 fog 自己的有界 tile 栅格。）
 struct TileGrid {
   double cell = 1.0;
   int cols = 0;
   int rows = 0;
 };
 
-// tile 坐标（列, 行）。fire_fog 内的整数 tile 索引。
+// tile 坐标（列, 行）。fog 内的整数 tile 索引。
 struct TileCoord {
   int x = 0;
   int y = 0;

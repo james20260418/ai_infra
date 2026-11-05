@@ -130,7 +130,7 @@ GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | …
 | `//tools/jpov:jpov_skylight_viewer.exe` | `build_jpov_skylight_viewer.sh`（双出） |
 | `//tools/jpov:jpov_model_viewer.exe` | `build_jpov_model_viewer.sh --windows` |
 | `//tools/jpov:jpov_pick_highlight_viewer.exe` | `build_jpov_pick_highlight_viewer.sh --windows` |
-| `//tools/jpov:jpov_fire_fog_viewer.exe` | `build_jpov_fire_fog_viewer.sh --windows` |
+| `//tools/jpov:jpov_fog_viewer.exe` | `build_jpov_fog_viewer.sh --windows` |
 | `//tools/jpov:jpov_soft_mesh_viewer.exe` | `build_soft_mesh_simulator.sh --windows` |
 | `//tools/jpov:jpov_particle_viewer.exe` | `build_particle_viewer.sh --windows` |
 | `//tools/jpov:jpov_volume_fire_viewer.exe` | `build_volume_fire_viewer.sh --windows` |
