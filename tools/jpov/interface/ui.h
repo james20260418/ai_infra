@@ -228,6 +228,7 @@ public:
 
     // 下拉选择。selected 为 in/out，合法范围 [0, items.size()-1]。
     // （下拉列表属弹出层，Emit 后画，盖住下方其它控件。）
+    // 列表默认在框下方展开；**下方装不下且上方更宽裕时自动向上展开**（框可贴在屏底）。
     bool Combo(const char* label, int* selected /*inout*/,
                const std::vector<const char*>& items, const UiRect& box,
                bool stretch_w = true, bool stretch_h = true);
