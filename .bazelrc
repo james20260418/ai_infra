@@ -100,7 +100,11 @@ build:windows --copt=-static
 # `#define _USE_MATH_DEFINES` 对「先包含过 <cmath>」的 TU 无效（include guard
 # 已经吃掉），于是同一条 include 链在 Linux 能过、MinGW 报 M_PI 未声明。
 # 在编译期统一定义，比逐个 TU 调整 include 顺序可靠。
-build:windows --copt=-D_USE_MATH_DEFINES
+#
+# 用空值（`=` 结尾）而不是 `-D_USE_MATH_DEFINES`：`vec.h` / `math_util.h` 里仍有
+# 不带 guard 的 `#define _USE_MATH_DEFINES`（空定义），命令行若定义成 1 会
+# 触发 `-Wmacro-redefined`（每个包含这些头的 TU 各一条）；空值两边一致，静默。
+build:windows --copt=-D_USE_MATH_DEFINES=
 build:windows --linkopt=-static
 build:windows --linkopt=-lpthread
 

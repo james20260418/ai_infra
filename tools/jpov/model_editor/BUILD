@@ -87,6 +87,7 @@ cc_binary(
     srcs = ["jpov_model_editor.cc"],
     deps = [
         ":model_editor_app",
+        "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
     ],
     target_compatible_with = [

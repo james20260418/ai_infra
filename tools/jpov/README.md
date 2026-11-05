@@ -162,6 +162,11 @@ GL: hardware | renderer=NVIDIA GeForce RTX … | vendor=NVIDIA Corporation | …
 `--capture` / `--four_views` / `--ui_shot` 等 headless 路径保持默认 `kAny`
 （CI 与黄金图本来就跑 llvmpipe，刷「偏好落空」告警只是噪音）。
 
+覆盖到的 16 个入口：13 个有 exe 的交互式 viewer + `jpov_polyline_demo`
++ 两个 GUI 工具（`jpov_clothing_tool` / `jpov_model_editor`）。纯 headless 的自检工具
+（`jpov_screenshot_demo` / `jpov_text_demo` / `jpov_polyline_verify` /
+`jpov_model_viewer_smoke`）与 gold generator 不设，保持 `kAny`。
+
 注意 JPOV **不能选显卡**：这个偏好只做「建 context 前的驱动提示 + 建 context 后用
 `glGetString` 核对 + 落空时告警」三件事，最终设备仍由驱动 / 系统 per-app 设置决定。
 语义与判定表见 `interface/render_preference.h`。
