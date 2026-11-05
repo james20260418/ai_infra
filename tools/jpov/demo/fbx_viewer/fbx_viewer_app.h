@@ -67,6 +67,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <glog/logging.h>
@@ -76,6 +77,8 @@
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/interface/animation_sampler.h"
 #include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/interface/mixamo23_skeleton.h"
+#include "tools/jpov/interface/skeleton_mannequin.h"
 #include "tools/jpov/interface/skeleton_mesh.h"
 #include "tools/jpov/interface/skeleton_retarget.h"
 #include "tools/jpov/interface/skeleton_types.h"
@@ -186,6 +189,15 @@ enum class ViewMode : int {
     // 并列（红骨人 + 蓝带皮）：与 kBothSkinned 同一条蒙皮渲染链，**外加两个部位粗细滑条**
     //   （腿 / 手臂，0.3~2.0）—— 用来验收「per-instance 的骨通道膨胀」。
     kSkinnedThickness = 7,
+    // 并列（红骨人 + **程序化蓝人模特**）：模特与 Mixamo23 骨架同源（interface/
+    //   skeleton_mannequin.h），不依赖 glb；用于动捕视频验收（看体态/朝向/重心）。
+    kBothMannequin = 8,
+    // 只看蓝人模特（视频拍摄用：两角度对比时画面里不要红骨人）。
+    kMannequinOnly = 9,
+    // 只看蓝带皮（**真蒙皮**）：glb 的真皮网格 + BodyRetarget 驱动，画面里没有红骨人。
+    //   动捕视频验收用：与 kMannequinOnly 同一个用途（看体态/朝向/重心），
+    //   区别是模特换成资产真皮（程序化蓝人模特只是骨架比例的可视化代理）。
+    kSkinnedOnly = 10,
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
@@ -198,6 +210,9 @@ inline const char* const kViewModeItems[] = {
     "并列（红骨人 + 蓝带皮动画）",
     "并列（红骨人 + 3 蓝肉人·instanced）",
     "并列（红骨人 + 蓝带皮·粗细微调）",
+    "并列（红骨人 + 蓝人模特）",
+    "只看蓝人模特",
+    "只看蓝带皮（真蒙皮）",
 };
 inline constexpr int kViewModeItemCount =
     static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
@@ -214,7 +229,8 @@ inline const std::vector<const char*>& ViewModeItems() {
 inline bool ViewShowsFbx(ViewMode m) {
     return m == ViewMode::kFbxOnly || m == ViewMode::kBothRetarget ||
            m == ViewMode::kBothNoRetarget || m == ViewMode::kBothSkinned ||
-           m == ViewMode::kFbxBones3Skinned || m == ViewMode::kSkinnedThickness;
+           m == ViewMode::kFbxBones3Skinned || m == ViewMode::kSkinnedThickness ||
+           m == ViewMode::kBothMannequin;
 }
 // 本模式是否显示目标（蓝）。
 inline bool ViewShowsGlb(ViewMode m) {
@@ -224,13 +240,18 @@ inline bool ViewShowsGlb(ViewMode m) {
 inline bool ViewIsSideBySide(ViewMode m) {
     return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget ||
            m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned ||
-           m == ViewMode::kSkinnedThickness;
+           m == ViewMode::kSkinnedThickness || m == ViewMode::kBothMannequin;
 }
 // 本模式的蓝侧是否画**带皮网格**（而非火柴人）。kBothSkinned / kFbxBones3Skinned /
 //   kSkinnedThickness 用真皮。
 inline bool ViewGlbIsSkinned(ViewMode m) {
     return m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned ||
-           m == ViewMode::kSkinnedThickness;
+           m == ViewMode::kSkinnedThickness || m == ViewMode::kSkinnedOnly;
+}
+
+// 本模式是否画**程序化蓝人模特**（不依赖 glb 真皮）。
+inline bool ViewUsesMannequin(ViewMode m) {
+    return m == ViewMode::kBothMannequin || m == ViewMode::kMannequinOnly;
 }
 
 // 本模式是否显示「部位粗细」滑条（只有看得到蓝带皮网格时才有意义）。
@@ -329,6 +350,11 @@ MakeGlbThicknessConfig(const jpov::SkeletonType& skel) {
     };
     return cfg;
 }
+// 本模式的蓝侧是否只画 **1 个真皮网格、不画红骨人**（kSkinnedOnly）。
+//   动捕视频验收用：镜头里只有真角色。
+inline bool ViewGlbIsSkinnedOnly(ViewMode m) {
+    return m == ViewMode::kSkinnedOnly;
+}
 // 本模式的蓝侧是否画 **3 个 instanced 肉人**（而不是 1 个）。
 //   用途：肉眼 + 代码双层验收「真 instanced draw」（一次 draw call 画 N 实例）。
 inline bool ViewGlbIsTripleInstanced(ViewMode m) {
@@ -385,6 +411,20 @@ public:
     //   装配时算（见 LoadGlbSkeleton 尾部）。
     float glb_skin_pair_spacing_m_ = 0.0f;
 
+    // ── 程序化蓝人模特（kBothMannequin）──
+    //   与源 FBX 的 Mixamo23 骨架同源：网格由 skeleton_mannequin.h 按 rest 生成，
+    //   每帧位姿直接从 clip_ 按骨名搬过来（不做 BodyRetarget，避免把「资产 rest 差异」
+    //   混进动捕观感）。顶点/权重/atlas 全部在装配期一次性建好。
+    jpov::SkeletonType mannequin_skeleton_;
+    uint32_t mannequin_mesh_id_ = 0;
+    uint32_t mannequin_skel_id_ = 0;
+    std::vector<jpov::SkeletonPose> mannequin_poses_;
+    int mannequin_rest_pose_index_ = 0;
+    float mannequin_center_x_ = 0.0f;
+    float mannequin_pair_sep_m_ = 0.0f;
+    Bounds mannequin_bounds_{};
+    bool mannequin_ready_ = false;
+
     // ── 显示/驱动（**一个 combo** 选的模式，见 ViewMode 注释里为何合并）──
     ViewMode view_mode_ = ViewMode::kFbxOnly;  // 本帧看哪个骨架 + 蓝骨怎么驱动
 
@@ -429,6 +469,10 @@ public:
     //   true  = 交互窗口（OneIteration 末尾画面板）
     //   false = headless 单帧出图：截图是纯 3D（不画面板、不消费输入）
     void SetShowPanel(bool show) { show_panel_ = show; }
+
+    // headless/捕获前置：--view 在装配之后才定，机位要按**最终模式**重算一次
+    //   （否则 "只看真皮" 会按并列布局的包围盒取景，人物偏小偏侧）。
+    void RefitViewForMode() { FitInitialView(); }
 
     // 注入真实字体文本测量回调（UI 内部用；交互与 headless 都装，装了无副作用）。
     void InstallTextMeasure() {
@@ -493,12 +537,17 @@ public:
 
         // 摆放：单看时各自在原点；“两者并列”时以 x=0 对称分开（相机环绕中心在原点，
         // 对称才不偏）；横向位置再各自减去自身包围盒中心的 x（使两根骨人不重叠）。
-        const bool show_fbx = (has_glb_ ? ViewShowsFbx(view_mode_)
-                                        : true);  // 无 glb 时只能看源，忽略模式
-        const bool show_glb = (has_glb_ && ViewShowsGlb(view_mode_));
-        const bool side_by_side = (has_glb_ && ViewIsSideBySide(view_mode_));
-        const float red_x = side_by_side ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
-        const float blue_x = side_by_side ? (0.5f * pair_sep_m_ - glb_center_x_) : 0.0f;
+        const bool show_mannequin = mannequin_ready_ && ViewUsesMannequin(view_mode_);
+        const bool show_fbx = (has_glb_ || show_mannequin)
+                                  ? ViewShowsFbx(view_mode_)
+                                  : true;  // 无 glb 且没模特时只能看源，忽略模式
+        const bool show_glb = (has_glb_ && ViewShowsGlb(view_mode_) && !show_mannequin);
+        const bool side_by_side =
+            ((has_glb_ || show_mannequin) && ViewIsSideBySide(view_mode_));
+        const float pair_sep = show_mannequin ? mannequin_pair_sep_m_ : pair_sep_m_;
+        const float red_x = side_by_side ? (-0.5f * pair_sep - fbx_center_x_) : 0.0f;
+        const float blue_center_x = show_mannequin ? mannequin_center_x_ : glb_center_x_;
+        const float blue_x = side_by_side ? (0.5f * pair_sep - blue_center_x) : 0.0f;
         if (show_fbx) {
             cmds->DrawObject3D(bone_mesh_, jpov::PBRMaterial::SolidColor(jpov::kColorRed),
                                /*center*/ {red_x, 0.0f, 0.0f},
@@ -512,7 +561,35 @@ public:
         //   装配失败时**回落画蓝火柴人**：不静默留白（留白 = 用户以为坏了又查不出原因），
         //   装配期已 LOG(ERROR) 说明原因，这里只补一条「本帧回落」提示。
         const bool want_skinned = show_glb && ViewGlbIsSkinned(view_mode_);
-        if (want_skinned && !glb_skin_ready_) {
+        if (show_mannequin) {
+            // 蓝人模特：与源骨架同源，每帧直接查 pose atlas（GPU 双帧插值）。
+            const int n = mannequin_rest_pose_index_;
+            CHECK_GT(n, 0) << "蓝人模特已装配但动画帧数为 0";
+            int fi = 0;
+            int fj = 0;
+            float ratio = 0.0f;
+            if (rest_pose_mode_) {
+                fi = mannequin_rest_pose_index_;
+                fj = mannequin_rest_pose_index_;
+            } else {
+                fi = ((frame_index_ % n) + n) % n;
+                fj = (fi + 1) % n;
+                ratio = static_cast<float>(inter_frame_ratio_);
+            }
+            jpov::SkinnedInstanceState inst;
+            inst.transform.center = {blue_x, 0.0f, 0.0f};
+            inst.transform.up     = {0.0f, 1.0f, 0.0f};
+            inst.transform.front  = {0.0f, 0.0f, 1.0f};
+            inst.transform.scale  = 1.0f;
+            inst.pose_a = fi;
+            inst.pose_b = fj;
+            inst.ratio  = ratio;
+            cmds->DrawMeshWithSkeleton(
+                mannequin_mesh_id_, mannequin_skel_id_,
+                jpov::PBRMaterial::SolidColorMR(jpov::kColorBlue, /*metallic=*/0.0f,
+                                                /*roughness=*/0.45f),
+                std::vector<jpov::SkinnedInstanceState>{inst});
+        } else if (want_skinned && !glb_skin_ready_) {
             LOG_FIRST_N(WARNING, 1)
                 << "kBothSkinned 但真皮网格未装配成功 —— 本帧回落画蓝火柴人";
         }
@@ -560,6 +637,20 @@ public:
                     inst.transform.center = {blue_x + off, 0.0f, 0.0f};
                     inst.transform.up     = {0.0f, 1.0f, 0.0f};
                     inst.transform.front  = {0.0f, 0.0f, 1.0f};
+                    // 只画真皮时：资产的人体系相对源转了 Q_body（本资产 Tripo glb = +89°，
+                    //   它的“朝前”是 +X、源是 +Z）—— 不补一拍就是“侧对镜头”。
+                    //   这里把整只角色绕自身原点转回 −Q_body，使 --azimuth-deg 的语义与其他
+                    //   模式一致（0° = 正面）。
+                    //   ⚠️ 只用于 kSkinnedOnly（单角色展示）；并列对比模式不改朝向——
+                    //   那里 Q_body 是“资产差异”这一待观察的事实，不该被遮掉。
+                    if (ViewGlbIsSkinnedOnly(view_mode_)) {
+                        const geom::Quaternion<float> to_source =
+                            retarget_plan_.q_body.Conjugate();
+                        inst.transform.up =
+                            geom::RotateVector(to_source, jpov::Vec3f(0.0f, 1.0f, 0.0f));
+                        inst.transform.front =
+                            geom::RotateVector(to_source, jpov::Vec3f(0.0f, 0.0f, 1.0f));
+                    }
                     inst.transform.scale  = 1.0f;
                     inst.pose_a = fi;
                     inst.pose_b = fj;
@@ -905,19 +996,46 @@ private:
     DrawnPoseKey red_drawn_;   // 源（红）mesh 已按哪个键建过
     DrawnPoseKey blue_drawn_;  // 目标（蓝）mesh 已按哪个键建过
 
-    // 初始机位：按**当前场景全部骨人**（含并列的蓝）的包围盒自适应距离
+    // 初始机位：按**当前模式下真正会被画出来的东西**的包围盒自适应距离
     // （同查看器用 FitRadius 的做法），注视高度取包围盒中高（约胸口）。
-    // ⚠️ 一律按「最宽」（两者并列）适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
+    // 两者并列时按「最宽」适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
+    // 只画一侧的模式（kFbxOnly / kMannequinOnly / kSkinnedOnly）只按那一侧适配，
+    //   否则画面里一半是空的（另一侧其实没画）。
     void FitInitialView() {
-        const float red_x =
-            has_glb_ ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
-        const float blue_x =
-            has_glb_ ? (0.5f * pair_sep_m_ - glb_center_x_) : 0.0f;
-        float bmin[3] = {fbx_bounds_.min.x() + red_x, fbx_bounds_.min.y(),
-                         fbx_bounds_.min.z()};
-        float bmax[3] = {fbx_bounds_.max.x() + red_x, fbx_bounds_.max.y(),
-                         fbx_bounds_.max.z()};
-        if (has_glb_) {
+        // 与 OneIteration 的“画谁 / 怎么摆”保持同一套判断（两端分叉 = 机位与画面错位）。
+        const bool show_mannequin = mannequin_ready_ && ViewUsesMannequin(view_mode_);
+        const bool show_fbx =
+            (has_glb_ || show_mannequin) ? ViewShowsFbx(view_mode_) : true;
+        const bool show_blue = has_glb_ && ViewShowsGlb(view_mode_) && !show_mannequin;
+        const bool side_by_side =
+            (has_glb_ || show_mannequin) && ViewIsSideBySide(view_mode_);
+        const float pair_sep = show_mannequin ? mannequin_pair_sep_m_ : pair_sep_m_;
+        const float red_x = side_by_side ? (-0.5f * pair_sep - fbx_center_x_) : 0.0f;
+        const float blue_center_x = show_mannequin ? mannequin_center_x_ : glb_center_x_;
+        const float blue_x = side_by_side ? (0.5f * pair_sep - blue_center_x) : 0.0f;
+        float bmin[3] = {0.0f, 0.0f, 0.0f};
+        float bmax[3] = {0.0f, 0.0f, 0.0f};
+        bool have_box = false;
+        if (show_fbx) {
+            bmin[0] = fbx_bounds_.min.x() + red_x;
+            bmin[1] = fbx_bounds_.min.y();
+            bmin[2] = fbx_bounds_.min.z();
+            bmax[0] = fbx_bounds_.max.x() + red_x;
+            bmax[1] = fbx_bounds_.max.y();
+            bmax[2] = fbx_bounds_.max.z();
+            have_box = true;
+        }
+        if (show_mannequin) {
+            const float mx = blue_x;
+            bmin[0] = mannequin_bounds_.min.x() + mx;
+            bmin[1] = mannequin_bounds_.min.y();
+            bmin[2] = mannequin_bounds_.min.z();
+            bmax[0] = mannequin_bounds_.max.x() + mx;
+            bmax[1] = mannequin_bounds_.max.y();
+            bmax[2] = mannequin_bounds_.max.z();
+            have_box = true;
+        }
+        if (show_blue) {
             // 蓝侧可能画火柴人（骨杆）或真皮网格（kBothSkinned）—— 两者包围盒不同，
             //   取 `glb_bounds_`（火柴人）与 `glb_skin_bounds_`（真皮，若已装配）的并集，
             //   这样切模式时相机**不跳**，且两种蓝侧形态都不裁切。
@@ -929,12 +1047,21 @@ private:
                 ViewGlbIsTripleInstanced(view_mode_)
                     ? std::max(glb_skin_pair_spacing_m_, 0.1f)
                     : 0.0f;
-            bmin[0] = std::min(bmin[0], gb.min.x() + blue_x - blue_half_span);
-            bmin[1] = std::min(bmin[1], gb.min.y());
-            bmin[2] = std::min(bmin[2], gb.min.z());
-            bmax[0] = std::max(bmax[0], gb.max.x() + blue_x + blue_half_span);
-            bmax[1] = std::max(bmax[1], gb.max.y());
-            bmax[2] = std::max(bmax[2], gb.max.z());
+            if (have_box) {
+                bmin[0] = std::min(bmin[0], gb.min.x() + blue_x - blue_half_span);
+                bmin[1] = std::min(bmin[1], gb.min.y());
+                bmin[2] = std::min(bmin[2], gb.min.z());
+                bmax[0] = std::max(bmax[0], gb.max.x() + blue_x + blue_half_span);
+                bmax[1] = std::max(bmax[1], gb.max.y());
+                bmax[2] = std::max(bmax[2], gb.max.z());
+            } else {
+                bmin[0] = gb.min.x() + blue_x - blue_half_span;
+                bmin[1] = gb.min.y();
+                bmin[2] = gb.min.z();
+                bmax[0] = gb.max.x() + blue_x + blue_half_span;
+                bmax[1] = gb.max.y();
+                bmax[2] = gb.max.z();
+            }
         }
         view_ = jpov_viewer::DefaultView();
         view_.R = jpov_viewer::ViewConfig::FitRadius(bmin, bmax, /*fov_deg*/ 60.0);
@@ -987,6 +1114,62 @@ inline bool FbxViewerApp::LoadFbx(const std::string& path) {
     fbx_bounds_ = ComputeMeshBounds(rest_mesh);
     fbx_center_x_ = fbx_bounds_.CenterX();
     pair_sep_m_ = 0.5f * fbx_bounds_.SizeX() + kPairGapMeters;  // 单骨人时的占位值
+
+    // 程序化蓝人模特：与源骨架同源，直接吃 clip_ 的局部旋转（同名骨逐帧裸拷）。
+    //   高度取 rest 火柴人的骨高（≈1.6m）；半径按 1.75m 成人比例缩放。
+    {
+        const float bone_height = std::max(0.5f, fbx_bounds_.max.y() - fbx_bounds_.min.y());
+        mannequin_skeleton_ = jpov::Mixamo23Skeleton(bone_height);
+        const float radius_scale = bone_height / 1.75f;
+        const jpov::MeshData man_mesh =
+            jpov::BuildMannequinMeshInBoneSpace(mannequin_skeleton_, radius_scale);
+        CHECK(!man_mesh.positions.empty()) << "蓝人模特网格为空";
+        mannequin_mesh_id_ = RegisterMesh(man_mesh);
+        mannequin_bounds_ = ComputeMeshBounds(man_mesh);
+        mannequin_center_x_ = mannequin_bounds_.CenterX();
+
+        // 源骨架骨名 -> index；把每帧局部旋转按骨名搬到 Mixamo23（未命中骨留 identity）。
+        std::unordered_map<std::string, int> src_by_name;
+        for (size_t i = 0; i < skeleton_.joints.size(); ++i) {
+            if (!skeleton_.joints[i].name.empty()) {
+                src_by_name.emplace(skeleton_.joints[i].name, static_cast<int>(i));
+            }
+        }
+        const int target_bones = mannequin_skeleton_.bone_count();
+        mannequin_poses_.clear();
+        mannequin_poses_.reserve(clip_.frames.size() + 1);
+        for (const jpov::SkeletonPose& src : clip_.frames) {
+            jpov::SkeletonPose dst = jpov::SkeletonPose::Identity(target_bones);
+            for (int j = 0; j < target_bones; ++j) {
+                const std::string& name = mannequin_skeleton_.joints[static_cast<size_t>(j)].name;
+                if (name.empty()) {
+                    continue;
+                }
+                const auto it = src_by_name.find(name);
+                if (it != src_by_name.end() &&
+                    it->second < static_cast<int>(src.joint_rotation.size())) {
+                    dst.joint_rotation[static_cast<size_t>(j)] =
+                        src.joint_rotation[static_cast<size_t>(it->second)];
+                }
+            }
+            // 源根（Hips）的 root-motion 直接搬到目标根（Root）：两者都是「模型系平移」。
+            dst.root_offset = src.root_offset;
+            mannequin_poses_.push_back(std::move(dst));
+        }
+        mannequin_rest_pose_index_ = static_cast<int>(mannequin_poses_.size());
+        mannequin_poses_.push_back(jpov::SkeletonPose::Identity(target_bones));
+        mannequin_skel_id_ = RegisterSkeleton(mannequin_skeleton_, mannequin_poses_);
+        mannequin_ready_ = true;
+
+        // 没给 glb 时，并列间距按「红骨人 + 蓝模特」算，保证 kBothMannequin 也能对称摆放。
+        mannequin_pair_sep_m_ =
+            0.5f * (fbx_bounds_.SizeX() + mannequin_bounds_.SizeX()) + kPairGapMeters;
+        pair_sep_m_ = mannequin_pair_sep_m_;
+        LOG(INFO) << "蓝人模特装配完成: bones=" << target_bones
+                  << " mesh_id=" << mannequin_mesh_id_
+                  << " skeleton_id=" << mannequin_skel_id_
+                  << " 高=" << bone_height << "m";
+    }
     FitInitialView();
 
     LOG(INFO) << "FBX 观察器装配完成: bones=" << skeleton_.bone_count()

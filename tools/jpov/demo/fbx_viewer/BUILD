@@ -27,6 +27,8 @@ cc_library(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:animation_sampler",
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:mixamo23_skeleton",
+        "//tools/jpov/interface:skeleton_mannequin",
         "//tools/jpov/interface:skeleton_mesh",
         "//tools/jpov/interface:skeleton_retarget",
         "//tools/jpov/interface:skeleton_types",
@@ -43,6 +45,7 @@ cc_binary(
     srcs = ["jpov_fbx_viewer.cc"],
     deps = [
         ":fbx_viewer_app",
+        "//tools/jpov:viewer_output",
         "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",
@@ -58,6 +61,10 @@ cc_binary(
     srcs = ["jpov_fbx_viewer.cc"],
     deps = [
         ":fbx_viewer_app",
+        # 与 Linux 版同一份源码：--video 走 viewer_output 的 ffmpeg 封装。
+        # Windows 上那份实现是空实现（返回 false），但头文件必须声明依赖，
+        # 否则 Bazel 报 undeclared inclusion。
+        "//tools/jpov:viewer_output",
         "//tools/jpov:viewer_render_preference",
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",

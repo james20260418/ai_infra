@@ -9,11 +9,13 @@
 //                                / 3 只看蓝(无重定向对照) / 4 并列(无重定向对照)
 //                                / 5 并列(红骨人 + 蓝**带皮网格**，GPU 双帧插值)
 //                                / 6 并列(红骨人 + **3 个 instanced 蓝肉人**，验收真 instancing)
+//                                / 8 并列(红骨人 + **程序化蓝人模特**，不依赖 glb)
+//                                / 9 只看蓝人模特 / 10 只看蓝带皮(真蒙皮，动捕验收用)
 //   --time 秒 | --frame 帧号 | --rest
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
 //             --rest       固定 pose = identity（rest/T-pose）出图
-//             --view <n>   指定「显示/驱动」出图（0..7，见 fbx_viewer_app.h 的 ViewMode）
+//             --view <n>   指定「显示/驱动」出图（0..9，见 fbx_viewer_app.h 的 ViewMode）
 //                          ——与面板 combo 同一套语义。
 //             --twist-deg <度>  扭腰（通道 0，±90°）；--tilt-deg <度> 仰头（通道 1，±30°）
 //                          —— 与面板滑条同一份语义，仅「蓝带皮」模式生效。
@@ -32,12 +34,17 @@
 // （交互 Run / headless RunOnce）。渲染与播放逻辑全在 fbx_viewer_app.h，交互与出图
 // 共用同一条 OneIteration（zero 分叉）。设计说明见 docs/jpov_fbx_viewer_design.md。
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>  // atof / atoi
+#include <filesystem>
 #include <string>
 
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/viewer_output.h"
 #include "tools/jpov/demo/fbx_viewer/fbx_viewer_app.h"
 #include "tools/jpov/demo/viewer_render_preference.h"
 
@@ -49,15 +56,29 @@ struct CliParsed {
     std::string glb_path;      // 可选的目标骨架 glb（第二个非 "--" 参数；空 = 不启用对照组）
     std::string cloth_path;    // --cloth_path：已蒙皮衣服 glb（目录/文件；空 = 不穿衣服）
     std::string shot_path;     // 非空 = headless 单帧出图到该路径
+    std::string shot_dir;      // 非空 = headless 逐帧出图到该目录（frame_%04d.png）
+    std::string video_path;    // 非空 = headless 逐帧渲染后合成 mp4
+    int frame_count = 0;       // --frames：视频/序列帧数（0 = 用 clip 帧数）
+    int fps = 0;               // --fps：输出帧率（0 = 用 clip fps）
     bool has_time = false;     // --time 是否给出
     double time_seconds = 0.0; // --time 的值（动画时刻，秒）
     bool has_frame = false;    // --frame 是否给出
     int frame_index = 0;       // --frame 的值（源帧号，按 fps 换算时刻）
     bool has_view = false;         // --view 是否给出
     // --view 的值（ViewMode 下标：0 只看红 / 1 只看蓝 / 2 并列 / 3 蓝直搬 /
-    //   4 并列直搬 / 5 并列带皮网格 / 6 并列 3 蓝肉人·instanced / 7 并列带皮·粗细微调）。
+    //   4 并列直搬 / 5 并列带皮网格 / 6 并列 3 蓝肉人·instanced / 7 并列带皮·粗细微调 /
+    //   8 并列蓝人模特 / 9 只看蓝人模特 / 10 只看蓝带皮(真蒙皮)）。
     int view_mode = 0;
     bool rest = false;         // --rest：固定 pose = identity
+    // --azimuth-deg / --elev-deg：headless 出图的固定机位（度）。
+    //   为什么不加就只能看默认 45° 方位角：AI 看图验收时「正面/侧面」差 45° 会把
+    //   T-pose 的胳膊看成「一高一低」，误判成骨架拧了（实测踩过）。
+    bool has_azimuth = false;
+    double azimuth_deg = 0.0;
+    bool has_elev = false;
+    double elev_deg = 0.0;
+    bool has_azimuth2 = false;
+    double azimuth2_deg = 90.0;  // 第二机位（默认侧面 90°）
     // --thick-leg / --thick-arm：部位粗细（组 0 = 腿 / 组 1 = 手臂）系数，
     //   **交互与 headless 出图都生效**（交互时也可继续用面板滑条改）。
     //   与 ViewMode::kSkinnedThickness 的面板滑条是同一份状态。
@@ -100,6 +121,51 @@ CliParsed ParseCli(int argc, char** argv) {
                 p.has_view = true;
             } else {
                 LOG(WARNING) << "--view 缺少数值，忽略";
+            }
+        } else if (arg == "--azimuth-deg") {
+            if (i + 1 < argc) {
+                p.azimuth_deg = std::atof(argv[++i]);
+                p.has_azimuth = true;
+            } else {
+                LOG(WARNING) << "--azimuth-deg 缺少数值，忽略";
+            }
+        } else if (arg == "--elev-deg") {
+            if (i + 1 < argc) {
+                p.elev_deg = std::atof(argv[++i]);
+                p.has_elev = true;
+            } else {
+                LOG(WARNING) << "--elev-deg 缺少数值，忽略";
+            }
+        } else if (arg == "--azimuth2-deg") {
+            if (i + 1 < argc) {
+                p.azimuth2_deg = std::atof(argv[++i]);
+                p.has_azimuth2 = true;
+            } else {
+                LOG(WARNING) << "--azimuth2-deg 缺少数值，忽略";
+            }
+        } else if (arg == "--video") {
+            if (i + 1 < argc) {
+                p.video_path = argv[++i];
+            } else {
+                LOG(WARNING) << "--video 缺少输出路径，忽略";
+            }
+        } else if (arg == "--shot-dir") {
+            if (i + 1 < argc) {
+                p.shot_dir = argv[++i];
+            } else {
+                LOG(WARNING) << "--shot-dir 缺少目录，忽略";
+            }
+        } else if (arg == "--frames") {
+            if (i + 1 < argc) {
+                p.frame_count = std::atoi(argv[++i]);
+            } else {
+                LOG(WARNING) << "--frames 缺少数值，忽略";
+            }
+        } else if (arg == "--fps") {
+            if (i + 1 < argc) {
+                p.fps = std::atoi(argv[++i]);
+            } else {
+                LOG(WARNING) << "--fps 缺少数值，忽略";
             }
         } else if (arg == "--rest") {
             p.rest = true;
@@ -152,10 +218,11 @@ int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
-           "[--time 秒|--frame 帧号] [--rest] [--view 0..7] "
+           "[--time 秒|--frame 帧号] [--rest] [--view 0..10] "
            "[--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0] "
            "[--twist-deg -90~90] [--tilt-deg -30~30]";
-    const bool capture = !p.shot_path.empty();
+    const bool capture = !p.shot_path.empty() || !p.shot_dir.empty() ||
+                         !p.video_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";
 
@@ -225,30 +292,124 @@ int main(int argc, char** argv) {
     app.partial_tilt_head_deg_   = p.tilt_deg;
 
     if (capture) {
-        // headless 单帧：先把时间/模式设好，再 RunOnce（OneIteration 画的是"推进前"
-        // 的时刻，故设定值即出图时刻）。
-        if (p.has_time) {
-            app.anim_time_seconds_ = p.time_seconds;
-        } else if (p.has_frame) {
-            app.anim_time_seconds_ = static_cast<double>(p.frame_index) /
-                                     app.clip_.frames_per_second;
-        }
+        CHECK(p.shot_path.empty() || (p.shot_dir.empty() && p.video_path.empty()))
+            << "--shot / --shot-dir / --video 只能给一个";
+        CHECK(p.video_path.empty() || p.shot_dir.empty())
+            << "--video 与 --shot-dir 只能给一个";
+        CHECK((p.video_path.empty() && p.shot_dir.empty()) ||
+              (!p.has_time && !p.has_frame))
+            << "--time / --frame 只用于单帧 --shot；序列/视频请用 --frames";
         app.rest_pose_mode_ = p.rest;
         if (p.has_view) {
             CHECK_GE(p.view_mode, 0);
             CHECK_LT(p.view_mode, jpov_fbx_viewer::kViewModeItemCount)
                 << "--view 取值应为 0.." << (jpov_fbx_viewer::kViewModeItemCount - 1);
             CHECK(p.view_mode == static_cast<int>(jpov_fbx_viewer::ViewMode::kFbxOnly) ||
+                  p.view_mode == static_cast<int>(jpov_fbx_viewer::ViewMode::kBothMannequin) ||
+                  p.view_mode == static_cast<int>(jpov_fbx_viewer::ViewMode::kMannequinOnly) ||
                   app.has_glb_)
-                << "--view 选了含蓝骨的模式但未给 glb 路径（第二位置参数）";
+                << "--view 选了含蓝骨的模式但未给 glb 路径（第二位置参数；"
+                   "只有 --view 8/9（蓝人模特）不需要 glb）";
             app.view_mode_ = static_cast<jpov_fbx_viewer::ViewMode>(p.view_mode);
+            // --view 在装配之后才定：机位按最终模式重算（“只看真皮”不该按并列布局取景）。
+            app.RefitViewForMode();
+        }
+        // 机位角度必须在 RefitViewForMode **之后**设：重算机位 = 回到 DefaultView（theta/phi 归位）。
+        if (p.has_azimuth) {
+            app.view_.theta = p.azimuth_deg * 3.14159265358979323846 / 180.0;
+        }
+        if (p.has_elev) {
+            app.view_.phi = p.elev_deg * 3.14159265358979323846 / 180.0;
         }
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(jpov_fbx_viewer::kViewerWidth);
         winfo.height = static_cast<float>(jpov_fbx_viewer::kViewerHeight);
         const jpov::InputSnapshot input{};
-        app.RunOnce(input, winfo, p.shot_path.c_str());
-        LOG(INFO) << "已出图: " << p.shot_path;
+
+        if (!p.video_path.empty() || !p.shot_dir.empty()) {
+            const double clip_fps = std::max(1.0, app.clip_.frames_per_second);
+            const int out_fps = p.fps > 0 ? p.fps : static_cast<int>(std::lround(clip_fps));
+            const int out_frames = p.frame_count > 0
+                                       ? p.frame_count
+                                       : static_cast<int>(app.clip_.frames.size());
+            CHECK_GT(out_fps, 0);
+            CHECK_GT(out_frames, 0);
+            const double kDeg2Rad = 3.14159265358979323846 / 180.0;
+            const double az1 = p.has_azimuth ? p.azimuth_deg : 0.0;
+            const double az2 = p.has_azimuth2 ? p.azimuth2_deg : az1;
+
+            auto render_sequence = [&](const std::string& dir, double azimuth_deg) {
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                CHECK(!ec) << "创建帧目录失败: " << dir << " (" << ec.message() << ")";
+                app.view_.theta = azimuth_deg * kDeg2Rad;
+                for (int i = 0; i < out_frames; ++i) {
+                    app.anim_time_seconds_ = static_cast<double>(i) / out_fps;
+                    char name[32];
+                    std::snprintf(name, sizeof(name), "frame_%04d.png", i);
+                    const std::string frame_path =
+                        (std::filesystem::path(dir) / name).string();
+                    app.RunOnce(static_cast<int64_t>(i), input, winfo,
+                                frame_path.c_str());
+                }
+            };
+
+            if (!p.video_path.empty()) {
+                const std::filesystem::path video_path(p.video_path);
+                if (video_path.has_parent_path()) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(video_path.parent_path(), ec);
+                    CHECK(!ec) << "创建视频目录失败: "
+                               << video_path.parent_path().string()
+                               << " (" << ec.message() << ")";
+                }
+                const std::string stem = video_path.stem().string();
+                const std::filesystem::path base_dir =
+                    video_path.has_parent_path() ? video_path.parent_path()
+                                                 : std::filesystem::path(".");
+                const std::string dir_a = (base_dir / (stem + "_frames_a")).string();
+                if (p.has_azimuth2) {
+                    const std::string dir_b = (base_dir / (stem + "_frames_b")).string();
+                    render_sequence(dir_a, az1);
+                    render_sequence(dir_b, az2);
+                    const std::string mp4_a = (base_dir / (stem + "_a.mp4")).string();
+                    const std::string mp4_b = (base_dir / (stem + "_b.mp4")).string();
+                    CHECK(jpov_viewer::RunFfmpeg(dir_a + "/frame_%04d.png", mp4_a, out_fps))
+                        << "角度 A 合成失败";
+                    CHECK(jpov_viewer::RunFfmpeg(dir_b + "/frame_%04d.png", mp4_b, out_fps))
+                        << "角度 B 合成失败";
+                    CHECK(jpov_viewer::RunFfmpegHstack(mp4_a, mp4_b, p.video_path))
+                        << "两角度并排合成失败";
+                    jpov_viewer::RemoveDirRecursive(dir_a);
+                    jpov_viewer::RemoveDirRecursive(dir_b);
+                    std::error_code ec;
+                    std::filesystem::remove(mp4_a, ec);
+                    std::filesystem::remove(mp4_b, ec);
+                } else {
+                    render_sequence(dir_a, az1);
+                    CHECK(jpov_viewer::RunFfmpeg(dir_a + "/frame_%04d.png",
+                                                 p.video_path, out_fps))
+                        << "视频合成失败";
+                    jpov_viewer::RemoveDirRecursive(dir_a);
+                }
+                LOG(INFO) << "已出视频: " << p.video_path
+                          << " (" << out_frames << " frames @ " << out_fps << "fps)";
+            } else {
+                render_sequence(p.shot_dir, az1);
+                LOG(INFO) << "已出帧序列: " << p.shot_dir;
+            }
+        } else {
+            // headless 单帧：先把时间设好，再 RunOnce（OneIteration 画的是"推进前"
+            // 的时刻，故设定值即出图时刻）。
+            if (p.has_time) {
+                app.anim_time_seconds_ = p.time_seconds;
+            } else if (p.has_frame) {
+                app.anim_time_seconds_ = static_cast<double>(p.frame_index) /
+                                         app.clip_.frames_per_second;
+            }
+            app.RunOnce(input, winfo, p.shot_path.c_str());
+            LOG(INFO) << "已出图: " << p.shot_path;
+        }
     } else {
         app.Run();  // 交互事件循环（阻塞）
     }

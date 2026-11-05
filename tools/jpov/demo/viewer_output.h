@@ -66,6 +66,12 @@ void RemoveDirRecursive(const std::string& dir);
 bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4,
                int fps);
 
+// 把两段 mp4 左右并排合成一段（ffmpeg -filter_complex hstack）。
+//   用途：FBX 观察器的「两个角度」对比视频（正面 + 侧面）。
+//   两段必须同分辨率/同帧率/同帧数；不满足时 ffmpeg 会报错返回 false。
+bool RunFfmpegHstack(const std::string& left_mp4, const std::string& right_mp4,
+                     const std::string& out_mp4);
+
 }  // namespace jpov_viewer
 
 #endif  // JPOV_DEMO_VIEWER_OUTPUT_H_

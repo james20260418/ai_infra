@@ -255,6 +255,36 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# SkeletonMannequin — 与 Mixamo23 同源的蓝人模特网格（胶囊 + 球，刚性权重）。
+# 用途：动捕/重定向验收时替代 bone rods（表达力），纯 CPU / GL-free。
+cc_library(
+    name = "skeleton_mannequin",
+    hdrs = ["skeleton_mannequin.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "skeleton_mannequin_test",
+    srcs = ["skeleton_mannequin_test.cc"],
+    deps = [
+        ":mixamo23_skeleton",
+        ":skeleton_mannequin",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # AxisFrame — 坐标架小插件（0.02m 见方 × 1m 的三根实体盒 + X/Y/Z 3D 标签）。
 # 纯命令装配（MakeBox 几何 + 三色材质 + DrawText3D），零 GL、无编辑器状态：
 # 任何工具都能用一份 mesh 摆出世界坐标架，不绑在某个 demo 上。
