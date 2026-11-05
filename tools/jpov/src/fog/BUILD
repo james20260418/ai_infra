@@ -16,10 +16,36 @@ cc_library(
     deps = [
         ":convex_hull_tiles",
         "//tools/jpov/src:csm_shadow_glsl",
+        "//tools/jpov/src:matrix_util",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_units",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# FogCompositeRenderer —— 雾场 + 0..N 个透明层的**唯一**合成趟（全屏一次）。
+# 与「烘场」（fog_renderer）按趟拆开：接缝是数据（FogField + TransparentLayerSet）。
+cc_library(
+    name = "fog_composite_renderer",
+    srcs = ["fog_composite_renderer.cc"],
+    hdrs = ["fog_composite_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fog_renderer",
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/src:matrix_util",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src:transparent_layer",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

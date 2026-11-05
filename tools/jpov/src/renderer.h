@@ -15,6 +15,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
+#include "tools/jpov/src/fog/fog_composite_renderer.h"
 #include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
@@ -380,6 +381,9 @@ private:
     // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
     // 单一自包含，与 object3d / horizon_fog 平级。见 src/fog/。
     FogRenderer fog_renderer_;
+    // 雾的合成趟（雾场 + 0..N 个透明层交替积分）。与「烘场」分开两个类，
+    // 见 src/fog/fog_composite_renderer.h。
+    FogCompositeRenderer fog_composite_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。

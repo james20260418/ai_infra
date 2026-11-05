@@ -89,7 +89,8 @@ Cg   = Cavg · (1 − Tg)             // 预乘段色
 
 ## 4. 与体积雾联合积分（composite 合并）
 
-`fog_shader.h` 的 `kFogCompositeBody`。设：
+当时是 `fog_shader.h` 的 `kFogCompositeBody`；2026-11-05 起随合成趟挪到
+`src/fog/fog_composite_renderer.h` 的 `kFsComposite`（数学不变）。设：
 
 - `S_f, T_f = fog(0→z_g)`（用 froxel 区间反解，`T_f = exp(−τ_f)`）；
 - `S_op, T_op = fog(0→z_op)`（`z_op` = 不透明场景深度）；

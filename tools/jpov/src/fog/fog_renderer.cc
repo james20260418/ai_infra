@@ -43,6 +43,7 @@
 
 #include "tools/jpov/src/fog/fog_lower.h"
 #include "tools/jpov/src/csm_shadow_glsl.h"
+#include "tools/jpov/src/matrix_util.h"
 #include "tools/jpov/src/texture_units.h"
 #include "tools/jpov/src/fog/fog_shader.h"
 
@@ -54,68 +55,15 @@ constexpr int kBodyTexelsPerFog = jpov::fog_layout::kTexelsPerBody;   // 每团 
 constexpr int kLightIndexTexUnit = 5;
 constexpr int kShadowTexUnitBase = 6;
 
-// Draw() 会触碰的纹理单元数：inject 用 0..5（团 tile / z 范围 / 团属性 / tile 射线 /
-// z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0..4
-//（scatter / 场景深度 / 玻璃 accum / reveal / depth）。
+// Build() 会触碰的纹理单元数：inject 用 0..5（团 tile / z 范围 / 团属性 / tile 射线 /
+// z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1)；scatter 用 0..kMaxLevels。
+//（合成趟自己有另一套单元与保存/复原，见 fog_composite_renderer.cc。）
 // 取上界 = max(kShadowTexUnitBase+kMaxCascades, kTexUnitLightData+1)：点光源数据纹理
 // 在单元 16，比 CSM 区间（6..10）高，必须纳入保存/复原范围，否则会把采样器绑定泄漏给
 // 调用方（JPOV 的「命令即全局状态」约定要求 Draw 自己复原）。
 int TexUnitsTouched() {
     return std::max(kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades,
                     jpov::kTexUnitLightData + 1);
-}
-
-// 4x4 列主序求逆（Gauss-Jordan + 部分主元）。无法求逆返回 false。
-//（与 horizon_fog_renderer.cc / 点雾版 fog_renderer.cc 同款实现。）
-bool Mat4Invert(const float m[16], float out[16]) {
-    float a[16];
-    for (int i = 0; i < 16; ++i) {
-        a[i] = m[i];
-    }
-    float inv[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    for (int col = 0; col < 4; ++col) {
-        int piv = col;
-        float best = std::fabs(a[col * 4 + col]);
-        for (int r = col + 1; r < 4; ++r) {
-            const float v = std::fabs(a[col * 4 + r]);
-            if (v > best) {
-                best = v;
-                piv = r;
-            }
-        }
-        if (best < 1e-12f) {
-            return false;
-        }
-        if (piv != col) {
-            for (int c = 0; c < 4; ++c) {
-                float t = a[c * 4 + col];
-                a[c * 4 + col] = a[c * 4 + piv];
-                a[c * 4 + piv] = t;
-                t = inv[c * 4 + col];
-                inv[c * 4 + col] = inv[c * 4 + piv];
-                inv[c * 4 + piv] = t;
-            }
-        }
-        const float d = a[col * 4 + col];
-        for (int c = 0; c < 4; ++c) {
-            a[c * 4 + col] /= d;
-            inv[c * 4 + col] /= d;
-        }
-        for (int r = 0; r < 4; ++r) {
-            if (r == col) {
-                continue;
-            }
-            const float f = a[col * 4 + r];
-            for (int c = 0; c < 4; ++c) {
-                a[c * 4 + r] -= f * a[c * 4 + col];
-                inv[c * 4 + r] -= f * inv[c * 4 + col];
-            }
-        }
-    }
-    for (int i = 0; i < 16; ++i) {
-        out[i] = inv[i];
-    }
-    return true;
 }
 
 // 组装一趟的 FS 源码（#version 330 core + 公共前置 + 趟体）。
@@ -167,26 +115,13 @@ void FogRenderer::Init(ShaderManager* shader_mgr) {
     fs_inject_ = AssembleFragmentShader(kFogInjectBody);
     fs_reduce_ = AssembleFragmentShader(kFogReduceBody);
     fs_scatter_ = AssembleFragmentShader(kFogScatterBody);
-    fs_composite_ = AssembleFragmentShader(kFogCompositeBody);
     prog_inject_ = shader_mgr_->GetOrCreate(
         "fog_inject", {kFogVs, fs_inject_.c_str()});
     prog_reduce_ = shader_mgr_->GetOrCreate(
         "fog_reduce", {kFogVs, fs_reduce_.c_str()});
     prog_scatter_ = shader_mgr_->GetOrCreate(
         "fog_scatter", {kFogVs, fs_scatter_.c_str()});
-    prog_composite_ = shader_mgr_->GetOrCreate(
-        "fog_composite", {kFogVs, fs_composite_.c_str()});
-
-    // 1×1 深度哑元（值=1.0）：供调用方传 scene_depth_tex==0 时使用。
-    const float one = 1.0f;
-    glGenTextures(1, &dummy_depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, dummy_depth_tex_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1, 1, 0, GL_RED, GL_FLOAT, &one);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // 合成趟的 program 与哑元深度归 FogCompositeRenderer（见 fog_composite_renderer.h）。
 }
 
 void FogRenderer::Finalize() {
@@ -253,10 +188,6 @@ void FogRenderer::Finalize() {
         glDeleteTextures(1, &fog_body_tex_);
         fog_body_tex_ = 0;
     }
-    if (dummy_depth_tex_ != 0) {
-        glDeleteTextures(1, &dummy_depth_tex_);
-        dummy_depth_tex_ = 0;
-    }
     froxel_w_ = 0;
     froxel_h_ = 0;
     tile_tex_w_ = 0;
@@ -267,7 +198,6 @@ void FogRenderer::Finalize() {
     prog_inject_ = 0;
     prog_reduce_ = 0;
     prog_scatter_ = 0;
-    prog_composite_ = 0;
     shader_mgr_ = nullptr;
 }
 
@@ -454,19 +384,21 @@ void FogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
     level_grid_h_ = grid_rows;
 }
 
-void FogRenderer::Draw(const std::vector<PointFog>& fogs,
-                           const std::vector<PointLight>& point_lights,
-                           unsigned int light_data_tex,
-                           const Camera& cam,
-                           const float view_proj[16],
-                           int viewport_w,
-                           int viewport_h,
-                           unsigned int scene_depth_tex,
-                           const FogParams& params,
-                           const FogLighting& light) {
+void FogRenderer::Build(const std::vector<PointFog>& fogs,
+                        const std::vector<PointLight>& point_lights,
+                        unsigned int light_data_tex,
+                        const Camera& cam,
+                        const float view_proj[16],
+                        int viewport_w,
+                        int viewport_h,
+                        const FogParams& params,
+                        const FogLighting& light,
+                        FogField* out /*output*/) {
     CHECK(shader_mgr_ != nullptr) << "FogRenderer::Init 未调用";
+    CHECK(out != nullptr) << "FogRenderer::Build 需要非空输出";
+    *out = FogField{};
     if (fogs.empty()) {
-        return;   // 零开销：无雾体
+        return;   // 零开销：无雾体（场无效）
     }
     CHECK_GT(viewport_w, 0);
     CHECK_GT(viewport_h, 0);
@@ -511,13 +443,9 @@ void FogRenderer::Draw(const std::vector<PointFog>& fogs,
     GLint prev_fbo = 0;
     GLint prev_vp[4] = {0, 0, 0, 0};
     GLint prev_active_tex = 0;
-    GLint prev_blend_src = 0;
-    GLint prev_blend_dst = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_vp);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
-    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src);
-    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst);
     const int units_touched = TexUnitsTouched();
     std::vector<GLint> prev_tex_binding(static_cast<size_t>(units_touched), 0);
     for (int u = 0; u < units_touched; ++u) {
@@ -794,45 +722,26 @@ void FogRenderer::Draw(const std::vector<PointFog>& fogs,
     glActiveTexture(GL_TEXTURE0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    // ═══════════ 趟 4：composite（全屏查表 → 就地混合进调用方 HDR FBO）═══════════
+    // ═══════════ 输出场（合成不在这里：交给 FogCompositeRenderer）═══════════
+    // 场只描述「scatter 纹理 + 网格参数」，纹理所有权仍在 FogRenderer（Finalize 释放）。
+    out->scatter_tex = scatter_tex_;
+    out->grid_cols = grid_w_;
+    out->grid_rows = grid_h_;
+    out->block_side = sblock;
+    out->nz = params.nz;
+    out->tile_px = params.tile_px;
+    out->z_near = params.z_near;
+    out->z_far = params.z_far;
+    out->viewport_w = viewport_w;
+    out->viewport_h = viewport_h;
+
+    // ── 复原状态（调用方随后把场交给合成趟，再做 highlight / bloom / tone map / 2D）──
+    // enable 位（blend/depth/cull）由调用方 glPushAttrib(GL_ENABLE_BIT) 兜底；此处仍显式关掉。
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
-    glUseProgram(prog_composite_);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, scatter_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uScatter"), 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, scene_depth_tex != 0 ? scene_depth_tex : dummy_depth_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSceneDepthTex"), 1);
-    glActiveTexture(GL_TEXTURE0);
-    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_composite_, "uInvVP"), 1, GL_FALSE, inv_vp);
-    glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uCamPos"), cam.position.x(),
-                cam.position.y(), cam.position.z());
-    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZNear"), params.z_near);
-    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZFar"), params.z_far);
-    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZScale"),
-                static_cast<float>(params.nz) / std::log(params.z_far / params.z_near));
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uGridCols"), grid_w_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uGridRows"), grid_h_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uNz"), params.nz);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uBlockSide"), sblock);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uTilePx"), params.tile_px);
-
-    // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾像素 → 恒等。
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-
-    // ── 复原状态（调用方随后做 highlight / bloom / tone map / 2D，均自设状态）──
-    // enable 位（blend/depth/cull）由调用方 glPushAttrib(GL_ENABLE_BIT) 兜底；此处仍显式关掉。
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    // ⭐ 回写混合函数：GL_BLEND_SRC/DST_ALPHA 属 GL_COLOR_BUFFER_BIT，**不在** enable 位里，
-    //   必须显式复原成本趟进入前的值（否则 composite 设的 GL_ONE/GL_SRC_ALPHA 会沿用到 2D/字体）。
-    glBlendFunc(static_cast<GLenum>(prev_blend_src), static_cast<GLenum>(prev_blend_dst));
     glUseProgram(0);
     // 回写本趟触碰过的纹理单元绑定（0..units_touched-1），再复原活动单元。
     for (int u = 0; u < units_touched; ++u) {

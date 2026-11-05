@@ -614,6 +614,7 @@ Renderer::~Renderer() {
     DestroySkyColorFBO();
     DestroySkyEnvCube();
     fog_renderer_.Finalize();
+    fog_composite_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1357,6 +1358,7 @@ void Renderer::Init(
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
     fog_renderer_.Init(&shader_mgr_);
+    fog_composite_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
@@ -1977,10 +1979,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
                 // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
                 //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
-                fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights,
-                                        light_data_tex_, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
-                                        ff_params, ff_light);
+                // 烘场（inject/reduce/scatter）与合成（雾场 + 透明层交替积分）是两个类：
+                // 前者产出 FogField，后者按场把所有层一次合成进当前 HDR FBO。
+                FogField fog_field;
+                fog_renderer_.Build(cmds.point_fogs, cmds.point_lights, light_data_tex_,
+                                    cam, mvp_, fbo_3d_w, fbo_3d_h, ff_params,
+                                    ff_light, &fog_field);
+                fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
+                                    ff_params, TransparentLayerSet{});
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

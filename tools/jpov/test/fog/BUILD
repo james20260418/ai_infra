@@ -110,3 +110,20 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 合成趟的**层契约** GPU 测试（headless GL / llvmpipe）：合成层纹理，直接驱动
+# FogCompositeRenderer，断言「预乘 over + 按代表深度排序 + 顺序无关」。
+# 纯雾路径由上方两个 gold 测试兜（逐像素 diff=0）。
+cc_test(
+    name = "fog_composite_gpu_test",
+    srcs = ["fog_composite_gpu_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/fog:fog_composite_renderer",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

@@ -1,14 +1,13 @@
 // JPOV Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
 //
-// 设计见 tools/jpov/docs/jpov_froxel_design.md。趟（前两趟跑在 froxel 纹理上，最后一趟全屏）：
+// 设计见 tools/jpov/docs/jpov_froxel_design.md。本文件只含**烘场**三趟（全在自建 froxel
+// 纹理上跑）；合成趟（全屏、雾 + 透明层交替积分）在 fog_composite_renderer.h。
 //   inject  （fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
 //                                  视线，在 [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
 //   reduce  （fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
 //                                  得到「每块 = 4^j 个切片」的粗粒度块，供 scatter「大块跳」。
 //   scatter （fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
 //                                  用金字塔 + **base-4 分解** ⇒ 每 texel **O(log Nz)** 次合成。
-//   composite（fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
-//                                  切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
 //
 // froxel 网格：每个 Nxy 单元 = froxel 纹理上一块 sblock×sblock texel（sblock=√nz），
 // 承载 nz 个 z 切片（指数分布，近密远疏）；texel 索引 k = iy*uBlockSide + ix（行主序）。
@@ -594,92 +593,9 @@ void main() {
 }
 )glsl";
 
-// ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 + （可选）玻璃层合成 → 就地混合 ──
-inline constexpr const char* kFogCompositeBody = R"glsl(
-
-uniform sampler2D uScatter;
-uniform sampler2D uSceneDepthTex;
-uniform mat4  uInvVP;
-uniform vec3  uCamPos;
-uniform float uZNear;
-uniform float uZFar;
-uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
-uniform int   uGridCols;   // Nxy 单元列数
-uniform int   uGridRows;   // Nxy 单元行数
-
-out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
-
-// 读某 tile 的 scatter 列在「位置 ℓ（= Nz·ln(z/near)/ln(far/near)）」处的 (τ, S)。
-// texel t 的自然位置 = t+1（覆盖 [z_near, z_{t+1}））；ℓ<1 与 identity 插值。
-void SampleColumn(ivec2 tile_xy, float ell, out float tau, out vec3 S) {
-    int t_hi = int(floor(ell));
-    float fr = ell - float(t_hi);
-    t_hi = clamp(t_hi, 0, uNz - 1);
-    int t_lo = t_hi - 1;
-    vec4 vhi = texelFetch(uScatter, ivec2(tile_xy.x + (t_hi % uBlockSide),
-                                          tile_xy.y + (t_hi / uBlockSide)), 0);
-    vec4 vlo = (t_lo >= 0)
-        ? texelFetch(uScatter, ivec2(tile_xy.x + (t_lo % uBlockSide),
-                                     tile_xy.y + (t_lo / uBlockSide)), 0)
-        : vec4(0.0);   // identity：τ=0, S=0 ⇒ T=1, S=0
-    tau = mix(vlo.x, vhi.x, fr);
-    S   = mix(vlo.yzw, vhi.yzw, fr);
-}
-
-// 屏幕像素位置 px 处的雾累积 (τ, S)：4 邻 tile 双线性（按 tile 中心对齐）。
-void SampleFogBilinear(vec2 px, float ell, out float tau, out vec3 S) {
-    float cu = px.x / float(uTilePx) - 0.5;
-    float cv = px.y / float(uTilePx) - 0.5;
-    int tx0 = int(floor(cu));
-    int ty0 = int(floor(cv));
-    float fu = cu - float(tx0);
-    float fv = cv - float(ty0);
-    tau = 0.0;
-    S = vec3(0.0);
-    for (int dy = 0; dy < 2; ++dy) {
-        int ty = clamp(ty0 + dy, 0, uGridRows - 1);
-        float wy = (dy == 0) ? (1.0 - fv) : fv;
-        for (int dx = 0; dx < 2; ++dx) {
-            int tx = clamp(tx0 + dx, 0, uGridCols - 1);
-            float wx = (dx == 0) ? (1.0 - fu) : fu;
-            float w = wx * wy;
-            float ctau;
-            vec3  cS;
-            SampleColumn(ivec2(tx * uBlockSide, ty * uBlockSide), ell, ctau, cS);
-            tau += w * ctau;
-            S   += w * cS;
-        }
-    }
-}
-
-// 视距 z（米）→ froxel 连续位置 ℓ（clamp 到雾区间）。
-float DepthToEll(float z) {
-    z = clamp(z, uZNear, uZFar);
-    return uZScale * log(z / uZNear);
-}
-
-void main() {
-    vec2 uv = vTexCoord;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pf = uInvVP * vec4(ndc, 1.0, 1.0);
-    vec3 ro = uCamPos;
-    vec3 rd = normalize(pf.xyz / pf.w - ro);
-
-    // 像素场景深度 → 沿视线距离 → froxel 连续位置 ℓ_op（不透明场景深度）。
-    float dndc = texture(uSceneDepthTex, uv).r;
-    vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
-    float z_op = length(pw.xyz / pw.w - ro);
-    float ell_op = DepthToEll(z_op);
-
-    // 全雾路径：雾(0→z_op) 累积 (S_op, T_op)，再与背景就地合成。
-    //   out.rgb = S_op；out.a = T_op
-    // GL_ONE/GL_SRC_ALPHA：final = out.rgb + dst·out.a。
-    float tau_op;
-    vec3  S_op;
-    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
-    oColor = vec4(S_op, exp(-tau_op));
-}
-)glsl";
+// 趟 4（composite）的 GLSL 不在这里：它随「合成器」这个类是独立的一趟，
+// 见 src/fog/fog_composite_renderer.h（kFsComposite）。本文件只提供公共前置
+// （kFogCommonGlsl）与前三趟（inject / reduce / scatter）。
 
 }  // namespace jpov
 

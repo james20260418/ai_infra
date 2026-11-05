@@ -15,8 +15,10 @@
 //   2. reduce （fog_reduce） 金字塔每一级：由上一级沿 z **4 合 1**（over 合成）。
 //   3. scatter（fog_scatter）逐 texel = 某 froxel 的**累积** (τ, S)：沿 z 有序前缀，
 //                              用金字塔 + **base-4 分解** ⇒ **O(log nz)** 次合成。
-//   4. composite（fog_composite）全屏：4 邻 tile 双线性 + 像素深度 z 向插值 →
-//                              vec4(S.rgb, T)，配 GL_ONE/GL_SRC_ALPHA 就地混合（S + dst·T）。
+//   4. （合成）→ FogCompositeRenderer::Draw：4 邻 tile 双线性 + 像素深度 z 向插值，
+//                              与 0..N 个透明层交替积分后就地混合进调用方 HDR FBO。
+//      **本类不做合成**：它只产出 FogField（scatter 纹理 + 网格参数）。这样「层」的来源
+//      （玻璃 / 粒子 / 体积火 / 条带）与「雾」解耦 —— 见 transparent_layer.h。
 //
 // 分步验收说明（2026-10-10 改）：
 //   雾火**始终开启物理光照**（ambient + 太阳×CSM + 点光源 tile culling）；
@@ -27,8 +29,8 @@
 // ── GL 状态机契约（谁保存 / 谁复原）────────────────────────────────────────────
 // Draw() 自行保存并复原（不依赖调用方）：
 //   · GL_FRAMEBUFFER_BINDING / GL_VIEWPORT / GL_ACTIVE_TEXTURE（进入时取出，结束前回写）；
-//   · 使用的纹理单元（0..(3+kMaxCascades)）的 GL_TEXTURE_2D 绑定（进入时逐个取出，结束前回写）；
-//   · GL_BLEND_SRC_ALPHA / GL_BLEND_DST_ALPHA（本趟用 GL_ONE/GL_SRC_ALPHA，必须回写，否则污染 2D/字体）。
+//   · 使用的纹理单元（0..(3+kMaxCascades)）的 GL_TEXTURE_2D 绑定（进入时逐个取出，结束前回写）。
+// 混合函数（GL_ONE/GL_SRC_ALPHA）由**合成趟**设置，那里自行回写（Build 不碰 blend）。
 // Draw() 不保存、由**调用方的 glPushAttrib 兜底**（JPOV 的 3D 段用 GL_ENABLE_BIT|GL_VIEWPORT_BIT）：
 //   · GL_BLEND / GL_DEPTH_TEST / GL_CULL_FACE 的 **enable 位**（本趟统一关掉）；
 //   · 当前 program / VAO（本趟结束置 0 / 不动，调用方后续各自重设）。
@@ -68,6 +70,23 @@ struct FogLighting {
     float shadow_texel_world[ShadowConfig::kMaxCascades] = {};
 };
 
+// froxel 雾场：FogRenderer::Build 的产出，FogCompositeRenderer 的输入。
+// 只描述「场在哪里、怎么读」，不拥有任何 GPU 资源（scatter 纹理归 FogRenderer）。
+struct FogField {
+    unsigned int scatter_tex = 0;   // RGBA32F：每 texel = 该 froxel 的累积 (τ, S.rgb)
+    int grid_cols = 0;              // Nxy 单元列数
+    int grid_rows = 0;              // Nxy 单元行数
+    int block_side = 0;             // 每柱 texel 边长（= √nz）
+    int nz = 0;                     // 每柱 z 切片数
+    int tile_px = 0;                // 每 Nxy 单元对应的屏幕像素边长
+    float z_near = 0.0f;            // froxel z 分布区间
+    float z_far = 0.0f;
+    int viewport_w = 0;             // 构建时的 3D 视口尺寸（合成趟按此设 viewport）
+    int viewport_h = 0;
+
+    bool valid() const { return scatter_tex != 0; }
+};
+
 class FogRenderer {
 public:
     // ── 常量 ──
@@ -101,33 +120,32 @@ public:
     // 释放 Init 申请的全部 GPU 资源（与 Init 对称，可重复调用）。
     void Finalize();
 
-    // froxel 雾火管线（见头文件顶部）：inject/reduce/scatter 在自建 FBO 上跑，composite 回到
-    // 调用方当前绑定的 3D HDR FBO **就地**混合（GL_ONE/GL_SRC_ALPHA）。
+    // froxel 雾场构建（见头文件顶部）：inject/reduce/scatter 在自建 FBO 上跑，产出 FogField。
+    // **不**做合成：合成趟由 FogCompositeRenderer 负责（雾场 + 透明层交替积分）。
     //   fogs            : 本帧的点状雾体（命令层 PointFog）。
     //   point_lights    : 本帧的点光源（命令层 PointLight）——fog 自持一套 tile culling，
     //                     取 position / color / linear_radius / intensity 做点光源内散射。
+    //   light_data_tex  : 点光源数据纹理（RGBA32F 255×3，见 src/lights_texture.h）；
+    //                     与 object3d/instanced 共用同一张，调用方每帧 Ensure/Upload 一次。
     //   cam             : 相机（取世界位置做光线原点 + 每 tile z 范围）。
     //   view_proj       : Proj*View（列主序 16 float）。
     //   viewport_w/h    : 当前 3D FBO 像素尺寸（= froxel 纹理尺寸）。
-    //   scene_depth_tex : MRT#1 场景深度（R32F，单采样），composite 按像素深度裁剪；0 = 不裁剪。
-    //   light_data_tex  : 点光源数据纹理（RGBA32F 255×3，见 src/lights_texture.h）；
-    //                     与 object3d/instanced 共用同一张，调用方每帧 Ensure/Upload 一次。
     //   params          : 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
     //   light           : 物理光照来源（ambient + 太阳×CSM 资源）。
-    // Pre-conditions: Init 已调用；调用方已绑定 HDR FBO 并设好 viewport；场景深度纹理
-    //                 **不**是当前 draw FBO 的附件（否则采样↔写入反馈环）。
+    //   out             : 输出场；fogs 为空时置为无效（scatter_tex = 0）。
+    // Pre-conditions: Init 已调用；out != nullptr。
     // 说明：fogs 为空时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 /
-    //       viewport / 活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
-    void Draw(const std::vector<PointFog>& fogs,
-              const std::vector<PointLight>& point_lights,
-              unsigned int light_data_tex,
-              const Camera& cam,
-              const float view_proj[16],
-              int viewport_w,
-              int viewport_h,
-              unsigned int scene_depth_tex,
-              const FogParams& params,
-              const FogLighting& light);
+    //       viewport / 活动纹理单元 / 使用的纹理单元绑定（见头文件顶部「GL 状态机契约」）。
+    void Build(const std::vector<PointFog>& fogs,
+               const std::vector<PointLight>& point_lights,
+               unsigned int light_data_tex,
+               const Camera& cam,
+               const float view_proj[16],
+               int viewport_w,
+               int viewport_h,
+               const FogParams& params,
+               const FogLighting& light,
+               FogField* out /*output*/);
 
 private:
     // 按 (grid_cols, grid_rows, sblock, num_levels)（= Nxy 列/行数 + 每柱边长 + 金字塔级数）
@@ -144,11 +162,9 @@ private:
     unsigned int prog_inject_ = 0;
     unsigned int prog_reduce_ = 0;
     unsigned int prog_scatter_ = 0;
-    unsigned int prog_composite_ = 0;
     std::string fs_inject_;      // 组装后的 FS 源码（须存活到编译完成）
     std::string fs_reduce_;
     std::string fs_scatter_;
-    std::string fs_composite_;
 
     // froxel 目标（主 FBO 尺寸，各 1 个 RGBA32F 附件）。
     unsigned int inject_tex_ = 0;    // L1：局部 (τ, S)
@@ -204,10 +220,6 @@ private:
     // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*fog_layout::kTexelsPerBody，高 = 1）。
     // 每团 texel 布局见 fog_body.h kFogBodyLayout（公共头 + 按 kind 的 union 区）。
     unsigned int fog_body_tex_ = 0;
-
-    // 1×1 R32F 哑元深度纹理（值 = 1.0）：调用方传 scene_depth_tex==0 时使用，
-    // 使 composite 退化为「不打裁剪」（像素深度取远平面）。
-    unsigned int dummy_depth_tex_ = 0;
 
     // 每帧把命令层点雾降维后的统一团列表（烘焙到 fog_body_tex_）。
     std::vector<FogBody> bodies_;
