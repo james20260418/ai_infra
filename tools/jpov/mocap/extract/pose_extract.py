@@ -33,6 +33,24 @@ def die(msg):
     sys.exit(1)
 
 
+def close_quietly(landmarker):
+    """显式释放 landmarker，避开解释器退出阶段的已知噪声。
+
+    背景（mediapipe 1.2.0 + Python 3.12）：不显式 close 时，`PoseLandmarker.__del__`
+    在解释器 shutdown 之后才跑，此时 serial dispatcher 的回调已被拆掉，会往 stderr 打
+    `TypeError: 'NoneType' object is not callable` 的 traceback —— 退出码仍是 0、
+    结果文件也正常，纯属吓人的噪声。close() 是幂等的（内部 `if not self._handle: return`），
+    进程还活着时先关一次，__del__ 里的第二次就变成空操作。
+
+    只吞这一种异常：其它异常照常抛，避免把真正的释放失败一起藏掉。
+    """
+    try:
+        landmarker.close()
+    except TypeError as exc:
+        if "NoneType" not in str(exc):
+            raise
+
+
 def probe(video):
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -158,6 +176,7 @@ def main():
     det = sum(1 for fr in frames if fr["landmarks"])
     print(f"[pose_extract] wrote {args.out}: {len(frames)} frames, "
           f"{det} with pose ({100.0*det/max(1,len(frames)):.1f}%)")
+    close_quietly(landmarker)
 
 
 def _pick_and_serialize(res, w, h, prev_center):
@@ -237,6 +256,7 @@ def run_images(args, mp, vision, BaseOptions):
         json.dump({**meta, "frames": frames}, f, separators=(",", ":"))
     det = sum(1 for fr in frames if fr["landmarks"])
     print(f"[pose_extract] wrote {args.out}: {len(frames)} 帧, {det} 帧检出")
+    close_quietly(landmarker)
 
 
 if __name__ == "__main__":
