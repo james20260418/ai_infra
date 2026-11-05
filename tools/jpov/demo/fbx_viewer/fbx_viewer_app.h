@@ -194,6 +194,10 @@ enum class ViewMode : int {
     kBothMannequin = 8,
     // 只看蓝人模特（视频拍摄用：两角度对比时画面里不要红骨人）。
     kMannequinOnly = 9,
+    // 只看蓝带皮（**真蒙皮**）：glb 的真皮网格 + BodyRetarget 驱动，画面里没有红骨人。
+    //   动捕视频验收用：与 kMannequinOnly 同一个用途（看体态/朝向/重心），
+    //   区别是模特换成资产真皮（程序化蓝人模特只是骨架比例的可视化代理）。
+    kSkinnedOnly = 10,
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
@@ -208,6 +212,7 @@ inline const char* const kViewModeItems[] = {
     "并列（红骨人 + 蓝带皮·粗细微调）",
     "并列（红骨人 + 蓝人模特）",
     "只看蓝人模特",
+    "只看蓝带皮（真蒙皮）",
 };
 inline constexpr int kViewModeItemCount =
     static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
@@ -241,7 +246,7 @@ inline bool ViewIsSideBySide(ViewMode m) {
 //   kSkinnedThickness 用真皮。
 inline bool ViewGlbIsSkinned(ViewMode m) {
     return m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned ||
-           m == ViewMode::kSkinnedThickness;
+           m == ViewMode::kSkinnedThickness || m == ViewMode::kSkinnedOnly;
 }
 
 // 本模式是否画**程序化蓝人模特**（不依赖 glb 真皮）。
@@ -344,6 +349,11 @@ MakeGlbThicknessConfig(const jpov::SkeletonType& skel) {
         GlbJointIndexByName(skel, "mixamorig:RightHand"),
     };
     return cfg;
+}
+// 本模式的蓝侧是否只画 **1 个真皮网格、不画红骨人**（kSkinnedOnly）。
+//   动捕视频验收用：镜头里只有真角色。
+inline bool ViewGlbIsSkinnedOnly(ViewMode m) {
+    return m == ViewMode::kSkinnedOnly;
 }
 // 本模式的蓝侧是否画 **3 个 instanced 肉人**（而不是 1 个）。
 //   用途：肉眼 + 代码双层验收「真 instanced draw」（一次 draw call 画 N 实例）。
@@ -459,6 +469,10 @@ public:
     //   true  = 交互窗口（OneIteration 末尾画面板）
     //   false = headless 单帧出图：截图是纯 3D（不画面板、不消费输入）
     void SetShowPanel(bool show) { show_panel_ = show; }
+
+    // headless/捕获前置：--view 在装配之后才定，机位要按**最终模式**重算一次
+    //   （否则 "只看真皮" 会按并列布局的包围盒取景，人物偏小偏侧）。
+    void RefitViewForMode() { FitInitialView(); }
 
     // 注入真实字体文本测量回调（UI 内部用；交互与 headless 都装，装了无副作用）。
     void InstallTextMeasure() {
@@ -623,6 +637,20 @@ public:
                     inst.transform.center = {blue_x + off, 0.0f, 0.0f};
                     inst.transform.up     = {0.0f, 1.0f, 0.0f};
                     inst.transform.front  = {0.0f, 0.0f, 1.0f};
+                    // 只画真皮时：资产的人体系相对源转了 Q_body（本资产 Tripo glb = +89°，
+                    //   它的“朝前”是 +X、源是 +Z）—— 不补一拍就是“侧对镜头”。
+                    //   这里把整只角色绕自身原点转回 −Q_body，使 --azimuth-deg 的语义与其他
+                    //   模式一致（0° = 正面）。
+                    //   ⚠️ 只用于 kSkinnedOnly（单角色展示）；并列对比模式不改朝向——
+                    //   那里 Q_body 是“资产差异”这一待观察的事实，不该被遮掉。
+                    if (ViewGlbIsSkinnedOnly(view_mode_)) {
+                        const geom::Quaternion<float> to_source =
+                            retarget_plan_.q_body.Conjugate();
+                        inst.transform.up =
+                            geom::RotateVector(to_source, jpov::Vec3f(0.0f, 1.0f, 0.0f));
+                        inst.transform.front =
+                            geom::RotateVector(to_source, jpov::Vec3f(0.0f, 0.0f, 1.0f));
+                    }
                     inst.transform.scale  = 1.0f;
                     inst.pose_a = fi;
                     inst.pose_b = fj;
@@ -968,19 +996,46 @@ private:
     DrawnPoseKey red_drawn_;   // 源（红）mesh 已按哪个键建过
     DrawnPoseKey blue_drawn_;  // 目标（蓝）mesh 已按哪个键建过
 
-    // 初始机位：按**当前场景全部骨人**（含并列的蓝）的包围盒自适应距离
+    // 初始机位：按**当前模式下真正会被画出来的东西**的包围盒自适应距离
     // （同查看器用 FitRadius 的做法），注视高度取包围盒中高（约胸口）。
-    // ⚠️ 一律按「最宽」（两者并列）适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
+    // 两者并列时按「最宽」适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
+    // 只画一侧的模式（kFbxOnly / kMannequinOnly / kSkinnedOnly）只按那一侧适配，
+    //   否则画面里一半是空的（另一侧其实没画）。
     void FitInitialView() {
-        const float red_x =
-            has_glb_ ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
-        const float blue_x =
-            has_glb_ ? (0.5f * pair_sep_m_ - glb_center_x_) : 0.0f;
-        float bmin[3] = {fbx_bounds_.min.x() + red_x, fbx_bounds_.min.y(),
-                         fbx_bounds_.min.z()};
-        float bmax[3] = {fbx_bounds_.max.x() + red_x, fbx_bounds_.max.y(),
-                         fbx_bounds_.max.z()};
-        if (has_glb_) {
+        // 与 OneIteration 的“画谁 / 怎么摆”保持同一套判断（两端分叉 = 机位与画面错位）。
+        const bool show_mannequin = mannequin_ready_ && ViewUsesMannequin(view_mode_);
+        const bool show_fbx =
+            (has_glb_ || show_mannequin) ? ViewShowsFbx(view_mode_) : true;
+        const bool show_blue = has_glb_ && ViewShowsGlb(view_mode_) && !show_mannequin;
+        const bool side_by_side =
+            (has_glb_ || show_mannequin) && ViewIsSideBySide(view_mode_);
+        const float pair_sep = show_mannequin ? mannequin_pair_sep_m_ : pair_sep_m_;
+        const float red_x = side_by_side ? (-0.5f * pair_sep - fbx_center_x_) : 0.0f;
+        const float blue_center_x = show_mannequin ? mannequin_center_x_ : glb_center_x_;
+        const float blue_x = side_by_side ? (0.5f * pair_sep - blue_center_x) : 0.0f;
+        float bmin[3] = {0.0f, 0.0f, 0.0f};
+        float bmax[3] = {0.0f, 0.0f, 0.0f};
+        bool have_box = false;
+        if (show_fbx) {
+            bmin[0] = fbx_bounds_.min.x() + red_x;
+            bmin[1] = fbx_bounds_.min.y();
+            bmin[2] = fbx_bounds_.min.z();
+            bmax[0] = fbx_bounds_.max.x() + red_x;
+            bmax[1] = fbx_bounds_.max.y();
+            bmax[2] = fbx_bounds_.max.z();
+            have_box = true;
+        }
+        if (show_mannequin) {
+            const float mx = blue_x;
+            bmin[0] = mannequin_bounds_.min.x() + mx;
+            bmin[1] = mannequin_bounds_.min.y();
+            bmin[2] = mannequin_bounds_.min.z();
+            bmax[0] = mannequin_bounds_.max.x() + mx;
+            bmax[1] = mannequin_bounds_.max.y();
+            bmax[2] = mannequin_bounds_.max.z();
+            have_box = true;
+        }
+        if (show_blue) {
             // 蓝侧可能画火柴人（骨杆）或真皮网格（kBothSkinned）—— 两者包围盒不同，
             //   取 `glb_bounds_`（火柴人）与 `glb_skin_bounds_`（真皮，若已装配）的并集，
             //   这样切模式时相机**不跳**，且两种蓝侧形态都不裁切。
@@ -992,12 +1047,21 @@ private:
                 ViewGlbIsTripleInstanced(view_mode_)
                     ? std::max(glb_skin_pair_spacing_m_, 0.1f)
                     : 0.0f;
-            bmin[0] = std::min(bmin[0], gb.min.x() + blue_x - blue_half_span);
-            bmin[1] = std::min(bmin[1], gb.min.y());
-            bmin[2] = std::min(bmin[2], gb.min.z());
-            bmax[0] = std::max(bmax[0], gb.max.x() + blue_x + blue_half_span);
-            bmax[1] = std::max(bmax[1], gb.max.y());
-            bmax[2] = std::max(bmax[2], gb.max.z());
+            if (have_box) {
+                bmin[0] = std::min(bmin[0], gb.min.x() + blue_x - blue_half_span);
+                bmin[1] = std::min(bmin[1], gb.min.y());
+                bmin[2] = std::min(bmin[2], gb.min.z());
+                bmax[0] = std::max(bmax[0], gb.max.x() + blue_x + blue_half_span);
+                bmax[1] = std::max(bmax[1], gb.max.y());
+                bmax[2] = std::max(bmax[2], gb.max.z());
+            } else {
+                bmin[0] = gb.min.x() + blue_x - blue_half_span;
+                bmin[1] = gb.min.y();
+                bmin[2] = gb.min.z();
+                bmax[0] = gb.max.x() + blue_x + blue_half_span;
+                bmax[1] = gb.max.y();
+                bmax[2] = gb.max.z();
+            }
         }
         view_ = jpov_viewer::DefaultView();
         view_.R = jpov_viewer::ViewConfig::FitRadius(bmin, bmax, /*fov_deg*/ 60.0);

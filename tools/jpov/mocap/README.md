@@ -149,6 +149,36 @@ output/jpov_fbx_viewer/jpov_fbx_viewer ../danis/archery.fbx --view 9 \
 C++ 侧已补：整体朝向（yaw，落在 Hips）、根位移（水平 + 脚钉地）、
 程序化蓝人模特（`interface/skeleton_mannequin.h`）、viewer 自带 `--video` / `--shot-dir`。
 
+### 6.5.1 换成真蒙皮角色（`--view 10`）
+
+程序化蓝人模特（`--view 9`）只是骨架比例的可视化代理；要**看资产真皮**（glb 的蒙皮网格）
+时用 `--view 10`：镜子里只有 1 个真皮角色，没有红骨人。
+
+```bash
+output/jpov_fbx_viewer/jpov_fbx_viewer ../danis/archery.fbx \
+    tools/jpov/assets/models/characters/mixamo_male.glb --view 10 \
+    --video ../danis/archery_skin_2angles.mp4 --frames 121 --fps 24 \
+    --azimuth-deg 0 --azimuth2-deg 90 --elev-deg 5
+```
+
+两条与资产相关的约定（都在 viewer 内部处理，命令行不用管）：
+
+1. **朝向按 Q_body 转回源**：Tripo 出的 glb 人体系比 Mixamo 源多转 89°（它的“朝前”是 +X），
+   不补这一拍角色会侧对镜头。`--view 10` 把整只角色转回 `−Q_body`，所以
+   `--azimuth-deg 0` 仍是**正面**，与 `--view 9` 的镜头语义一致。
+   并列对比模式（`--view 5` 等）**不转** —— 那里 Q_body 正是待观察的资产差异。
+2. **机位按最终模式重算**：`--view` 在装配之后才定，捕获前会按该模式的包围盒重新取景
+   （单角色模式只按角色自己算，不会因为“并列布局”而偏小偏侧）。
+
+可选：挂已蒙皮的衣服（骨序须与 glb 一致），与角色逐帧同步：
+
+```bash
+# 目录里放 *.glb（例：yoga_pants_skinned_sample.glb / harness_vest_skinned_sample.glb）
+output/jpov_fbx_viewer/jpov_fbx_viewer ../danis/archery.fbx \
+    tools/jpov/assets/models/characters/mixamo_male.glb --view 10 \
+    --cloth_path ../danis/mocap_cloth --shot ../danis/dressed_f30.png --frame 30
+```
+
 ## 7. 未做 / 下一步
 
 - **手部朝向**（palm normal）没有解，`LeftHand` 只按前臂方向摆。

@@ -10,6 +10,7 @@
 //                                / 5 并列(红骨人 + 蓝**带皮网格**，GPU 双帧插值)
 //                                / 6 并列(红骨人 + **3 个 instanced 蓝肉人**，验收真 instancing)
 //                                / 8 并列(红骨人 + **程序化蓝人模特**，不依赖 glb)
+//                                / 9 只看蓝人模特 / 10 只看蓝带皮(真蒙皮，动捕验收用)
 //   --time 秒 | --frame 帧号 | --rest
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
@@ -65,7 +66,8 @@ struct CliParsed {
     int frame_index = 0;       // --frame 的值（源帧号，按 fps 换算时刻）
     bool has_view = false;         // --view 是否给出
     // --view 的值（ViewMode 下标：0 只看红 / 1 只看蓝 / 2 并列 / 3 蓝直搬 /
-    //   4 并列直搬 / 5 并列带皮网格 / 6 并列 3 蓝肉人·instanced / 7 并列带皮·粗细微调）。
+    //   4 并列直搬 / 5 并列带皮网格 / 6 并列 3 蓝肉人·instanced / 7 并列带皮·粗细微调 /
+    //   8 并列蓝人模特 / 9 只看蓝人模特 / 10 只看蓝带皮(真蒙皮)）。
     int view_mode = 0;
     bool rest = false;         // --rest：固定 pose = identity
     // --azimuth-deg / --elev-deg：headless 出图的固定机位（度）。
@@ -216,7 +218,7 @@ int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
-           "[--time 秒|--frame 帧号] [--rest] [--view 0..9] "
+           "[--time 秒|--frame 帧号] [--rest] [--view 0..10] "
            "[--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0] "
            "[--twist-deg -90~90] [--tilt-deg -30~30]";
     const bool capture = !p.shot_path.empty() || !p.shot_dir.empty() ||
@@ -298,12 +300,6 @@ int main(int argc, char** argv) {
               (!p.has_time && !p.has_frame))
             << "--time / --frame 只用于单帧 --shot；序列/视频请用 --frames";
         app.rest_pose_mode_ = p.rest;
-        if (p.has_azimuth) {
-            app.view_.theta = p.azimuth_deg * 3.14159265358979323846 / 180.0;
-        }
-        if (p.has_elev) {
-            app.view_.phi = p.elev_deg * 3.14159265358979323846 / 180.0;
-        }
         if (p.has_view) {
             CHECK_GE(p.view_mode, 0);
             CHECK_LT(p.view_mode, jpov_fbx_viewer::kViewModeItemCount)
@@ -315,6 +311,15 @@ int main(int argc, char** argv) {
                 << "--view 选了含蓝骨的模式但未给 glb 路径（第二位置参数；"
                    "只有 --view 8 蓝人模特不需要 glb）";
             app.view_mode_ = static_cast<jpov_fbx_viewer::ViewMode>(p.view_mode);
+            // --view 在装配之后才定：机位按最终模式重算（“只看真皮”不该按并列布局取景）。
+            app.RefitViewForMode();
+        }
+        // 机位角度必须在 RefitViewForMode **之后**设：重算机位 = 回到 DefaultView（theta/phi 归位）。
+        if (p.has_azimuth) {
+            app.view_.theta = p.azimuth_deg * 3.14159265358979323846 / 180.0;
+        }
+        if (p.has_elev) {
+            app.view_.phi = p.elev_deg * 3.14159265358979323846 / 180.0;
         }
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(jpov_fbx_viewer::kViewerWidth);
