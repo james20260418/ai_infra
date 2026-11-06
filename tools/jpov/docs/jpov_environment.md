@@ -52,6 +52,7 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
 | `third_party/protobuf-3.14.0-rc3/` | protobuf 源码（`local_repository`） |
 | `third_party/opencv-static`、`curl-static`、`ufbx-static` | 预编译静态库 |
 | `third_party/stb`、`tinygltf`、`nlohmann-json`、`gl_loader-mingw` | header-only / 少量源码 |
+| `third_party/distdir/` | `protobuf_deps()` 那 6 个 `http_archive` 的原始 tarball（断网时 Bazel 从这里取，见 §4） |
 | `tools/jpov/fonts/`、`tools/jpov/assets/`、`data/fire_vdb/campfire.jpovvol` | 运行时资产（字体、模型、体纹理小样） |
 
 ---
@@ -70,22 +71,59 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
 
 ---
 
-## 4. 唯一的联网点：`protobuf_deps()`
+## 4. 第三方下载：全部走仓库自带 distdir（断网可构建）
 
-`WORKSPACE` 自身的 `http_archive` 已清零：
+`WORKSPACE` 自身已无 `http_archive`：
 
-- ✅ `gtest` → 改为 `local_repository("third_party/googletest-release-1.11.0")`
-- ✅ `com_github_gflags_gflags` → **整条删除**（glog 是预编译 .a，构建期不需要 gflags；全仓 0 处引用）
+- ✅ `gtest` → `local_repository("third_party/googletest-release-1.11.0")`
+- ✅ `com_github_gflags_gflags` → 整条删除（glog 是预编译 .a，构建期不需要 gflags；全仓 0 处引用）
 
-但 `third_party/protobuf-3.14.0-rc3/protobuf_deps.bzl` 仍会 `http_archive` 这 7 个：
+`third_party/protobuf-3.14.0-rc3/protobuf_deps.bzl` 里仍有 7 个 `http_archive`，
+其中 6 个真会被用到，**原始 tarball 已入库** `third_party/distdir/`（压缩包原样、
+不展开源码，git 只涨 ~3.1MB）：
+
+| archive | 版本 | distdir 文件名 | tar.gz |
+|---|---|---|---|
+| bazel_skylib | 1.0.2 | `bazel-skylib-1.0.2.tar.gz` | 31K |
+| zlib | 1.2.11 | `v1.2.11.tar.gz` | 630K |
+| rules_cc | 818289e | `818289e5613731ae410efb54218a4077fb9dbb03.tar.gz` | 112K |
+| rules_java | 981f06c | `981f06c3d2bd10225e85209904090eb7b5fb26bd.tar.gz` | 6.5K |
+| rules_proto | 4029855 | `40298556293ae502c66579620a7ce867d5f57311.tar.gz` | 12K |
+| rules_python | 4b84ad2 | `4b84ad270387a7c439ebdccfd530e2339601ef27.tar.gz` | 2.3M |
+| six | 1.12.0 | —（当前构建从不引用，未入库） | — |
+
+规则：
+
+- 文件名必须是**上游 URL 的 basename**（Bazel 按 basename 在 distdir 里找），
+  内容 sha256 必须与 `protobuf_deps.bzl` 声明一致（`sha256sum third_party/distdir/*` 可核对）。
+- 开关在 `.bazelrc`：`common --distdir=third_party/distdir`（相对 workspace 根）。
+- 加新依赖时：把上游 URL 的 tarball 原样拷进来即可，不要改内容、不要重命名。
+
+### 4.1 另外 237MB 的坑：`cc_test` 的 coverage_report_generator
+
+`cc_test` 有个隐式属性 `coverage_report_generator`，默认指向
+`@remote_coverage_tools//:coverage_report_generator`——那是个 **java_binary**。
+于是只要**分析到任何一个 test 目标**（`bazel build //tools/jpov/...` 也算，里面全是 cc_test），
+Bazel 就要解析 java toolchain，从而下载：
+
+| repo | 包 |
+|---|---|
+| `remote_java_tools` | java_tools-v11.7.1.zip（42M） |
+| `remote_java_tools_linux` | java_tools_linux-v11.7.1.zip（1.3M） |
+| `remotejdk11_linux` | Zulu JDK 11 tar.gz（194M，解压 320M） |
+
+本仓库从不跑 `bazel coverage`，所以 `.bazelrc` 里把生成器换成本地 shell 脚本：
 
 ```
-bazel_skylib / zlib / six / rules_cc / rules_java / rules_proto / rules_python
+build --coverage_report_generator=@bazel_tools//tools/test:coverage_support
 ```
 
-**影响**：干净缓存 / 新机器 / 断网环境下**首次** `bazel build` 会失败。
-**解法（待办）**：把这 7 个 tarball 放进 `third_party/distdir/`，在 `.bazelrc` 加
-`build --distdir=third_party/distdir`（bazel 命中 distdir 就不联网）。
+⇒ 干净机器/断网上这 237MB 一个字节都不用下。（代价：真跑 `bazel coverage` 时报告生成不可用。）
+
+**验证（2026-11-06，空 output_base + `--experimental_repository_disable_download`）**：
+`bazel build //tools/jpov/...` → 1741 actions 全绿（78s，含 disk cache）；
+`bazel test //tools/jpov/test/sp_ui:all //tools/jpov/test/strip:all` → 7 tests / 68 cases 全绿。
+唯一不在此列的是 Bazel 自带的 `@platforms` / `@bazel_tools` / `local_config_*`——它们在 install_base 里，本来就不联网。
 
 ---
 

@@ -1,4 +1,6 @@
 bazel-*
+# 例外：third_party/distdir 里上游包名本身就长这样（Bazel 按 URL basename 找包）
+!third_party/distdir/bazel-skylib-*.tar.gz
 bazel-out/
 bazel-bin/
 bazel-testlogs/
