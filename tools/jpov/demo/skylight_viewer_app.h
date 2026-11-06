@@ -224,6 +224,7 @@ public:
     float ssr_fade_edge_px_ = 0.0f;     // 反射体像素贴边（观感缓冲带）
     float ssr_fade_hit_edge_px_ = 0.0f;  // 命中点贴边（反射源靠画面外沿 ⇒ 可信度低）
     float ssr_backface_env_ = 1.0f;     // 背面命中时 env fallback 的乘子（1 = 不压暗）
+    bool  ssr_cov_max_ = false;         // 融合层覆盖率取 2×2 max（修 1:2 的侧边漏亮线）
     int   ssr_debug_ = 0;
     void SetSsr(bool on) { ssr_on_ = on; }
 
@@ -382,6 +383,7 @@ public:
             sc.fade_edge_pixels = ssr_fade_edge_px_;
             sc.fade_hit_edge_pixels = ssr_fade_hit_edge_px_;
             sc.backface_env_scale = ssr_backface_env_;
+            sc.upsample_coverage_max = ssr_cov_max_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
         }
@@ -417,7 +419,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 19;
+        const int   kRows    = 20;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -531,6 +533,7 @@ private:
                             0.0f, 600.0f, 0);
             ui_.SliderFloat("SSR 背面 env 乘子 [0,1]", &ssr_backface_env_, row(1, 18),
                             0.0f, 1.0f, 2);
+            ui_.Checkbox("SSR 覆盖率取邻域 max (修侧边亮线)", &ssr_cov_max_, row(1, 19));
         }
         // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
         {

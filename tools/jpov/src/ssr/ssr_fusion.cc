@@ -65,6 +65,8 @@ uniform float uRangeDepthRatio;    // **软权尺度**：rel 等于它时权重�
 uniform float uHardCut;            // rel 超过它 ⇒ 硬拒（数量级不同 = 真跨表面/剪影）
 uniform float uWeightFloor;        // 权重下限（相对空间权）⇒ Σw 永不为 0，不出孔洞
 uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = A；5 = 背面标记
+// 1 = 融合层的覆盖率取 2×2 的 **max**（修 1:2 剪影处的"漏亮线"，见 SsrConfig 注释）。
+uniform int   uCoverageMax;
 
 layout(location = 0) out vec4 FragColor;
 
@@ -183,6 +185,10 @@ void main() {
     // 宽的软过渡，而真实图像在那里本来就是一个硬剪影。
     float bf_num = 0.0;
     float bf_den = 0.0;
+    // 覆盖率的**邻域最大值**（uCoverageMax 才用）：剪影处有一格没命中时，
+    // 双线性平均会让整像素只做部分替换 ⇒ 3D pass 的 env 漏回来变成一条亮/暗线。
+    // 取 max = "邻域里有一个 tap 命中就按满替换"，代价是边缘外扩约 1 个 SSR 像素。
+    float a_max = 0.0;
     for (int j = 0; j < 2; ++j) {
         for (int i = 0; i < 2; ++i) {
             ivec2 q = clamp(q0 + ivec2(i, j), ivec2(0), ivec2(uSsrRes) - 1);
@@ -227,12 +233,16 @@ void main() {
             vec2 uv_lo = (vec2(q) + 0.5) / uSsrRes;
             vec4 s = textureLod(uSsrMip, uv_lo, lod);
             float a_lo = s.a;
+            if (!hard_reject) {
+                a_max = max(a_max, a_lo);
+            }
             num += w * a_lo * s.rgb;
             den += w * a_lo;
             wsum += w;
         }
     }
-    float A = (wsum > 0.0) ? (den / wsum) : 0.0;
+    // A 的两种取法（uCoverageMax）：加权平均 = 覆盖率（软化边界）；max = 满替换（去漏亮线）。
+    float A = (uCoverageMax != 0) ? a_max : ((wsum > 0.0) ? (den / wsum) : 0.0);
     vec3 ssr_L = (den > 1.0e-6) ? (num / den) : vec3(0.0);
     float backface = (bf_den > 0.0) ? (bf_num / bf_den) : 0.0;
 
@@ -427,6 +437,8 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glUniform1f(shader_mgr_->GetUniform(prog_, "uWeightFloor"), in.cfg.upsample_weight_floor);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uCoverageDebug"), in.cfg.debug_coverage);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uBackfaceEnvScale"), in.cfg.backface_env_scale);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uCoverageMax"),
+                in.cfg.upsample_coverage_max ? 1 : 0);
     // 环境镜面：**每帧必须重传**（uniform 是 program 状态，上一帧开着本帧不传就还用旧的）。
     UploadEnvSpecular(*shader_mgr_, prog_, in.env_cube_tex, in.env_max_lod,
                       in.env_sky_scale, in.env_enabled);

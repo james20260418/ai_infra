@@ -909,6 +909,20 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
         app.RunOnce(input, winfo, (out_dir + "/leak_full_a.png").c_str());
         app.ssr_debug_ = 0;
         app.ssr_scale_ = 0.5f;
+        // 关键对照：rough_to_lod = 0 ⇒ LOD 恒 0，A 不再混 mip 的 level 1。
+        // 若此时边界仍出现 0.75 这种值，说明是"二值覆盖率 + 双线性"造成的，
+        // 不是 mip 平均造成的（Danis 2026-11-06 17:09 追问的点）。
+        app.ssr_rough_to_lod_ = 0.0f;
+        app.ssr_debug_ = 4;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_a_lod0.png").c_str());
+        app.ssr_debug_ = 0;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_lod0.png").c_str());
+        app.ssr_rough_to_lod_ = 8.0f;
+
+        // 廉价修法 A/B：融合层覆盖率取 2×2 max（1:2，其余参数不变）。
+        app.ssr_cov_max_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_covmax.png").c_str());
+        app.ssr_cov_max_ = false;
     }
 
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;
