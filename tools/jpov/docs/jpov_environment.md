@@ -79,18 +79,24 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
 - ✅ `com_github_gflags_gflags` → 整条删除（glog 是预编译 .a，构建期不需要 gflags；全仓 0 处引用）
 
 `third_party/protobuf-3.14.0-rc3/protobuf_deps.bzl` 里仍有 7 个 `http_archive`，
-其中 6 个真会被用到，**原始 tarball 已入库** `third_party/distdir/`（压缩包原样、
-不展开源码，git 只涨 ~3.1MB）：
+其中**实测只有 5 个会被 fetch**，它们的**原始 tarball 已入库** `third_party/distdir/`
+（压缩包原样、不展开源码，git 只涨 ~3.0MB）：
 
 | archive | 版本 | distdir 文件名 | tar.gz |
 |---|---|---|---|
 | bazel_skylib | 1.0.2 | `bazel-skylib-1.0.2.tar.gz` | 31K |
 | zlib | 1.2.11 | `v1.2.11.tar.gz` | 630K |
 | rules_cc | 818289e | `818289e5613731ae410efb54218a4077fb9dbb03.tar.gz` | 112K |
-| rules_java | 981f06c | `981f06c3d2bd10225e85209904090eb7b5fb26bd.tar.gz` | 6.5K |
 | rules_proto | 4029855 | `40298556293ae502c66579620a7ce867d5f57311.tar.gz` | 12K |
 | rules_python | 4b84ad2 | `4b84ad270387a7c439ebdccfd530e2339601ef27.tar.gz` | 2.3M |
-| six | 1.12.0 | —（当前构建从不引用，未入库） | — |
+
+声明了但**当前构建从不 fetch**、因此没入库的 2 个（用「移走 tarball + 空 output_base +
+`--experimental_repository_disable_download` + `cquery deps(//tools/jpov/...)`」逐个验证）：
+
+| archive | 原因 |
+|---|---|
+| `six` 1.12.0 | Bazel 从未下载过该 repo（repository cache 里就没有） |
+| `rules_java` 981f06c | 移走它离线 cquery 仍 415 targets 全通过；只在 java toolchain 解析时用，而本仓库没有 java 目标、coverage 也被 §4.1 绕开 |
 
 规则：
 
@@ -98,6 +104,13 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
   内容 sha256 必须与 `protobuf_deps.bzl` 声明一致（`sha256sum third_party/distdir/*` 可核对）。
 - 开关在 `.bazelrc`：`common --distdir=third_party/distdir`（相对 workspace 根）。
 - 加新依赖时：把上游 URL 的 tarball 原样拷进来即可，不要改内容、不要重命名。
+  ⚠️ distdir 是**按 basename 命中**的：如果将来两个不同仓库恰好有同名 basename
+  （`v1.2.11.tar.gz` 这种没有项目名的尤其危险），先命中的那个会被拿去做 sha256 校验，
+  对不上就报下载失败。真遇到时改名是没用的（Bazel 只认 URL basename），只能改用
+  `new_local_repository` 或调整依赖。
+- **对账脚本**：`python3 third_party/distdir/verify.py`（退出码 0 = OK）。检查
+  需要的 tarball 齐全且 sha256 与 bzl 一致、无孤儿文件。**升级 protobuf_deps / 换 Bazel
+  版本后必须跑一次**——distdir 失效是静默的（有网时照常绿，断网才炸），CI 有网测不出来。
 
 ### 4.1 另外 237MB 的坑：`cc_test` 的 coverage_report_generator
 
@@ -112,16 +125,35 @@ Bazel 就要解析 java toolchain，从而下载：
 | `remote_java_tools_linux` | java_tools_linux-v11.7.1.zip（1.3M） |
 | `remotejdk11_linux` | Zulu JDK 11 tar.gz（194M，解压 320M） |
 
-本仓库从不跑 `bazel coverage`，所以 `.bazelrc` 里把生成器换成本地 shell 脚本：
+本仓库从不跑 `bazel coverage`，所以 `.bazelrc` 里把生成器换成一个 bazel 自带的
+shell 脚本 target（`coverage_support`）——它实际是个 filegroup，只是个占位：
 
 ```
 build --coverage_report_generator=@bazel_tools//tools/test:coverage_support
 ```
 
-⇒ 干净机器/断网上这 237MB 一个字节都不用下。（代价：真跑 `bazel coverage` 时报告生成不可用。）
+⇒ 干净机器/断网上这 237MB 一个字节都不用下。
+
+注意这里的取值是个 **filegroup（一组 .sh），不是可执行程序** —— 它只是占位，
+正常 build/test 只用到「这个属性指向哪个 label」这一点，不会执行它。
+
+**真要用 coverage 时**（实测可用，2026-11-06）：把生成器恢复默认，并指定远程 JDK
+（容器里没有系统 JDK，`local_jdk` 会报 `Cannot find Java binary bin/java ... nosystemjdk`）：
+
+```bash
+bazel coverage //tools/jpov/test/sp_ui:sp_ui_text_edit_test --combined_report=lcov \
+  --instrument_test_targets \
+  --coverage_report_generator=@bazel_tools//tools/test:coverage_report_generator \
+  --java_runtime_version=remotejdk_11 --tool_java_runtime_version=remotejdk_11
+# → bazel-out/_coverage/_coverage_report.dat（实测 6507 字节 / 385 条 DA:）
+```
+
+不指定 `--instrument_test_targets` 时报告是 0 字节（`There was no coverage found`），
+因为默认只插桩被测库、不插桩测试本身。这套命令会重新引入那 237MB 下载。
 
 **验证（2026-11-06，空 output_base + `--experimental_repository_disable_download`）**：
-`bazel build //tools/jpov/...` → 1741 actions 全绿（78s，含 disk cache）；
+`bazel build //tools/jpov/...` → 全绿（旧基线 1741 actions / 78s；rebase 到含 #193 fog 重构的
+main 合并后 559 actions，均含 disk cache）；
 `bazel test //tools/jpov/test/sp_ui:all //tools/jpov/test/strip:all` → 7 tests / 68 cases 全绿。
 唯一不在此列的是 Bazel 自带的 `@platforms` / `@bazel_tools` / `local_config_*`——它们在 install_base 里，本来就不联网。
 
