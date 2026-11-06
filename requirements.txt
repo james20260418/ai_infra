@@ -1,0 +1,32 @@
+# ai_infra —— Python 依赖（全项目共用一份）
+#
+# 谁在用这些包：
+#   numpy / Pillow      tools/jpov/genVolume/*.py（体纹理 / flipbook 产线）、mocap 拟合脚本
+#   mediapipe / cv2     tools/jpov/mocap/extract/pose_extract.py（视频 → 姿态关键点）
+#
+# 怎么用（**建议建独立 venv**，不要往系统 python 里装）：
+#   python3 -m venv /tmp/ai_infra_py && . /tmp/ai_infra_py/bin/activate
+#   pip install -r requirements.txt
+#
+# 为什么不用系统 python 直接装：
+#   · Ubuntu 24.04 是 PEP 668（externally-managed），系统 pip 会拒绝安装；
+#   · 镜像里预装的是 numpy 1.26.4 / Pillow 12.x（给 genVolume 那批脚本用），
+#     而 mediapipe 1.2.0 会拉 numpy 2.x + opencv 5 —— 两者不能共存于同一 prefix。
+#   所以：**推理/取帧走 venv，离线出资产走镜像自带 python**，互不干扰。
+#
+# 下面四个版本是 2026-11-05 在本机 venv（Python 3.12.3）实测可装、可 import 的组合：
+#   import mediapipe, cv2, numpy, PIL        # 全过
+#   from mediapipe.tasks.python import vision, BaseOptions   # 全过
+# 升级请整套一起验，mediapipe ↔ opencv ↔ numpy 三者互相钳制（opencv 5 要求 numpy>=2）。
+
+numpy==2.5.4
+mediapipe==1.2.0
+opencv-contrib-python==5.0.0.93
+Pillow==13.0.0
+
+# ── 以下**不在 PyPI 上**，不要往这里加（安装方式见 tools/jpov/docs/jpov_environment.md）──
+# pyopenvdb   : 读 .vdb（genVolume/vdb_to_jpovvol.py）。镜像/CI 用 apt 的 python3-openvdb；
+#               重烘焙走 tools/jpov/genVolume/env/Dockerfile 那个镜像。
+# manta       : Mantaflow 0.13（火/烟仿真）。只在 genVolume Docker 镜像里。
+# bpy/mathutils: Blender 的 Python 模块（legacy/vegetation 出树用）。宿主有 Blender 4.0.2，
+#               但当前管线**不经过 Blender**（FBX 直写 ASCII，见 mocap/fit/export_fbx_ascii.py）。

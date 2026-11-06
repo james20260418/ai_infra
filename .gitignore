@@ -1,4 +1,8 @@
 bazel-*
+# 例外：third_party/distdir 里上游包名本身就长这样（Bazel 按 URL basename 找包）。
+# 必须写在 `bazel-*` 之后；用通配而不是逐个包名，免得以后再加 bazel-* 开头的包被静默忽略。
+!third_party/distdir/*.tar.gz
+!third_party/distdir/*.zip
 bazel-out/
 bazel-bin/
 bazel-testlogs/
@@ -8,3 +12,6 @@ __pycache__/
 # Compiled library output (rebuild from source when needed)
 third_party/glog-install/
 output/
+
+# 工具产出的中间目录（植被工具 out/、各类 --capture 落盘目录）
+out/

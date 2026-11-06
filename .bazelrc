@@ -111,3 +111,19 @@ build:windows --linkopt=-lpthread
 build:windows --features=-layering_check
 build:windows --features=-header_modules
 build:windows --noincompatible_strict_action_env
+
+# ============================================
+# 离线构建：仓库自带第三方 tarball（distdir）
+# ============================================
+# protobuf_deps() 声明了 6 个 http_archive（bazel_skylib / zlib / rules_cc /
+# rules_java / rules_proto / rules_python）。third_party/distdir/ 里放着它们的
+# 原始压缩包（文件名 = 上游 URL 的 basename，sha256 与 protobuf_deps.bzl 一致），
+# 断网 / 干净机器上 Bazel 直接命中 distdir，不访问网络。
+common --distdir=third_party/distdir
+
+# cc_test 的隐式属性 coverage_report_generator 默认指向
+# @remote_coverage_tools//:coverage_report_generator（一个 java_binary），于是
+# **分析任何 test 目标**都会连带解析 java toolchain，从而下载
+# remote_java_tools(42M) + remotejdk11_linux(194M)。本仓库不跑 `bazel coverage`，
+# 把生成器换成 bazel 自带的 shell 脚本即可，干净机器上省掉 237MB 下载。
+build --coverage_report_generator=@bazel_tools//tools/test:coverage_support

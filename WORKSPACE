@@ -1,26 +1,16 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
-
-# GoogleTest dependency
-http_archive(
+# GoogleTest —— **随仓库携带**（third_party/googletest-release-1.11.0/，v1.11.0 原始源码）。
+#
+# 为什么不用 http_archive：那会让「首次构建」必须联网（干净缓存 / CI / 新机器）。
+# 本仓库的定位是**离线可复现**：除了 protobuf 自带的依赖链（见 README「外部依赖」），
+# 这里不再有任何 http_archive。
+local_repository(
     name = "gtest",
-    sha256 = "b4870bf121ff7795ba20d20bcdd8627b8e088f2d1dab299a031c1034eddc93d5",
-    strip_prefix = "googletest-release-1.11.0",
-    urls = [
-        "https://github.com/google/googletest/archive/refs/tags/release-1.11.0.tar.gz",
-    ],
+    path = "third_party/googletest-release-1.11.0",
 )
 
-# gflags dependency (required by glog)
-http_archive(
-    name = "com_github_gflags_gflags",
-    sha256 = "34af2f15cf7367513b352bdcd2493ab14ce43692d2dcd9dfc499492966c64dcf",
-    strip_prefix = "gflags-2.2.2",
-    urls = [
-        "https://mirror.bazel.build/github.com/gflags/gflags/archive/v2.2.2.tar.gz",
-        "https://github.com/gflags/gflags/archive/v2.2.2.tar.gz",
-    ],
-)
+# gflags 曾被声明为 "required by glog"，但本仓库的 glog 是**预编译静态库**
+# （third_party/glog-static/），构建期不需要 gflags；全仓也没有任何
+# `@com_github_gflags_gflags//:...` 引用。已删除，避免无谓的网络下载。
 
 # Local glog static library dependency
 local_repository(
