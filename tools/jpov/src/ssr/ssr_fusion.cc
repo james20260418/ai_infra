@@ -29,11 +29,11 @@ namespace {
 constexpr int kTexUnitIn0 = 0;
 constexpr int kTexUnitIn1 = 1;
 constexpr int kTexUnitIn2 = 2;
-constexpr int kTexUnitIn3 = 3;
-constexpr int kTexUnitIn4 = 4;
-constexpr int kTexUnitIn5 = 5;      // 低分法线
-constexpr int kTexUnitAttrMat = 6;  // 全分辨率材质附件（F0, roughness）
-constexpr int kTexUnitSsrMip = 7;   // SSR 结果的预滤波 mip 链
+constexpr int kTexUnitDownW = 3;      // 低分 w = 1/z
+constexpr int kTexUnitDownNormal = 4;  // 低分法线
+constexpr int kTexUnitAttrMat = 5;    // 全分辨率材质附件（F0, roughness）
+constexpr int kTexUnitSsrMip = 6;     // SSR 结果的预滤波 mip 链
+constexpr int kTexUnitSsrFlags = 7;   // SSR 分辨率的背面标记（R8UI）
 constexpr int kTexUnitCount = 8;
 
 // 合成：全分辨率。A 预乘的双边升采样 + 用 SSR 替换环境镜面项。
@@ -42,7 +42,6 @@ uniform sampler2D uHdrCopy;     // 全分辨率 HDR 副本
 uniform sampler2D uAttr;        // 全分辨率（rgb = 三维视空间法线，a = 掩码编码）
 uniform sampler2D uAttrMat;     // 全分辨率附件1（rgb = F0，a = roughness）—— 逐像素材质
 uniform sampler2D uSceneDepth;  // 全分辨率 R32F
-uniform sampler2D uSsr;         // SSR 分辨率 RGBA16F（rgb 辐亮度，a = ray_ratio；调试档 4 用）
 // SSR 结果的**粗糙度预滤波 mip 链**（见 ssr_filter.h）：
 //   rgb = 覆盖率加权的平均辐亮度，a = 该级别覆盖率。textureLod 三线性 ⇒ 连续。
 uniform sampler2D uSsrMip;
@@ -50,6 +49,10 @@ uniform float uMipMaxLod;       // 最大可用 LOD（= 级数 − 1）
 uniform float uRoughToLod;      // roughness → LOD 的斜率（面板可调）
 uniform sampler2D uDownW;       // SSR 分辨率 R32F：**w = 1/z**（0 = 空）
 uniform sampler2D uDownNormal;  // SSR 分辨率 RG16F
+// SSR 分辨率 R8UI：bit0 = 本像素的射线看到过背面（穿过了一个屏幕里看不见背面的物体）。
+// 只用在“没有合法命中”的地方：那里的 env 探针会透出一块过亮的天空。
+uniform usampler2D uSsrFlags;
+uniform float uBackfaceEnvScale;   // [0,1]；1 = 不压暗（旧行为）
 uniform ivec2 uFullRes;
 uniform vec2  uSsrRes;
 uniform int   uScale;
@@ -61,7 +64,7 @@ uniform float uAo;              // 全局（本管线没有 SSAO；逐物体 ao 
 uniform float uRangeDepthRatio;    // **软权尺度**：rel 等于它时权重约减半（旧版这里是硬阈值）
 uniform float uHardCut;            // rel 超过它 ⇒ 硬拒（数量级不同 = 真跨表面/剪影）
 uniform float uWeightFloor;        // 权重下限（相对空间权）⇒ Σw 永不为 0，不出孔洞
-uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = ray_ratio
+uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = A；5 = 背面标记
 
 layout(location = 0) out vec4 FragColor;
 
@@ -175,10 +178,17 @@ void main() {
     vec3 num = vec3(0.0);
     float den = 0.0;
     float wsum = 0.0;
+    // 背面标记的**空间插值**（权重只用双线性权 ws）：背面标记是二值的，直接取最近格
+    // 会让 1:N 下它的边界成块状；按 ws 混一下等价于在大分辨率上得到一个 1~2 个 SSR 像素
+    // 宽的软过渡，而真实图像在那里本来就是一个硬剪影。
+    float bf_num = 0.0;
+    float bf_den = 0.0;
     for (int j = 0; j < 2; ++j) {
         for (int i = 0; i < 2; ++i) {
             ivec2 q = clamp(q0 + ivec2(i, j), ivec2(0), ivec2(uSsrRes) - 1);
             float ws = (i == 0 ? 1.0 - t.x : t.x) * (j == 0 ? 1.0 - t.y : t.y);
+            bf_num += ws * float(texelFetch(uSsrFlags, q, 0).r & 1u);
+            bf_den += ws;
 
             // 低分深度已经是 w = 1/z（降采样时换算过）⇒ 这里的值域比较**不需要除法**。
             float w_lo = texelFetch(uDownW, q, 0).r;
@@ -224,6 +234,7 @@ void main() {
     }
     float A = (wsum > 0.0) ? (den / wsum) : 0.0;
     vec3 ssr_L = (den > 1.0e-6) ? (num / den) : vec3(0.0);
+    float backface = (bf_den > 0.0) ? (bf_num / bf_den) : 0.0;
 
     if (uCoverageDebug == 1) {
         FragColor = vec4(vec3(A), 1.0);
@@ -235,11 +246,15 @@ void main() {
         FragColor = vec4(ssr_L * A, 1.0);
         return;
     }
-    // 调试档 4：ray_ratio（预算占用率）灰度图。命中越接近预算上限越亮 ——
-    // 用来目视确认"提前结束的射线不会被误判成快到极限"。
+    // 调试档 4：A（置信度）灰度图。越亮 = 这个像素的答案越可信（预算 / 边缘没衰减）。
     if (uCoverageDebug == 4) {
-        ivec2 q0c = clamp(q0, ivec2(0), ivec2(uSsrRes) - 1);
-        FragColor = vec4(vec3(texelFetch(uSsr, q0c, 0).a), 1.0);
+        FragColor = vec4(vec3(A), 1.0);
+        return;
+    }
+    // 调试档 5：背面标记（白 = 这条射线穿过了一个屏幕里看不见背面的物体）。
+    // 用来核对 backface_env_scale 到底压在哪些像素上。
+    if (uCoverageDebug == 5) {
+        FragColor = vec4(vec3(backface), 1.0);
         return;
     }
 
@@ -273,7 +288,16 @@ void main() {
     //   ⇒ 出现负辐亮度 ⇒ tone map 把负通道压成 0、正通道顶到 1 ⇒ **纯红描边**。
     //   辐亮度不可能为负，所以"减掉的不超过现有的"是物理硬约束，不是调参：
     //   正常情况下 removed ≤ hdr，本式与原来的 `hdr + (add − removed)` **逐位相同**。
+    //
+    // 背面压暗（2026-11-06）：只吃**没有被 SSR 替换掉的那份 env**，即 (1−A):
+    //   removed = mask·ao·env_term·[A + (1−A)(1−k)·bf]
+    //   · k=1 或 bf=0 ⇒ 退化成 mask·A·ao·env_term（与旧式**逐字节相同**，不引入 1−A 的舍入）
+    //   · A=0 且 bf=1 ⇒ removed = mask·ao·env_term·(1−k) —— 那份 env 直接变暗 k 倍
+    //   bf 是空间插值后的 [0,1]，所以剪影处是连续过渡，不是一刀切。
     vec3 removed = mask * A * uAo * env_term;
+    if (backface > 0.0 && uBackfaceEnvScale < 1.0) {
+        removed += mask * uAo * env_term * (backface * (1.0 - uBackfaceEnvScale) * (1.0 - A));
+    }
     removed = min(removed, max(hdr, vec3(0.0)));
     vec3 out_rgb = hdr - removed + mask * A * uAo * ssr_L * weight;
     FragColor = vec4(out_rgb, 1.0);
@@ -306,9 +330,9 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     CHECK_NE(in.hdr_copy_tex, 0u);
     CHECK_NE(in.attr_tex, 0u);
     CHECK_NE(in.scene_depth_tex, 0u);
-    CHECK_NE(in.ssr_radiance_tex, 0u);
     CHECK_NE(in.attr_mat_tex, 0u) << "缺属性纹理的材质附件（F0/roughness）";
     CHECK_NE(in.ssr_mip_tex, 0u) << "缺 SSR 预滤波 mip 链（SsrFilter 的输出）";
+    CHECK_NE(in.ssr_flags_tex, 0u) << "缺 SSR 背面标记（SsrOutputs::flags_tex）";
     CHECK_GE(in.ssr_mip_levels, 1);
     CHECK_NE(in.down_w_tex, 0u);
     CHECK_NE(in.down_normal_tex, 0u);
@@ -330,7 +354,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     GLint prev_depth = 0;
     GLint prev_cull = 0;
     GLint prev_scissor = 0;
-    GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0, 0, 0, 0, 0};
+    GLint prev_bind[kTexUnitCount] = {};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
@@ -365,25 +389,25 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.attr_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitIn2);
     glBindTexture(GL_TEXTURE_2D, in.scene_depth_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitIn3);
-    glBindTexture(GL_TEXTURE_2D, in.ssr_radiance_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitIn4);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitDownW);
     glBindTexture(GL_TEXTURE_2D, in.down_w_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitIn5);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitDownNormal);
     glBindTexture(GL_TEXTURE_2D, in.down_normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitAttrMat);
     glBindTexture(GL_TEXTURE_2D, in.attr_mat_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitSsrMip);
     glBindTexture(GL_TEXTURE_2D, in.ssr_mip_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitSsrFlags);
+    glBindTexture(GL_TEXTURE_2D, in.ssr_flags_tex);
 
     glUniform1i(shader_mgr_->GetUniform(prog_, "uHdrCopy"), kTexUnitIn0);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttr"), kTexUnitIn1);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uSceneDepth"), kTexUnitIn2);
-    glUniform1i(shader_mgr_->GetUniform(prog_, "uSsr"), kTexUnitIn3);
-    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownW"), kTexUnitIn4);
-    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownNormal"), kTexUnitIn5);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownW"), kTexUnitDownW);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uDownNormal"), kTexUnitDownNormal);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttrMat"), kTexUnitAttrMat);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uSsrMip"), kTexUnitSsrMip);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uSsrFlags"), kTexUnitSsrFlags);
 
     glUniform2i(shader_mgr_->GetUniform(prog_, "uFullRes"), in.full_w, in.full_h);
     glUniform2f(shader_mgr_->GetUniform(prog_, "uSsrRes"),
@@ -402,6 +426,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glUniform1f(shader_mgr_->GetUniform(prog_, "uHardCut"), in.cfg.upsample_hard_cut);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uWeightFloor"), in.cfg.upsample_weight_floor);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uCoverageDebug"), in.cfg.debug_coverage);
+    glUniform1f(shader_mgr_->GetUniform(prog_, "uBackfaceEnvScale"), in.cfg.backface_env_scale);
     // 环境镜面：**每帧必须重传**（uniform 是 program 状态，上一帧开着本帧不传就还用旧的）。
     UploadEnvSpecular(*shader_mgr_, prog_, in.env_cube_tex, in.env_max_lod,
                       in.env_sky_scale, in.env_enabled);

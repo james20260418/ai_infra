@@ -192,12 +192,16 @@ struct CpuResult {
     float s = kNoHit;
     int cell_x = -1;
     int cell_y = -1;
+    float confidence = 0.0f;     // A（仅 hit 时非 0）
+    bool saw_backface = false;   // 命中过柱体但朝向不对（融合层拿它压暗 env）
 };
 
 // 逐个像素算 CPU 参考；depth_field 用窗口深度反算视距，与 GPU 完全同源。
 // use_facing = true 时把命中面朝向判据也带上（attr_z ≥ 0.5 的格才判）。
 CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& derived,
-                        float max_distance_m, bool use_facing = false) {
+                        float max_distance_m, bool use_facing = false,
+                        float max_ray_pixels = 0.0f, float fade_budget_px = 0.0f,
+                        float fade_edge_px = 0.0f) {
     const size_t i = static_cast<size_t>(py) * kWidth + px;
     CpuResult out;
     // 与着色器同一条规则：没有深度数据 ⇒ 不发射线、a=0（ssr_math.h::HasDepthData）。
@@ -232,12 +236,15 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
         return jpov::ssr::HitFacesRay(d, n);
     };
-    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing);
+    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing,
+                               &out.saw_backface);
     if (s < kNoHit) {
         out.hit = true;
         out.s = s;
         out.cell_x = cx;
         out.cell_y = cy;
+        out.confidence = jpov::ssr::HitConfidence(ray, s, max_ray_pixels, fade_budget_px,
+                                                 fade_edge_px);
     }
     return out;
 }
@@ -565,7 +572,7 @@ TEST(SsrGpu, CoverageStates) {
                 ++wrong_reason;
             }
         }
-        EXPECT_EQ(nonzero_a, 0) << "无深度数据时 ray_ratio 必须全 0";
+        EXPECT_EQ(nonzero_a, 0) << "无深度数据时 A 必须全 0";
         EXPECT_EQ(wrong_reason, 0) << "无深度数据时 type 必须是 kNone";
     }
     // 全命中：均匀深度墙的下半屏 ⇒ a=1 且颜色是某一格的颜色（不是全黑）。
@@ -828,6 +835,125 @@ TEST(SsrGpu, BackfaceHitsRejected) {
         << "不判朝向时没在桌子带命中 ⇒ 这个场景造不出那个 bug，测试没意义";
     EXPECT_EQ(facing_hits_in_table, 0) << "背面命中（射线从桌面下方穿出）竟然还算命中";
     EXPECT_GT(facing_hits_in_wall, 0) << "朝向判据把墙的正面命中一起拒掉了（判太严）";
+}
+
+// ⑥ 置信度 A（2026-11-06）：GPU 的 alpha 必须等于 CPU 的 HitConfidence。
+// 这条同时锁四件事：
+//   · resolve 算 A 用的是**与 CPU 同一套** s / span / sigma_exit（不是另外一套“射线进度”）；
+//   · 两个带宽的单位是 SSR 像素（本用例 scale=1，所以它们就是屏幕像素）；
+//   · A 真的落在 [0,1] 且没有全屏被衰减；
+//   · 负向对照在 ⑦：带宽=0 时 A 必须恰为 1。
+TEST(SsrGpu, ConfidenceMatchesCpu) {
+    Fixture f;
+    f.Setup(MakeScene(/*two_layers=*/true, /*ny=*/0.95f, /*sky_rows=*/8), /*tile=*/2,
+            /*max_ray_pixels=*/160);
+    const float kFadeBudget = 40.0f;
+    const float kFadeEdge = 24.0f;
+    f.in.fade_budget_pixels = kFadeBudget;
+    f.in.fade_edge_pixels = kFadeEdge;
+    const SsrOutputs& out = f.ssr.Render(f.in);
+
+    const DerivedParams derived =
+        DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+    const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+    const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+
+    int mismatch = 0;
+    int faded = 0;
+    int full = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            if (type[i] != static_cast<unsigned char>(SsrResult::kHit)) {
+                continue;
+            }
+            const CpuResult cpu = MarchPixelCpu(
+                f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/false,
+                static_cast<float>(f.in.max_ray_pixels), kFadeBudget, kFadeEdge);
+            ASSERT_TRUE(cpu.hit) << "GPU 说是 kHit，CPU 参考却未命中（像素 " << x << "," << y << "）";
+            const float a_gpu = rad[i * 4 + 3];
+            // 容差 1e-2：A 存在 RGBA16F（~5e-4）+ GPU/CPU 的 s 允许差 0.05 px
+            // （带宽 40 px、曲线最陡处斜率 1.5 ⇒ 最大 ≈ 2e-3）。再收紧就是测浮点噪声了。
+            if (std::fabs(a_gpu - cpu.confidence) > 1.0e-2f) {
+                ++mismatch;
+                if (mismatch < 4) {
+                    ADD_FAILURE() << "像素(" << x << "," << y << ") A_gpu=" << a_gpu
+                                  << " A_cpu=" << cpu.confidence << " s=" << cpu.s;
+                }
+            }
+            if (a_gpu < 0.999f) {
+                ++faded;
+            } else {
+                ++full;
+            }
+        }
+    }
+    EXPECT_EQ(mismatch, 0) << "GPU 的 A 与 CPU 的 HitConfidence 不一致";
+    EXPECT_GT(faded, 50) << "没有任何像素进衰减带 ⇒ 带宽/场景选得不对，这用例测不到东西";
+    EXPECT_GT(full, 50) << "所有像素都被衰减了 ⇒ 带宽过大";
+}
+
+// ⑦ 带宽 = 0 ⇒ A 恒为 1（定义："0 = 关闭"，**不是**"衰减 0 像素"）。
+// 这条是 ⑥ 的负向对照：若代码把"接近预算"直接写成 s/max（旧的 ray_ratio 写法），
+// 这里就会出现大量 <1 的像素。
+TEST(SsrGpu, ConfidenceZeroWidthIsIdentity) {
+    Fixture f;
+    f.Setup(MakeScene(/*two_layers=*/true, /*ny=*/0.95f, /*sky_rows=*/8), /*tile=*/2,
+            /*max_ray_pixels=*/160);
+    f.in.fade_budget_pixels = 0.0f;
+    f.in.fade_edge_pixels = 0.0f;
+    const SsrOutputs& out = f.ssr.Render(f.in);
+    const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+    const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+    int hits = 0;
+    int not_one = 0;
+    for (int i = 0; i < kWidth * kHeight; ++i) {
+        if (type[i] != static_cast<unsigned char>(SsrResult::kHit)) {
+            continue;
+        }
+        ++hits;
+        if (rad[static_cast<size_t>(i) * 4 + 3] != 1.0f) {
+            ++not_one;
+        }
+    }
+    EXPECT_GT(hits, 100) << "这个场景应该大量命中（否则断言没意义）";
+    EXPECT_EQ(not_one, 0) << "带宽为 0 时 A 必须恰为 1（0 = 关闭衰减）";
+}
+
+// ⑧ 背面标记：GPU 的 flags.bit0 必须等于 CPU 的 saw_backface。
+// 融合层靠这一位决定要不要把 env fallback 压暗（SsrConfig::backface_env_scale），
+// 所以它“有没有传到纹理上”必须被钉住。
+TEST(SsrGpu, BackfaceFlagMatchesCpu) {
+    Fixture f;
+    f.Setup(MakeFacingScene(), /*tile=*/4, /*max_ray_pixels=*/160);
+    const SsrOutputs& out = f.ssr.Render(f.in);
+    ASSERT_NE(out.flags_tex, 0u) << "resolve 必须总是输出背面标记";
+
+    const DerivedParams derived =
+        DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+    const std::vector<unsigned char> flags = ReadTexUInt8(out.flags_tex, kWidth, kHeight);
+    int mismatch = 0;
+    int backface_px = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            const CpuResult cpu =
+                MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/true);
+            const bool gpu_flag = (flags[i] & 1u) != 0u;
+            if (gpu_flag != cpu.saw_backface) {
+                ++mismatch;
+                if (mismatch < 4) {
+                    ADD_FAILURE() << "像素(" << x << "," << y << ") flags=" << int(flags[i])
+                                  << " cpu_saw_backface=" << cpu.saw_backface;
+                }
+            }
+            if (gpu_flag) {
+                ++backface_px;
+            }
+        }
+    }
+    EXPECT_EQ(mismatch, 0) << "GPU 的背面标记与 CPU 不一致";
+    EXPECT_GT(backface_px, 20) << "这个场景本来就会穿过桌面的背面（见图头），标记却是 0 个像素";
 }
 
 }  // namespace

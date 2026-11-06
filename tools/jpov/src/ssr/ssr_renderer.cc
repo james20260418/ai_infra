@@ -148,6 +148,10 @@ void SsrRenderer::DestroyTargets() {
         glDeleteTextures(1, &outputs_.type_tex);
         outputs_.type_tex = 0;
     }
+    if (outputs_.flags_tex != 0) {
+        glDeleteTextures(1, &outputs_.flags_tex);
+        outputs_.flags_tex = 0;
+    }
     if (outputs_.hit_s_tex != 0) {
         glDeleteTextures(1, &outputs_.hit_s_tex);
         outputs_.hit_s_tex = 0;
@@ -184,7 +188,7 @@ void SsrRenderer::EnsureTargets(int w, int h, int tile, bool debug) {
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR slice FBO 不完整（" << sw << "×" << sh << "，R32F）";
 
-    // ② resolve 目标：radiance（rgb + ray_ratio）+ **总是**输出的类型图（+ 调试用的 hit_s）。
+    // ② resolve 目标：radiance（rgb + A）+ **总是**输出的类型图 + 背面标记（+ 调试用的 hit_s）。
     MakeTexture(&outputs_.radiance_tex, w, h, GL_RGBA16F, GL_RGBA, GL_FLOAT);
     glGenFramebuffers(1, &fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
@@ -194,12 +198,16 @@ void SsrRenderer::EnsureTargets(int w, int h, int tile, bool debug) {
     MakeTexture(&outputs_.type_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            outputs_.type_tex, 0);
-    std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    // 第三个附件：背面标记（bit0）。与 type 正交，所以不挤进那个枚举（见 ssr_shader.h）。
+    MakeTexture(&outputs_.flags_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+                           outputs_.flags_tex, 0);
+    std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
     if (debug) {
         MakeTexture(&outputs_.hit_s_tex, w, h, GL_R32F, GL_RED, GL_FLOAT);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D,
                                outputs_.hit_s_tex, 0);
-        bufs.push_back(GL_COLOR_ATTACHMENT2);
+        bufs.push_back(GL_COLOR_ATTACHMENT3);
     }
     glDrawBuffers(static_cast<GLsizei>(bufs.size()), bufs.data());
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
@@ -227,6 +235,9 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK(IsValidTile(in.tile_size))
         << "SsrInputs::tile_size 必须是 1/2/4/8（tile 须为偶数且是 2 的幂，"
            "否则 2×2 quad 会跨 tile，隐式 LOD 出错），得到 " << in.tile_size;
+    // 两个衰减带宽：允许 0（= 关闭），不允许负 / NaN（NaN 会让 fade 静默恒 0）。
+    CHECK(in.fade_budget_pixels >= 0.0f) << "SsrInputs::fade_budget_pixels 必须 ≥ 0（0 = 关闭）";
+    CHECK(in.fade_edge_pixels >= 0.0f) << "SsrInputs::fade_edge_pixels 必须 ≥ 0（0 = 关闭）";
 
     // 输入尺寸必须与声明的分辨率一致（不一致会静默采到别的像素）。
     CHECK_EQ(TextureWidth(in.color_tex), in.width)
@@ -339,6 +350,8 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uSlabPixels", derived.slab_pixels);
         set1i(prog, "uStepsPerLane", derived.steps_per_lane);
         set1f(prog, "uMaxRayPixels", static_cast<float>(in.max_ray_pixels));
+        set1f(prog, "uFadeBudget", in.fade_budget_pixels);
+        set1f(prog, "uFadeEdge", in.fade_edge_pixels);
         set1f(prog, "uRoughnessCutoff", in.roughness_cutoff);
     };
     upload_common(prog_march_);

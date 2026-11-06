@@ -259,6 +259,45 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
     return ray.s0 + ray.dir * sigma;
 }
 
+// ─────────────────── ②.5 置信度 A（2026-11-06 的柔和过渡）───────────────────
+//
+// A = "这个像素的答案有多少值得用"，∈ [0,1]。以前它是二值的（命中 1 / 未命中 0），
+// 于是"射线刚好在预算内命中"与"刚好差一格没命中"相邻时会硬切。现在乘上两个衰减：
+//
+//   d_budget = min(max_ray_pixels, ray.span) − σ   命中点离射线长度上限还有多远
+//   d_edge   = ray.sigma_exit − σ                  沿射线到出屏点还有多远
+//   A        = fade(d_budget, 预算带宽) · fade(d_edge, 边缘带宽)
+//
+// 为什么 d_edge 用 sigma_exit 而不是"命中点到最近屏幕边的欧氏距离"：平行于屏幕边飞的
+// 射线永远不会出屏（它只是**靠近**边），那里没有任何信息缺口；用欧氏距离会把一整条
+// 有效反射带无故压暗。sigma_exit 是 Liang–Barsky 的自然产物，本来就算过了。
+//
+// 为什么 d_budget 用 min(max_ray_pixels, span)：米制上限（max_distance_m）或近平面
+// 裁剪可能先截断，此时射线的真实尽头与像素预算无关；只量像素轴会漏掉这两类。
+//
+// 与 ssr_shader.h 的 SsrFade / SsrHitConfidence **逐字同一形式**。
+
+// 剩余可用距离 → 权重。width ≤ 0 ⇒ 1（**关闭**；定义写清：不是"衰减 0 像素"）。
+// 曲线 smoothstep：线性斜坡两端一阶导跳变，在平滑地板上能看见两条"折线"。
+inline float FadeWeight(float remain_px, float width_px) {
+    if (!(width_px > 0.0f)) {
+        return 1.0f;
+    }
+    float t = remain_px / width_px;
+    t = std::min(1.0f, std::max(0.0f, t));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// 命中点 σ 处的 A。两个带宽相乘。
+// ⚠️ σ 必须与 max_ray_pixels / 带宽**同一空间**（本模块一律 SSR 像素；接入层负责把
+//    屏幕像素的配置按 1/N 折下来）。
+inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixels,
+                           float fade_budget_px, float fade_edge_px) {
+    const float budget_limit = std::min(max_ray_pixels, ray.span);
+    return FadeWeight(budget_limit - sigma, fade_budget_px) *
+           FadeWeight(ray.sigma_exit - sigma, fade_edge_px);
+}
+
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────
 
 // 每格三行判据（§5.1）：射线在本格内的**视深区间** [d_lo, d_hi] 与本格柱体
@@ -361,6 +400,9 @@ struct DerivedParams {
     float thickness_coefficient = 0.0f;
 };
 
+// 两个衰减带宽（与 DerivedParams 同路的**派生量**，不进单测以外的契约）：
+// 这里不加函数 —— 折算是接入层的一个除法（屏幕像素 / N），写在这里会多一层无法验证的间接。
+
 // Pre-condition: tile_size ∈ {1,2,4,8}、max_ray_pixels > 0、height > 0
 //（校验放在 SsrRenderer::Render —— 这里不重复 CHECK，免得 GL-free 头文件依赖 glog）。
 inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels, float thickness_pixels,
@@ -398,11 +440,15 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
 //   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
 //   而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
+//   `out_saw_backface`（可选出参）：整段里**有过**"进了柱体但朝向不对"的格 ⇒ true。
+//   融合层拿它把"没有答案"的像素的环境镜面项压暗（背面命中 = 屏幕里没有那个面的数据，
+//   纯 env 会透出一块过亮的探针色）。它与命中不互斥：后面若有合法命中，命中优先。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
                    bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
                    DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                   int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                   int* hit_y = nullptr, FacingFn facing = FacingFn{},
+                   bool* out_saw_backface = nullptr) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
@@ -467,15 +513,20 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             continue;
         }
         if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
-                    thickness_coefficient, min_thickness_m) &&
-            facing(cx, cy, ray.dir3)) {
-            if (hit_x != nullptr) {
-                *hit_x = cx;
+                    thickness_coefficient, min_thickness_m)) {
+            if (facing(cx, cy, ray.dir3)) {
+                if (hit_x != nullptr) {
+                    *hit_x = cx;
+                }
+                if (hit_y != nullptr) {
+                    *hit_y = cy;
+                }
+                return 0.5f * (sigma + sigma_out);
             }
-            if (hit_y != nullptr) {
-                *hit_y = cy;
+            // 背面命中：不算结果，但**记下**来（融合层用它压暗 env fallback）。
+            if (out_saw_backface != nullptr) {
+                *out_saw_backface = true;
             }
-            return 0.5f * (sigma + sigma_out);
         }
         if (sigma_out >= sigma_end) {
             break;
@@ -497,11 +548,11 @@ template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
                     int max_cells, DepthFn&& w_at, int width, int height,
                     int* hit_x = nullptr, int* hit_y = nullptr,
-                    FacingFn facing = FacingFn{}) {
+                    FacingFn facing = FacingFn{}, bool* out_saw_backface = nullptr) {
     const bool skip = ray.sigma_enter <= 0.0f;
     return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
                         thickness_coefficient, min_thickness_m, w_at, width, height,
-                        hit_x, hit_y, facing);
+                        hit_x, hit_y, facing, out_saw_backface);
 }
 
 // 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
@@ -509,10 +560,12 @@ float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
                  DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                 int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                 int* hit_y = nullptr, FacingFn facing = FacingFn{},
+                 bool* out_saw_backface = nullptr) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
+    bool saw_backface = false;
     for (int lane = 0; lane < d.lanes; ++lane) {
         const float lane_begin = d.slab_pixels * static_cast<float>(lane);
         if (lane_begin >= ray.sigma_exit) {
@@ -527,7 +580,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
                                      d.thickness_coefficient, min_thickness_m, w_at,
-                                     width, height, &cx, &cy, facing);
+                                     width, height, &cx, &cy, facing, &saw_backface);
         if (s < best) {
             best = s;
             best_x = cx;
@@ -539,6 +592,9 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
     }
     if (hit_y != nullptr) {
         *hit_y = best_y;
+    }
+    if (out_saw_backface != nullptr) {
+        *out_saw_backface = saw_backface;
     }
     return best;
 }

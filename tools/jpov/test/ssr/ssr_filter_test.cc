@@ -9,6 +9,10 @@
 //      所以这一条同时决定了"粗糙度上升时自然交回 env"和"反射体边缘抗锯齿"。
 //
 // 全部用合成纹理（8×8，左半边命中 / 右半边未命中），不需要场景与相机。
+//
+// 2026-11-06 起 radiance.a 是**置信度 A**（不是射线预算占用率），level 0 必须**原样
+// 传下去**：以前写 `hit ? 1 : 0`，命中点接近射线尽头/出屏点的衰减会被静默丢掉 ——
+// 那就是本文件第 ④ 条用例锁的东西。
 
 #define GL_GLEXT_PROTOTYPES
 
@@ -57,6 +61,8 @@ struct GlEnv {
 
 constexpr int kSize = 8;                 // 8×8 ⇒ 4 级 mip（8,4,2,1）
 constexpr float kHitRadiance = 0.25f;    // 命中色（任取一个非 1 的值，避免"1 恰好蒙对"）
+// 任取一个非 1、非 0.5 的置信度：写成 1 就分不出"有没有传下去"（旧实现就是 1）。
+constexpr float kConfidence = 0.75f;
 
 unsigned int UploadRadiance(int w, int h, const std::vector<float>& rgba) {
     unsigned int tex = 0;
@@ -111,7 +117,7 @@ struct Fixture {
                     rgba[i * 4 + 0] = kHitRadiance;
                     rgba[i * 4 + 1] = kHitRadiance;
                     rgba[i * 4 + 2] = kHitRadiance;
-                    rgba[i * 4 + 3] = 0.5f;   // ray_ratio（与覆盖率无关，不应被当成 A）
+                    rgba[i * 4 + 3] = kConfidence;   // A（置信度）：level 0 必须原样带下去
                     type[i] = 1;              // kHit
                 }
             }
@@ -133,7 +139,7 @@ struct Fixture {
     }
 };
 
-// ① + ②：level 0 —— 命中格 alpha=1、未命中格 alpha=0，但**未命中格的颜色 ≥ 命中色的一半**
+// ① + ②：level 0 —— 命中格 alpha = **置信度 A**、未命中格 alpha=0，但**未命中格的颜色 ≥ 命中色的一半**
 // （3×3 填充抄了邻居；若没做填充，这里会是 0 ⇒ 断言红）。
 TEST(SsrFilter, LevelZeroCoverageAndFill) {
     Fixture f;
@@ -142,8 +148,8 @@ TEST(SsrFilter, LevelZeroCoverageAndFill) {
 
     const std::vector<float> l0 = ReadMipLevel(f.filter.mip_tex(), 0, kSize, kSize);
 
-    // 命中格：覆盖率 1、颜色 = 命中色（ray_ratio 0.5 不得污染 alpha）。
-    EXPECT_FLOAT_EQ(At(l0, kSize, 0, 0, 3), 1.0f);
+    // 命中格：覆盖率 = 写进来的 A（0.75，**不是 1**）、颜色 = 命中色。
+    EXPECT_FLOAT_EQ(At(l0, kSize, 0, 0, 3), kConfidence);
     EXPECT_NEAR(At(l0, kSize, 0, 0, 0), kHitRadiance, 1.0e-3f);
 
     // 未命中但紧贴命中区的格子（x=4、x=5）：alpha 必须仍是 0（它不是命中），
@@ -161,19 +167,20 @@ TEST(SsrFilter, LevelZeroCoverageAndFill) {
     EXPECT_FLOAT_EQ(At(l0, kSize, 7, 0, 3), 0.0f);
 }
 
-// ③：level 1 —— 一个 2×2 块里 2 个命中 ⇒ 覆盖率 0.5，颜色**仍是命中色**。
-//     若颜色按普通 box 平均，这里会是 0.5×kHitRadiance ⇒ 断言红（"磨砂 = 变暗"）。
+// ③：level 1 —— 一个 2×2 块里四格全命中（每格 A=0.75）⇒ 覆盖率 0.75，
+//     颜色**仍是命中色**。若颜色按普通 box 平均，这里会是 0.75×kHitRadiance ⇒ 断言红
+//     （"磨砂 = 变暗"）；若 level 0 写成 `hit ? 1 : 0`，覆盖率会是 1 ⇒ 也红。
 TEST(SsrFilter, MipIsCoverageWeighted) {
     Fixture f;
     f.Setup();
     const std::vector<float> l1 = ReadMipLevel(f.filter.mip_tex(), 1, kSize / 2, kSize / 2);
 
-    // level 1 的 (0,0) 覆盖 level 0 的 (0..1, 0..1)：两格都命中。
-    EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 3), 1.0f, 1.0e-3f);
+    // level 1 的 (0,0) 覆盖 level 0 的 (0..1, 0..1)：四格都命中。
+    EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 3), kConfidence, 1.0e-3f);
     EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 0), kHitRadiance, 1.0e-3f);
 
-    // level 1 的 (1,0) 覆盖 level 0 的 (2..3, 0..1)：两格都命中（x<4）⇒ 仍是 1。
-    EXPECT_NEAR(At(l1, kSize / 2, 1, 0, 3), 1.0f, 1.0e-3f);
+    // level 1 的 (1,0) 覆盖 level 0 的 (2..3, 0..1)：两格都命中（x<4）⇒ 仍是 0.75。
+    EXPECT_NEAR(At(l1, kSize / 2, 1, 0, 3), kConfidence, 1.0e-3f);
 
     // level 1 的 (2,0) 覆盖 level 0 的 (4..5, 0..1)：**全未命中**，但两格已被 level 0
     // 填充成命中色 ⇒ alpha=0（不是命中），颜色必须是命中色（三线性才不会插到黑）。
@@ -211,6 +218,45 @@ TEST(SsrFilter, FillColorFollowsRadiance) {
     // 而不是上一组用例的 0.25/0/其它常数 ⇒ 证明填充色确实来自命中格。
     EXPECT_NEAR(At(l1, kSize / 2, 2, 0, 0), 0.75f, 1.0e-3f);
     EXPECT_NEAR(At(l1, kSize / 2, 2, 0, 3), 0.0f, 1.0e-3f);
+
+    filter.Finalize();
+    glDeleteTextures(1, &rad);
+    glDeleteTextures(1, &typ);
+}
+
+// ④ 置信度必须**参与颜色加权**（不是只当个 alpha 传下去）：
+//    2×2 四格 alpha = {1, 0.5, 0.25, 0}、颜色 = {1, 2, 4, 8}。
+//      a'    = (1+0.5+0.25+0)/4 = 0.4375
+//      rgb'  = Σ(c·a)/Σa      = (1·1 + 2·0.5 + 4·0.25 + 8·0)/1.75 = 3/1.75
+//    负向对照（同一块上算）：普通 box 平均 rgb 会是 3.75，覆盖率会是 1 —— 两个都不等于
+//    上面这两个数 ⇒ 这条断言确实在区分"置信度加权"与"二值覆盖率 + box 平均"。
+TEST(SsrFilter, ConfidenceWeightsColorAndCoverage) {
+    GlEnv::Get().Ensure();
+    std::vector<float> rgba(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
+    std::vector<unsigned char> type(static_cast<size_t>(kSize) * kSize, 0);
+    const float kAlpha[4] = {1.0f, 0.5f, 0.25f, 0.0f};
+    const float kColor[4] = {1.0f, 2.0f, 4.0f, 8.0f};
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const int k = j * 2 + i;
+            const size_t idx = static_cast<size_t>(j) * kSize + i;
+            rgba[idx * 4 + 0] = kColor[k];
+            rgba[idx * 4 + 3] = kAlpha[k];
+            type[idx] = 1;   // 四格都是 kHit（A=0 也算命中："命中但完全不可信"）
+        }
+    }
+    const unsigned int rad = UploadRadiance(kSize, kSize, rgba);
+    const unsigned int typ = UploadType(kSize, kSize, type);
+    jpov::ShaderManager mgr;
+    SsrFilter filter;
+    filter.Init(&mgr);
+    filter.Run(rad, typ, kSize, kSize);
+
+    const std::vector<float> l1 = ReadMipLevel(filter.mip_tex(), 1, kSize / 2, kSize / 2);
+    EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 3), 0.4375f, 1.0e-3f) << "覆盖率不是置信度的平均";
+    // 容差 3e-3：mip 链是 RGBA16F，1.71 附近的绝对间距 ≈ 1e-3。
+    EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 0), 3.0f / 1.75f, 3.0e-3f)
+        << "颜色不是按置信度加权平均（box 平均会给 3.75）";
 
     filter.Finalize();
     glDeleteTextures(1, &rad);

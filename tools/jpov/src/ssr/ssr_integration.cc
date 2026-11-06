@@ -130,6 +130,12 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     CHECK(IsValidScale(in.cfg.resolution_scale))
         << "SsrConfig::resolution_scale 只支持 1/N（N = 1..4，即 1.0 / 0.5 / 0.3333 / 0.25），得到 "
         << in.cfg.resolution_scale;
+    // 柔和过渡的三个旋钮：范围写在这里（面板滑条之外还有人会直接改配置）。
+    CHECK(in.cfg.fade_budget_pixels >= 0.0f) << "SsrConfig::fade_budget_pixels 必须 ≥ 0（0 = 关闭）";
+    CHECK(in.cfg.fade_edge_pixels >= 0.0f) << "SsrConfig::fade_edge_pixels 必须 ≥ 0（0 = 关闭）";
+    CHECK(in.cfg.backface_env_scale >= 0.0f && in.cfg.backface_env_scale <= 1.0f)
+        << "SsrConfig::backface_env_scale 必须在 [0,1]（1 = 不压暗），得到 "
+        << in.cfg.backface_env_scale;
 
     const int scale = static_cast<int>(std::lround(1.0f / in.cfg.resolution_scale));
 
@@ -192,6 +198,10 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.min_thickness_m = in.cfg.min_thickness_m;
     si.max_distance_m = in.cfg.max_distance_m;
     si.max_ray_pixels = in.cfg.max_ray_pixels;
+    // 两个衰减带宽：配置是**全分辨率屏幕像素**（观感与分辨率解耦），模块内部一律 SSR 像素。
+    // 除以 N 就是全部换算 —— 模块不替你猜"你说的是哪个空间"（见 SsrInputs 的字段注释）。
+    si.fade_budget_pixels = in.cfg.fade_budget_pixels / static_cast<float>(scale);
+    si.fade_edge_pixels = in.cfg.fade_edge_pixels / static_cast<float>(scale);
     si.tile_size = in.cfg.tile_size;
     si.rough_tex = downsample_.rough_tex();       // 逐像素 roughness（发射线截止用）
     si.roughness_cutoff = in.cfg.roughness_cutoff;
@@ -211,7 +221,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     fi.scene_depth_tex = in.scene_depth_tex;
     fi.full_w = in.full_w;
     fi.full_h = in.full_h;
-    fi.ssr_radiance_tex = outs.radiance_tex;
+    fi.ssr_flags_tex = outs.flags_tex;
     fi.down_w_tex = downsample_.w_tex();
     fi.down_normal_tex = downsample_.normal_tex();
     fi.ssr_w = downsample_.width();

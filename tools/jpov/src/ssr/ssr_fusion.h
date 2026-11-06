@@ -4,6 +4,9 @@
 // 3D pass 已经加过的那一份环境镜面项（不是叠加 —— 叠加会让金属亮一倍）。
 //
 //   out = hdr + mask · A · ao · (ssr_L · weight − env_term)
+//             − mask · ao · bf · (1−A) · (1−k) · env_term
+//
+//   （第二行就是“背面命中时把 remainder env 压暗”；bf = 背面标记，空间插值后 ∈ [0,1]）
 //
 //   mask     = 反射体（属性纹理附件0的 .a > 0.75）
 //   A        = 预滤波 mip 链里**该 roughness 对应的那一级**的覆盖率（0 ⇒ 整项抵消，
@@ -11,6 +14,10 @@
 //   ssr_L    = 同一级的覆盖率加权平均辐亮度
 //   weight   = F0·AB.x + AB.y（EnvBrdfApprox）
 //   env_term = EnvSpecularTermF0(...)（与 3D pass 同一份实现，见 env_specular.h）
+//   k        = backface_env_scale：**背面命中**（射线穿过了一个屏幕里看不见背面的物体）
+//              且没有合法命中时，剩余那份 env 的乘子。1 = 旧行为；0 = 那份 env 全黑。
+//              只吃 (1−A) 的份额（A=1 时命中的像素不受影响），且只压环境镜面项；
+//              bf=0（默认）时下面直接走旧算式 ⇒ 逐字节不变。
 //
 // 2026-11-02：材质与模糊都改成**逐像素** ——
 //   · F0/roughness 来自属性纹理**附件 1**（rgb = F0，a = roughness），不再用一套 uniform
@@ -46,7 +53,9 @@ struct SsrFusionInputs {
     int full_h = 0;
 
     // SSR 分辨率（模块输出 + 降采样输入）
-    unsigned int ssr_radiance_tex = 0;  // RGBA16F：rgb = 命中颜色，a = ray_ratio
+    // R8UI，SSR 分辨率：bit0 = 背面命中见过（融合层据此压 env fallback）。
+    // 与 type 正交，所以不挤进 type 枚举（见 ssr_shader.h 的 resolve）。
+    unsigned int ssr_flags_tex = 0;
     unsigned int down_w_tex = 0;        // R32F：w = 1/z_view（0 = 空）
     unsigned int down_normal_tex = 0;   // RGBA16F
     // 粗糙度预滤波结果（SsrFilter::mip_tex()）：RGBA16F + 完整 mip 链。

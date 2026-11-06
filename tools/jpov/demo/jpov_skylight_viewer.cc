@@ -630,6 +630,108 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// SSR 柔和过渡（A 的两个衰减 + 背面压暗）的验收拍摄（2026-11-06）。
+//
+// 出图（同一机位/光照/材质，只改三个旋钮）：
+//   falloff_off.png        两个带宽 = 0、k = 1 —— 旧行为（基准）
+//   falloff_budget.png     只开预算衰减（带宽 260 px）—— 倒影在"射线看不下去了" 处淡回 env
+//   falloff_edge.png       只开边缘衰减（带宽 600 px）—— 命中点贴着出屏点的倒影淡回 env
+//   falloff_both.png       两个都开 —— 交付档
+//   falloff_a_debug.png    调试档 4（A 灰度）：直接看权重场
+//   falloff_backface.png   调试档 5（背面标记灰度）：看 k 到底压在哪些像素上
+//   falloff_backface_dim.png  k = 0.2 + 调试关 —— 背面命中那块整体变暗
+//
+// 为什么必须现场看：两个带宽的**作用范围**与"淡出去之后眼睛会不会看出拼贴"只能目视判断；
+// 单测只能钉住"公式对不对"（见 ssr_gpu_test 的 ConfidenceMatchesCpu）。
+int RunCaptureSsrFalloff(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title  = "JPOV — SSR 柔和过渡（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 场景 1（镜面地板 + 随机模型）+ 掠射机位：倒影跨度最大，衰减带最容易看见。
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.21;
+    app.view_.theta = 0.15;
+    app.view_.R     = 45.0;
+    app.ssr_scale_ = 0.5f;
+    app.ssr_debug_ = 0;
+    app.floor_preset_ = 0;          // 镜面地板
+    app.SetSsr(true);
+
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_   = 0.0f;
+    app.ssr_backface_env_   = 1.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_off.png").c_str());
+
+    app.ssr_fade_budget_px_ = 260.0f;
+    app.ssr_fade_edge_px_   = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_budget.png").c_str());
+
+    // 边缘衰减给到 600 px 才看得见：这个场景里命中点普遍离"沿射线出屏点"很远
+    // （镜面地板反射的是屏幕中部的物体，射线还要再飞很久才出屏），140 px 的带子
+    // 实际一个像素都碰不到 —— 这是**场景属性**，不是判据失效。
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_   = 600.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_edge.png").c_str());
+
+    app.ssr_fade_budget_px_ = 260.0f;
+    app.ssr_fade_edge_px_   = 600.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_both.png").c_str());
+
+    // 调试档 4：A 灰度（白 = 完全可信）。
+    app.ssr_debug_ = 4;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_a_debug.png").c_str());
+    app.ssr_debug_ = 0;
+
+    // 背面：先出标记图（调试档 5），再出 k=0.2 的实际画面。
+    app.ssr_debug_ = 5;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_backface.png").c_str());
+    app.ssr_debug_ = 0;
+    app.ssr_backface_env_ = 0.2f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_backface_dim.png").c_str());
+    app.ssr_backface_env_ = 1.0f;
+
+    // 演示档：把射线预算砍到 90 SSR px（=180 屏幕像素）再开 300 px 的预算衰减带宽 ——
+    // 整条射线的后半段都在衰减带里，"倒影随距离溶解"这件事才肉眼可辨。
+    // 这不是推荐参数，只是把 0.27% 的变化放大成能看的东西。
+    const int saved_budget = app.ssr_max_ray_px_;
+    app.ssr_max_ray_px_ = 90;
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_short_budget_off.png").c_str());
+    app.ssr_fade_budget_px_ = 300.0f;
+    app.RunOnce(input, winfo, (out_dir + "/falloff_short_budget_on.png").c_str());
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_max_ray_px_ = saved_budget;
+
+    LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -638,6 +740,7 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
+    std::string falloff_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -650,6 +753,8 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
             mat_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ssr-falloff") == 0 && i + 1 < argc) {
+            falloff_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -659,6 +764,9 @@ int main(int argc, char** argv) {
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);
+    }
+    if (!falloff_out_dir.empty()) {
+        return RunCaptureSsrFalloff(falloff_out_dir);
     }
     if (!ssr_out_dir.empty()) {
         return RunCaptureSsr(ssr_out_dir);

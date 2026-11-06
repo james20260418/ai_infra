@@ -18,6 +18,10 @@
 //      业界原话是 expand out into untraced areas so trilinear fetches don't hit black。
 //   ③ **覆盖率本身跟着 mip 一起降**（a' = Σa/4）。合成层用这个 a 当 A：
 //      覆盖率的软化 = 反射体边缘的抗锯齿；A 变小 = 自然交接给 env，不需要额外开关。
+//      level 0 的 a **直接取 radiance.a**（2026-11-06）：那里存的是置信度 A ——
+//      命中覆盖率 × 预算/边缘两个衰减。以前写成 `hit ? 1 : 0`，会把这个衰减**静默丢掉**
+//      （命中仍然是 hit，但它「有多可信」全在 alpha 里）。因此「是否命中」仍由 type 判
+//      （a 可能很小，不能当命中标志），而 5×5 填充的判据也仍用 type。
 //
 // 契约：确定性（无历史、无抖动、无随机），同一输入逐字节同输出；不改输入纹理。
 // 成本：level 0 一趟填充 + (levels−1) 趟降采样，全部在 SSR 分辨率（通常 1:2）上。
@@ -42,7 +46,7 @@ public:
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
-    // ssr_radiance_tex：RGBA16F，rgb = 命中颜色、a = ray_ratio（未命中 rgb 无意义）
+    // ssr_radiance_tex：RGBA16F，rgb = 命中颜色、a = **A（置信度）**（未命中 rgb 无意义）
     // ssr_type_tex    ：R8UI，SsrResultType（只有 kHit 算命中）
     // 两张图必须都是 w×h。Run 会保存/恢复调用方的 FBO、viewport、program 与纹理绑定。
     void Run(unsigned int ssr_radiance_tex, unsigned int ssr_type_tex, int w, int h);

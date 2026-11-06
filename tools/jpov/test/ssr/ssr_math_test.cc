@@ -16,6 +16,10 @@
 //   6. MinPicksEarliest        两处都命中时必须取**早**的那个（负向：取 max 会拿到远的）
 //   7. DerivedParams            c = N_px·θ_px / L / steps / 浪费告警阈值
 //   8. DegenerateInputs         near→0 的 NaN 守卫、法线越界归一化、近平面裁剪、出屏
+//   9. ConfidenceFades          A 的两个衰减（预算 / 沿射线出屏点）+ 背面标记
+//
+// 2026-11-06：新增 "置信度 A" —— 命中点接近射线尽头 / 出屏点时 A 连续降到 0。
+// 它是**沿射线**的距离（σ 差），不是"到最近屏幕边的欧氏距离"：见 ⑨ 的负向对照。
 
 #include <cmath>
 #include <random>
@@ -34,6 +38,8 @@ using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
 using jpov::ssr::DerivedParams;
+using jpov::ssr::FadeWeight;
+using jpov::ssr::HitConfidence;
 using jpov::ssr::HitFacesRay;
 using jpov::ssr::kNoHit;
 using jpov::ssr::MarchSegment;
@@ -572,29 +578,103 @@ TEST(SsrMath, BackfaceHitRejected) {
     // ① 旧行为（不判朝向）：先撞上桌子顶面 —— 这就是那个 bug。
     int old_x = -1;
     int old_y = -1;
+    bool saw_backface = false;
     const float s_old = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
-                                      &old_x, &old_y);
+                                      &old_x, &old_y, /*facing=*/jpov::ssr::AcceptAllFacing{},
+                                      &saw_backface);
     ASSERT_LT(s_old, kNoHit) << "旧判据应该在桌子段命中（否则本测试没造出 bug 场景）";
     EXPECT_GE(old_y, 40);
     EXPECT_LT(old_y, 60);
+    EXPECT_FALSE(saw_backface) << "不判朝向时不可能有背面命中";
 
     // ② 加朝向判据：桌子段被跳过 ⇒ 命中后面的墙。
     int new_x = -1;
     int new_y = -1;
+    saw_backface = false;
     const float s_new = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
-                                      &new_x, &new_y, facing);
+                                      &new_x, &new_y, facing, &saw_backface);
     ASSERT_LT(s_new, kNoHit) << "墙是正面命中，不应被一起拒掉";
     EXPECT_GE(new_y, 80) << "背面命中（桌子顶面）没被跳过";
     EXPECT_GT(s_new, s_old) << "新命中必须比旧命中更远（跳到桌子后面去了）";
+    EXPECT_TRUE(saw_backface) << "穿过了桌子顶面的背面，标记必须置位（融合层靠它压暗 env）";
 
     // ③ 防恒真：把墙的法线翻到背面 ⇒ 整条射线应该无命中。
     auto facing_flipped = [](int /*x*/, int /*y*/, const Vec3& d) -> bool {
         return HitFacesRay(d, Vec3{0.0f, 0.0f, -1.0f});
     };
+    saw_backface = false;
     EXPECT_GE(MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180, nullptr,
-                            nullptr, facing_flipped),
+                            nullptr, facing_flipped, &saw_backface),
               kNoHit)
         << "法线翻过来仍能命中 ⇒ 朝向判据是恒真的";
+    EXPECT_TRUE(saw_backface) << "全背面命中时标记也必须置位";
+}
+
+// ⑨ 置信度 A 的两个衰减。
+//
+// 最重要的那一组是 ④："命中点靠近屏幕边"必须按**沿射线到出屏点的距离**判，
+// 不能按"到最近边的欧氏距离" —— 平行于屏幕边飞的射线永远不会出屏，那里没有信息缺口。
+TEST(SsrMath, ConfidenceFades) {
+    // 手工造一条射线：从 (10,100) 朝 +x 飞，未裁剪长 400，屏幕宽 320 ⇒ 在 σ=310 处出屏。
+    ScreenRay ray;
+    ray.s0 = Vec2{10.0f, 100.0f};
+    ray.dir = Vec2{1.0f, 0.0f};
+    ray.span = 400.0f;
+    ray.sigma_enter = 0.0f;
+    ray.sigma_exit = 310.0f;
+
+    // ① 两个带宽都为 0 ⇒ A 恒 1（"关闭"不是"衰减 0 像素"：否则会除零/全 0）。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 0.0f, 300.0f, 0.0f, 0.0f), 1.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 305.0f, 300.0f, 0.0f, 0.0f), 1.0f);
+
+    // ② 预算衰减：limit = min(max_ray_pixels=300, span=400) = 300。
+    //    σ=300 ⇒ 余量 0 ⇒ A=0；σ=250 ⇒ 余量 50 = 带宽 ⇒ A=1；中点半程 ⇒ 0.5。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, 50.0f, 0.0f), 0.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 250.0f, 300.0f, 50.0f, 0.0f), 1.0f);
+    EXPECT_NEAR(HitConfidence(ray, 275.0f, 300.0f, 50.0f, 0.0f), 0.5f, 1.0e-6f);
+    // 单调：越靠近上限越小。
+    EXPECT_LT(HitConfidence(ray, 290.0f, 300.0f, 50.0f, 0.0f),
+              HitConfidence(ray, 270.0f, 300.0f, 50.0f, 0.0f));
+    // smoothstep 的两个端点为 0：靠近 0 那一侧不能是线性斜坡（线性 t=0.001 时是 1e-3）。
+    EXPECT_LT(FadeWeight(0.05f, 50.0f), 1.0e-4f) << "端点仍在爬 ⇒ 不是 smoothstep";
+    EXPECT_GT(FadeWeight(49.0f, 50.0f), 0.998f);
+
+    // ③ limit 取 min(max_ray_pixels, span)：近平面/米制上限先把射线截到 40 px 时，
+    //    σ=38 必须**已经**在衰减里（若只看 300 会算出余量 262 ⇒ 恒 1）。
+    ScreenRay short_ray = ray;
+    short_ray.span = 40.0f;
+    short_ray.sigma_exit = 40.0f;
+    EXPECT_NEAR(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), FadeWeight(2.0f, 10.0f),
+                1.0e-6f);
+    EXPECT_LT(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), 0.2f)
+        << "只用 max_ray_pixels 判余量 ⇒ 短射线尽头的那次命中不会被衰减";
+
+    // ④ 边缘衰减按**沿射线到出屏点**的距离，而且必须是**不对称**的。
+    {
+        // 平行于左边飞的射线：命中点离左边只有 6 px，但它永远不会出屏（σ_exit 远）。
+        ScreenRay along_edge;
+        along_edge.s0 = Vec2{1.0f, 100.0f};
+        along_edge.dir = Vec2{1.0f, 0.0f};
+        along_edge.span = 400.0f;
+        along_edge.sigma_exit = 400.0f;
+        const float a = HitConfidence(along_edge, 5.0f, 300.0f, 0.0f, 20.0f);
+        EXPECT_FLOAT_EQ(a, 1.0f) << "离边 6 px 但不出屏 ⇒ 不该衰减";
+        // 负向对照：若按"到最近边的欧氏距离"判，这里会掉到 0.28。
+        EXPECT_LT(FadeWeight(/*到左边距离=*/6.0f, 20.0f), 0.5f)
+            << "那条错误实现其实会给出很小的权重 —— 证明上面那条断言有牙";
+    }
+    {
+        // 反方向飞的射线：命中点离**出屏点**只有 10 px ⇒ 半程。
+        ScreenRay toward_edge;
+        toward_edge.s0 = Vec2{310.0f, 100.0f};
+        toward_edge.dir = Vec2{-1.0f, 0.0f};
+        toward_edge.span = 400.0f;
+        toward_edge.sigma_exit = 310.0f;   // x 从 310 走到 0
+        EXPECT_NEAR(HitConfidence(toward_edge, 300.0f, 300.0f, 0.0f, 20.0f), 0.5f, 1.0e-6f);
+    }
+
+    // ⑤ 两个衰减相乘：任一为 0 ⇒ A=0。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, 50.0f, 50.0f), 0.0f);
 }
 
 TEST(SsrMath, DerivedParams) {

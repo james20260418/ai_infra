@@ -219,6 +219,10 @@ public:
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
+    // 柔和过渡（2026-11-06）：两个带宽都是**全分辨率屏幕像素**；0 = 关闭该衰减。
+    float ssr_fade_budget_px_ = 0.0f;   // 命中点接近射线长度上限时的衰减带宽度
+    float ssr_fade_edge_px_ = 0.0f;     // 命中点接近沿射线出屏点时的衰减带宽度
+    float ssr_backface_env_ = 1.0f;     // 背面命中时 env fallback 的乘子（1 = 不压暗）
     int   ssr_debug_ = 0;
     void SetSsr(bool on) { ssr_on_ = on; }
 
@@ -373,6 +377,9 @@ public:
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
+            sc.fade_budget_pixels = ssr_fade_budget_px_;
+            sc.fade_edge_pixels = ssr_fade_edge_px_;
+            sc.backface_env_scale = ssr_backface_env_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
         }
@@ -408,7 +415,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 16;
+        const int   kRows    = 18;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -437,12 +444,13 @@ private:
                 }
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
-            // 5 档与 SsrConfig::debug_coverage 一一对应（3/4 以前只能在拍摄脚本里用）。
+            // 5 档与 SsrConfig::debug_coverage 一一对应（3/4/5 以前只能在拍摄脚本里用）。
             const std::vector<const char*> dbg = {"SSR 调试：关",
                                                   "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）",
                                                   "SSR 调试：SSR 辐亮度",
-                                                  "SSR 调试：ray_ratio（预算占用）"};
+                                                  "SSR 调试：A 置信度",
+                                                  "SSR 调试：背面命中"};
             int dsel = ssr_debug_;
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
@@ -500,17 +508,25 @@ private:
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
             }
-            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
+            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 11), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
-            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
+            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 12), 40.0f, 800.0f, 0)) {
                 ssr_max_ray_px_ = static_cast<int>(mrp);
             }
             // 磨砂强度：roughness² × 该值 = 采样的 mip 级。0 = 永远锐利（旧行为）。
-            ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 14),
+            ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 13),
                             0.0f, 8.0f, 2);
             // 发射线门槛：超过它的粗糙度直接用 env（省射线，且本来也糊得看不出形状）。
-            ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 15),
+            ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 14),
                             0.2f, 1.0f, 2);
+            // 柔和过渡（2026-11-06）：两个带宽都是屏幕像素，0 = 关闭（见 SsrConfig 注释）。
+            // 上限 600：演示档要能盖住整条射线（镜面地板的命中点普遍离出屏点很远）。
+            ui_.SliderFloat("SSR 预算衰减带宽 px", &ssr_fade_budget_px_, row(1, 15),
+                            0.0f, 600.0f, 0);
+            ui_.SliderFloat("SSR 边缘衰减带宽 px", &ssr_fade_edge_px_, row(1, 16),
+                            0.0f, 600.0f, 0);
+            ui_.SliderFloat("SSR 背面 env 乘子 [0,1]", &ssr_backface_env_, row(1, 17),
+                            0.0f, 1.0f, 2);
         }
         // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
         {

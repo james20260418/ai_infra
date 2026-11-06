@@ -54,8 +54,12 @@ uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
 uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
 uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段尾就 break）
-// 屏幕预算（SSR 像素弧长）。**ray_ratio 的分母**：常量分母 ⇒ 提前结束的射线不会被误淡出。
+// 屏幕预算（SSR 像素弧长）。**射线长度上限**（与 uMaxDistance 取 min 的那个像素预算）。
 uniform float uMaxRayPixels;
+// 两个衰减带宽（**SSR 像素**；接入层已把屏幕像素的配置除以 N）。0 = 关闭。
+// 语义与曲线见 ssr_math.h 的 ②.5 节（FadeWeight / HitConfidence），两处必须同形式。
+uniform float uFadeBudget;
+uniform float uFadeEdge;
 
 // 屏幕射线：σ = 未裁剪线段上的像素弧长，w = 1/d 对 σ 仿射（ssr_math.h::ScreenRay）。
 struct SsrRay {
@@ -235,9 +239,34 @@ bool SsrVanishingPoint(vec3 dir_view, out vec2 vp) {
     return true;
 }
 
+// ── 置信度 A（2026-11-06 的柔和过渡）──
+// ssr_math.h::FadeWeight —— **逐字同一形式**。width ≤ 0 ⇒ 1（关闭，不是"衰减 0 像素"）。
+// 曲线 smoothstep：线性斜坡两端一阶导跳变，在平滑地板上看得见折线。
+float SsrFade(float remain_px, float width_px) {
+    if (!(width_px > 0.0)) {
+        return 1.0;
+    }
+    float t = clamp(remain_px / width_px, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// ssr_math.h::HitConfidence。
+//   d_budget = min(uMaxRayPixels, span) − s    （米制上限 / 近平面可能先截断，所以取 min）
+//   d_edge   = exit − s                        （**沿射线**到出屏点，不是到最近边的欧氏距离）
+float SsrHitConfidence(SsrRay ray, float s) {
+    float budget_limit = min(uMaxRayPixels, ray.span);
+    return SsrFade(budget_limit - s, uFadeBudget) * SsrFade(ray.exit - s, uFadeEdge);
+}
+
 )glsl";
 
-// march：每 texel = 一个 lane，输出本段**最早命中格内的中点** s（无命中 = uSentinel）。
+// march：每 texel = 一个 lane，输出本段**最早命中格内的中点** s。
+//   s ≥ 0          = 命中（σ 是像素弧长，不会是负）
+//   s = uSentinel  = 本段什么都没有
+//   s = −1         = 本段看到过“进了柱体但朝向不对”（背面命中）且没命中
+//   为什么要单独标出背面：它不算结果，但告诉融合层“屏幕里没有那个面的数据”
+//   ⇒ 那里的 env fallback 要压暗（SsrConfig::backface_env_scale）。用负号编码是
+//   零成本方案：resolve 的 T² 归约只需多一次 `< 0` 分支，不用加附件。
 inline constexpr const char* kSsrMarchFs = R"glsl(
 out float FragS;
 
@@ -335,10 +364,13 @@ void main() {
             continue;
         }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell) &&
-            SsrHitFacing(ray.d3, cell)) {
-            FragS = 0.5 * (sigma + sigma_out);
-            return;
+        // 但**记下**它（写 −1），融合层拿它压暗 env fallback。
+        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell)) {
+            if (SsrHitFacing(ray.d3, cell)) {
+                FragS = 0.5 * (sigma + sigma_out);
+                return;
+            }
+            FragS = -1.0;
         }
         if (sigma_out >= end) {
             return;
@@ -355,41 +387,52 @@ void main() {
 }
 )glsl";
 
-// resolve：T² 取 min → 命中格 → 取色 + ray_ratio + 类型。
+// resolve：T² 取 min → 命中格 → 取色 + A + 类型（+ 背面标记）。
 //
-// 输出（三样，紧凑排列）：
-//   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = ray_ratio
+// 输出（四样，紧凑排列）：
+//   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = **A（置信度）**
 //   location 1  FragType      R8UI     0=None 1=Hit 2=Sky 3=Offscreen 4=Exhausted
-//   location 2  FragHitS      R32F     调试：命中位置的像素弧长（SSR_DEBUG 时才有）
+//   location 2  FragFlags     R8UI     bit0 = 看到过背面（融合层用它压暗 env fallback）
+//   location 3  FragHitS      R32F     调试：命中位置的像素弧长（SSR_DEBUG 时才有）
 //
-// A（"有没有可用结果"）不再单独占通道 —— 由 type == kHit 派生。
+// A 的语义（2026-11-06）：不再是二值。命中点越接近“这条射线看不下去了”的地方
+// （预算上限 / 沿射线出屏点），A 越接近 0（交回 env）。算式见 SsrHitConfidence。
+// 为什么背面标记是**独立附件**而不是挤进 type：两者正交（一条射线可以既穿过背面
+// 又因预算耗尽而结束），而 type 的枚举保持一维语义；融合层只需要一位。
 inline constexpr const char* kSsrResolveFs = R"glsl(
 uniform sampler2D uSlice;
 uniform sampler2D uColor;
 
 layout(location = 0) out vec4 FragRadiance;
 layout(location = 1) out uint FragType;
+layout(location = 2) out uint FragFlags;
 #ifdef SSR_DEBUG
-layout(location = 2) out float FragHitS;    // 像素弧长；无命中 = uSentinel
+layout(location = 3) out float FragHitS;    // 像素弧长；无命中 = uSentinel
 #endif
 
 void main() {
     ivec2 mir = ivec2(gl_FragCoord.xy);
 
     // T² 取 min（这一趟本来就要做 s → 命中格 → 取色，min 塞进来 pass 数 +0）。
+    // 负数 = 本段看到过背面（march 的编码）：**不参与 min**，只置标记。
     float best = uSentinel;
+    bool saw_backface = false;
     ivec2 base = mir * uTile;
     for (int j = 0; j < uTile; ++j) {
         for (int i = 0; i < uTile; ++i) {
-            best = min(best, texelFetch(uSlice, base + ivec2(i, j), 0).r);
+            float v = texelFetch(uSlice, base + ivec2(i, j), 0).r;
+            if (v < 0.0) {
+                saw_backface = true;
+            } else {
+                best = min(best, v);
+            }
         }
     }
 
     uint type = 0u;            // kNone
     vec3 rgb = vec3(0.0);
-    float ray_ratio = 0.0;
+    float confidence = 0.0;    // A
     float hit_s = uSentinel;
-
     bool have_hit = best < uSentinel * 0.5;
     if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
         type = 0u;                         // kNone：本像素不是反射候选
@@ -408,8 +451,9 @@ void main() {
             // 正好落在正确的双线性位置。最近邻会让倒影边缘逐像素跳一格 —— 这正是"反射
             // 锯齿"的主要内容（斜面/球面上尤其明显），改成线性后免费好一大截。
             rgb = texture(uColor, pos / uRes).rgb;
-            // 预算占用率：分母是**常量**预算（不是 span）。提前结束的射线比值天然小 ⇒ 不误淡出。
-            ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
+            // A = 置信度：预算 / 边缘两个衰减的乘积（ssr_math.h::HitConfidence）。
+            // 它是融合层里"SSR 替换环境镜面"的权重 ⇒ A→0 就是自然交回 env。
+            confidence = SsrHitConfidence(ray, s);
             hit_s = s;
             type = 1u;                     // kHit
         } else {
@@ -425,8 +469,9 @@ void main() {
             }
         }
     }
-    FragRadiance = vec4(rgb, ray_ratio);
+    FragRadiance = vec4(rgb, confidence);
     FragType = type;
+    FragFlags = saw_backface ? 1u : 0u;
 #ifdef SSR_DEBUG
     FragHitS = hit_s;
 #endif

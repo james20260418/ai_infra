@@ -225,6 +225,15 @@ struct SsrInputs {
     //   逻辑，模块不替你缩放）。建议 0.15~0.35 × 屏幕高度。
     int max_ray_pixels = 0;  // > 0
 
+    // ---- 结果置信度的柔和过渡（2026-11-06）----
+    // 两个衰减带宽，单位 **SSR 像素**（不是屏幕像素 —— 接入层已按 1/N 折过）。
+    //   0 = **关闭该衰减**（定义写清：0 不是"衰减 0 像素"）。
+    // 算式：A = fade(min(max_ray_pixels, span) − s, fade_budget)
+    //            · fade(sigma_exit − s, fade_edge)
+    // 详见 ssr_math.h 的 ②.5 节（唯一文字形式）。
+    float fade_budget_pixels = 0.0f;  // ≥ 0
+    float fade_edge_pixels = 0.0f;    // ≥ 0
+
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}，K = T² ∈ {1,4,16,64}。
     //   · T 必须**偶数且为 2 的幂**（T=1 除外）：否则一个 2×2 quad 会跨 tile，
     //     隐式 LOD / fwidth 立刻出错。T=8 的 tile 恰是 16 个完整 quad，安全。
@@ -255,11 +264,12 @@ struct SsrInputs {
 struct SsrOutputs {
     // RGBA16F，与输入同分辨率、逐像素 1:1（不可重采样）。
     //   rgb = 镜面方向命中那一格的颜色（HDR、未加雾、未 tonemap、**纯辐亮度**）
-    //   a   = **ray_ratio** = s_hit / max_ray_pixels ∈ [0,1]：本次命中用掉了多少屏幕预算。
-    //         这是"预算占用率"，**不是**射线进度：分母恒为 max_ray_pixels（= SSR 像素弧长），
-    //         所以提前结束的射线（出屏 / max_distance / 命中近处）比值天然很小，
-    //         不会误触发"快到极限了要退回 fallback"的淡出。未命中写 0。
-    //         A 不再放在这里 —— 由 type_tex 派生（type == kHit ⇒ A = 1）。
+    //   a   = **A（置信度）** ∈ [0,1]：本像素的答案有多值得用。
+    //         2026-11-06 起它包含两个柔和过渡（预算上限 / 沿射线出屏点，见
+    //         ssr_math.h::HitConfidence），0 表示"完全交回 env"。未命中写 0。
+    //         融合层拿它当"SSR 替换环境镜面"的权重；SsrFilter 再把它沿 mip 链一起降低
+    //         （a' = Σa/4）⇒ 粗糙度 + 边缘 + 预算三个来源的软化走同一条通路。
+    //         ⚠️ 以前的 `ray_ratio`（预算占用率）已经**不存在**了 —— 它从未被消费过。
     unsigned int radiance_tex = 0;
 
     // R8UI，**总是输出**：每像素一个 SsrResultType（见下）。
@@ -270,6 +280,11 @@ struct SsrOutputs {
     // 无命中写哨兵 +1e30）。§11.2-3 的"命中格与解析解一致"最自然的断言对象就是它
     // （靠颜色反推很脆）；它同时是 tile 等价性测试的直接证据：s 相同 ⇒ 命中格相同。
     unsigned int hit_s_tex = 0;
+
+    // R8UI，**总是输出**：bit0 = 本像素的射线**看到过背面**（进了柱体但朝向不对）。
+    // 与 type 正交（可以既穿过背面又因预算耗尽而结束），所以不挤进 type 枚举。
+    // 用途只有一件：融合层据此把 env fallback 压暗（SsrConfig::backface_env_scale）。
+    unsigned int flags_tex = 0;
 };
 
 // 像素级结算结果。写进 type_tex（总是输出），融合层据此选退路。
@@ -350,8 +365,8 @@ private:
     unsigned int prog_resolve_debug_ = 0;  // 同上 + SSR_DEBUG（多写 reason / hit_s 两个附件）
 
     unsigned int slice_fbo_ = 0;      // march 的目标（挂 slice_tex_）
-    unsigned int slice_tex_ = 0;      // R32F，(W·T)×(H·T)；每 texel = 一个 lane 的 s_mid
-    unsigned int fbo_ = 0;            // resolve 的目标（挂 radiance [+ reason / hit_s]）
+    unsigned int slice_tex_ = 0;      // R32F，(W·T)×(H·T)；每 texel = 一个 lane 的 s_mid（或 −1 = 背面）
+    unsigned int fbo_ = 0;            // resolve 的目标（挂 radiance [+ reason / flags / hit_s]）
 
     SsrOutputs outputs_;
     int width_ = 0;
@@ -423,7 +438,9 @@ private:
 // ⑥ resolve（1:1 一趟，取 min 与取色合在一起）
 //      s = min(T² 个 texelFetch)                  // T 行 × 每行 T 个连续纹素，L1 友好
 //      s ≥ 哨兵 ⇒ a = 0；kSky / kOffscreen 由"是否曾出屏"区分，写进 reason
-//      否则 pos = s0 + ê·s ⇒ uv = floor(pos) ⇒ texelFetch(color) ⇒ 写 (color, a = 1)
+//      s = −1（某段只看到背面）⇒ 不参与 min，只置 flags 的 bit0
+//      否则 pos = s0 + ê·s ⇒ uv = floor(pos) ⇒ texelFetch(color) ⇒ 写 (color, a = A)
+//        A = fade(预算余量) · fade(出屏余量)（ssr_math.h::HitConfidence，2026-11-06）
 //      ⚠️ 这一趟**本来就要存在**（s → 命中格 → 颜色），min 塞进来 pass 数 +0；边际成本
 //         是 T² 次取样，而 march 本身要 ~1.4·max_ray_pixels 次 ⇒ 4%(T=4) / 18%(T=8)。
 //
