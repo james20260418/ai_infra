@@ -855,6 +855,21 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
         app.ssr_fade_edge_px_ = 200.0f;
         app.RunOnce(input, winfo, (out_dir + "/edge_w200.png").c_str());
         app.ssr_fade_edge_px_ = 0.0f;
+
+        // ③ 命中点贴边（Q）对照：同机位 0 / 200 / 400 的 A 灰度。
+        // 与 ② 的落点应该**完全不同**：② 贴画面边框，③ 跟着"倒影映到的那个物体"走。
+        app.ssr_debug_ = 4;
+        for (int i = 0; i < 3; ++i) {
+            const float wq[3] = {0.0f, 200.0f, 400.0f};
+            char name[64];
+            app.ssr_fade_hit_edge_px_ = wq[i];
+            std::snprintf(name, sizeof(name), "/hitedge_a_w%03d.png", static_cast<int>(wq[i]));
+            app.RunOnce(input, winfo, (out_dir + name).c_str());
+        }
+        app.ssr_fade_hit_edge_px_ = 200.0f;
+        app.ssr_debug_ = 0;
+        app.RunOnce(input, winfo, (out_dir + "/hitedge_w200.png").c_str());
+        app.ssr_fade_hit_edge_px_ = 0.0f;
     }
 
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;

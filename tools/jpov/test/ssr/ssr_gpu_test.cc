@@ -243,8 +243,10 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         out.s = s;
         out.cell_x = cx;
         out.cell_y = cy;
-        out.confidence = jpov::ssr::HitConfidence(ray, s, max_ray_pixels, fade_budget_px,
-                                                 fade_edge_px);
+        out.confidence = jpov::ssr::HitConfidence(
+            ray, s, max_ray_pixels,
+            jpov::ssr::FadeParams{/*budget=*/fade_budget_px, /*refl_edge=*/fade_edge_px,
+                                  /*hit_edge=*/0.0f});
     }
     return out;
 }

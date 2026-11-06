@@ -238,6 +238,8 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     // 两个衰减带宽：允许 0（= 关闭），不允许负 / NaN（NaN 会让 fade 静默恒 0）。
     CHECK(in.fade_budget_pixels >= 0.0f) << "SsrInputs::fade_budget_pixels 必须 ≥ 0（0 = 关闭）";
     CHECK(in.fade_edge_pixels >= 0.0f) << "SsrInputs::fade_edge_pixels 必须 ≥ 0（0 = 关闭）";
+    CHECK(in.fade_hit_edge_pixels >= 0.0f)
+        << "SsrInputs::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭）";
 
     // 输入尺寸必须与声明的分辨率一致（不一致会静默采到别的像素）。
     CHECK_EQ(TextureWidth(in.color_tex), in.width)
@@ -352,6 +354,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uMaxRayPixels", static_cast<float>(in.max_ray_pixels));
         set1f(prog, "uFadeBudget", in.fade_budget_pixels);
         set1f(prog, "uFadeEdge", in.fade_edge_pixels);
+        set1f(prog, "uFadeHitEdge", in.fade_hit_edge_pixels);
         set1f(prog, "uRoughnessCutoff", in.roughness_cutoff);
     };
     upload_common(prog_march_);

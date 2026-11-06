@@ -56,10 +56,11 @@ uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedP
 uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段尾就 break）
 // 屏幕预算（SSR 像素弧长）。**射线长度上限**（与 uMaxDistance 取 min 的那个像素预算）。
 uniform float uMaxRayPixels;
-// 两个衰减带宽（**SSR 像素**；接入层已把屏幕像素的配置除以 N）。0 = 关闭。
+// 三个衰减带宽（**SSR 像素**；接入层已把屏幕像素的配置除以 N）。0 = 关闭。
 // 语义与曲线见 ssr_math.h 的 ②.5 节（FadeWeight / HitConfidence），两处必须同形式。
 uniform float uFadeBudget;
-uniform float uFadeEdge;
+uniform float uFadeEdge;      // ② 反射体像素贴边（观感缓冲带）
+uniform float uFadeHitEdge;   // ③ 命中点贴边（反射源靠画面外沿 ⇒ 可信度低）
 
 // 屏幕射线：σ = 未裁剪线段上的像素弧长，w = 1/d 对 σ 仿射（ssr_math.h::ScreenRay）。
 struct SsrRay {
@@ -250,6 +251,11 @@ float SsrFade(float remain_px, float width_px) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// 到最近画面边的像素距离（ssr_math.h::DistToScreenEdge）。
+float SsrDistToEdge(vec2 p) {
+    return min(min(p.x, uRes.x - p.x), min(p.y, uRes.y - p.y));
+}
+
 // ssr_math.h::HitConfidence。
 //   d_budget = min(uMaxRayPixels, span) − s    （米制上限 / 近平面可能先截断，所以取 min）
 //   d_edge   = **反射体像素**到最近屏幕边的距离（图像空间；不是沿射线，也不是命中点）
@@ -263,16 +269,17 @@ float SsrHitConfidence(SsrRay ray, float s) {
     // 掠射时"投影后的射线长度"span 会被压到几十像素（射线在天上飞 20 米、屏幕上只走 30 像素），
     // 一旦拿 min(·, span) 当上限，几乎每个命中点都贴着这个上限 ⇒ 一开带宽就整片变淡
     // （2026-11-06 实测：带宽 50 屏幕像素时 91% 的覆盖区被压）。见 ssr_math.h 的 ②.5 节。
-    float a_budget = SsrFade(uMaxRayPixels - s, uFadeBudget);
-    if (!(uFadeEdge > 0.0)) {
-        return a_budget;
+    float a = SsrFade(uMaxRayPixels - s, uFadeBudget);
+    // ② 反射体像素贴边：倒影"看起来在屏幕上的位置"就是它 ⇒ 镜子被画面切断的观感缓冲带。
+    if (uFadeEdge > 0.0) {
+        a *= SsrFade(SsrDistToEdge(ray.s0), uFadeEdge);
     }
-    // 用**反射体像素**（ray.s0，σ=0 处）到最近边的距离，不是命中点：
-    // 倒影在屏幕上的位置是镜子像素；命中点可能在画面上方/横向很远。
-    // 用命中点算 ⇒ 角落里的倒影只有水平渐变、没有上下渐变（2026-11-06 实测）。
-    vec2 p = ray.s0;
-    float d_edge = min(min(p.x, uRes.x - p.x), min(p.y, uRes.y - p.y));
-    return a_budget * SsrFade(d_edge, uFadeEdge);
+    // ③ 命中点贴边：反射源本身就在画面外沿 ⇒ 紧邻未知区，可信度低。
+    //    它与 ② 在同一画面里落点完全不同（② 贴边框，③ 跟着"倒影映到的那个物体"走）。
+    if (uFadeHitEdge > 0.0) {
+        a *= SsrFade(SsrDistToEdge(ray.s0 + ray.dir * s), uFadeHitEdge);
+    }
+    return a;
 }
 
 )glsl";

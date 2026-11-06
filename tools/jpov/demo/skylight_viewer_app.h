@@ -221,7 +221,8 @@ public:
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
     // 柔和过渡（2026-11-06）：两个带宽都是**全分辨率屏幕像素**；0 = 关闭该衰减。
     float ssr_fade_budget_px_ = 0.0f;   // 命中点接近射线长度上限时的衰减带宽度
-    float ssr_fade_edge_px_ = 0.0f;     // 命中点接近沿射线出屏点时的衰减带宽度
+    float ssr_fade_edge_px_ = 0.0f;     // 反射体像素贴边（观感缓冲带）
+    float ssr_fade_hit_edge_px_ = 0.0f;  // 命中点贴边（反射源靠画面外沿 ⇒ 可信度低）
     float ssr_backface_env_ = 1.0f;     // 背面命中时 env fallback 的乘子（1 = 不压暗）
     int   ssr_debug_ = 0;
     void SetSsr(bool on) { ssr_on_ = on; }
@@ -379,6 +380,7 @@ public:
             sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.fade_budget_pixels = ssr_fade_budget_px_;
             sc.fade_edge_pixels = ssr_fade_edge_px_;
+            sc.fade_hit_edge_pixels = ssr_fade_hit_edge_px_;
             sc.backface_env_scale = ssr_backface_env_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
@@ -415,7 +417,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 18;
+        const int   kRows    = 19;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -523,9 +525,11 @@ private:
             // 上限 600：演示档要能盖住整条射线（镜面地板的命中点普遍离出屏点很远）。
             ui_.SliderFloat("SSR 预算衰减带宽 px", &ssr_fade_budget_px_, row(1, 15),
                             0.0f, 600.0f, 0);
-            ui_.SliderFloat("SSR 边缘衰减带宽 px", &ssr_fade_edge_px_, row(1, 16),
+            ui_.SliderFloat("SSR 反射体边缘带宽 px", &ssr_fade_edge_px_, row(1, 16),
                             0.0f, 600.0f, 0);
-            ui_.SliderFloat("SSR 背面 env 乘子 [0,1]", &ssr_backface_env_, row(1, 17),
+            ui_.SliderFloat("SSR 命中点边缘带宽 px", &ssr_fade_hit_edge_px_, row(1, 17),
+                            0.0f, 600.0f, 0);
+            ui_.SliderFloat("SSR 背面 env 乘子 [0,1]", &ssr_backface_env_, row(1, 18),
                             0.0f, 1.0f, 2);
         }
         // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。

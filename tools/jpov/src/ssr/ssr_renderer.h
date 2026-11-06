@@ -231,8 +231,9 @@ struct SsrInputs {
     // 算式：A = fade(min(max_ray_pixels, span) − s, fade_budget)
     //            · fade(命中点到最近屏幕边的像素距离, fade_edge)
     // 详见 ssr_math.h 的 ②.5 节（唯一文字形式）。
-    float fade_budget_pixels = 0.0f;  // ≥ 0
-    float fade_edge_pixels = 0.0f;    // ≥ 0
+    float fade_budget_pixels = 0.0f;      // ≥ 0
+    float fade_edge_pixels = 0.0f;        // ≥ 0，**反射体像素**贴边（观感缓冲带）
+    float fade_hit_edge_pixels = 0.0f;    // ≥ 0，**命中点**贴边（反射源近画面外沿 → 可信度低）
 
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}，K = T² ∈ {1,4,16,64}。
     //   · T 必须**偶数且为 2 的幂**（T=1 除外）：否则一个 2×2 quad 会跨 tile，

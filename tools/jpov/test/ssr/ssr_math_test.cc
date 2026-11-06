@@ -624,17 +624,17 @@ TEST(SsrMath, ConfidenceFades) {
     ray.sigma_exit = 310.0f;
 
     // ① 两个带宽都为 0 ⇒ A 恒 1（"关闭"不是"衰减 0 像素"：否则会除零/全 0）。
-    EXPECT_FLOAT_EQ(HitConfidence(ray, 0.0f, 300.0f, 0.0f, 0.0f), 1.0f);
-    EXPECT_FLOAT_EQ(HitConfidence(ray, 305.0f, 300.0f, 0.0f, 0.0f), 1.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 0.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/0.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 1.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 305.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/0.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 1.0f);
 
     // ② 预算衰减：limit = min(max_ray_pixels=300, span=400) = 300。
     //    σ=300 ⇒ 余量 0 ⇒ A=0；σ=250 ⇒ 余量 50 = 带宽 ⇒ A=1；中点半程 ⇒ 0.5。
-    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, 50.0f, 0.0f), 0.0f);
-    EXPECT_FLOAT_EQ(HitConfidence(ray, 250.0f, 300.0f, 50.0f, 0.0f), 1.0f);
-    EXPECT_NEAR(HitConfidence(ray, 275.0f, 300.0f, 50.0f, 0.0f), 0.5f, 1.0e-6f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 0.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 250.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 1.0f);
+    EXPECT_NEAR(HitConfidence(ray, 275.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 0.5f, 1.0e-6f);
     // 单调：越靠近上限越小。
-    EXPECT_LT(HitConfidence(ray, 290.0f, 300.0f, 50.0f, 0.0f),
-              HitConfidence(ray, 270.0f, 300.0f, 50.0f, 0.0f));
+    EXPECT_LT(HitConfidence(ray, 290.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}),
+              HitConfidence(ray, 270.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}));
     // smoothstep 的两个端点为 0：靠近 0 那一侧不能是线性斜坡（线性 t=0.001 时是 1e-3）。
     EXPECT_LT(FadeWeight(0.05f, 50.0f), 1.0e-4f) << "端点仍在爬 ⇒ 不是 smoothstep";
     EXPECT_GT(FadeWeight(49.0f, 50.0f), 0.998f);
@@ -646,12 +646,12 @@ TEST(SsrMath, ConfidenceFades) {
     ScreenRay short_ray = ray;      // 用户视角：预算 300，这条射线的投影只有 40 px
     short_ray.span = 40.0f;
     short_ray.sigma_exit = 40.0f;
-    EXPECT_FLOAT_EQ(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), 1.0f)
+    EXPECT_FLOAT_EQ(HitConfidence(short_ray, 38.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/10.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 1.0f)
         << "span 短 ≠ 预算用尽：掠射下这条会让整片倒影变淡";
     // 负向对照：把同一个 σ 放到**预算末端**（预算 40）⇒ 必须衰减到 0 附近。
-    EXPECT_NEAR(HitConfidence(short_ray, 38.0f, 40.0f, 10.0f, 0.0f), FadeWeight(2.0f, 10.0f),
+    EXPECT_NEAR(HitConfidence(short_ray, 38.0f, 40.0f, jpov::ssr::FadeParams{/*budget=*/10.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), FadeWeight(2.0f, 10.0f),
                 1.0e-6f);
-    EXPECT_LT(HitConfidence(short_ray, 38.0f, 40.0f, 10.0f, 0.0f), 0.2f)
+    EXPECT_LT(HitConfidence(short_ray, 38.0f, 40.0f, jpov::ssr::FadeParams{/*budget=*/10.0f, /*refl_edge=*/0.0f, /*hit_edge=*/0.0f}), 0.2f)
         << "真的用完预算时不衰减 ⇒ 那条本测试要防的硬缝还在";
 
     // ④ 边缘衰减按**反射体像素**（ray.s0）到最近屏幕边的距离。
@@ -668,7 +668,7 @@ TEST(SsrMath, ConfidenceFades) {
         left.sigma_enter = 0.0f;
         left.sigma_exit = 310.0f;
         left.res = Vec2{320.0f, 180.0f};
-        EXPECT_NEAR(HitConfidence(left, 296.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(10.0f, 20.0f),
+        EXPECT_NEAR(HitConfidence(left, 296.0f, 1000.0f, jpov::ssr::FadeParams{/*budget=*/0.0f, /*refl_edge=*/20.0f, /*hit_edge=*/0.0f}), FadeWeight(10.0f, 20.0f),
                     1.0e-6f);
     }
     {
@@ -680,13 +680,13 @@ TEST(SsrMath, ConfidenceFades) {
         bottom.sigma_enter = 0.0f;
         bottom.sigma_exit = 177.0f;
         bottom.res = Vec2{320.0f, 180.0f};
-        EXPECT_NEAR(HitConfidence(bottom, 10.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(3.0f, 20.0f),
+        EXPECT_NEAR(HitConfidence(bottom, 10.0f, 1000.0f, jpov::ssr::FadeParams{/*budget=*/0.0f, /*refl_edge=*/20.0f, /*hit_edge=*/0.0f}), FadeWeight(3.0f, 20.0f),
                     1.0e-6f)
             << "下边框不是边";
         // 角上（离两边都近）取更小的那个：镜子像素 (4,5) ⇒ min(4,174,5,175)=4。
         ScreenRay corner = bottom;
         corner.s0 = Vec2{4.0f, 5.0f};
-        EXPECT_NEAR(HitConfidence(corner, 10.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(4.0f, 20.0f),
+        EXPECT_NEAR(HitConfidence(corner, 10.0f, 1000.0f, jpov::ssr::FadeParams{/*budget=*/0.0f, /*refl_edge=*/20.0f, /*hit_edge=*/0.0f}), FadeWeight(4.0f, 20.0f),
                     1.0e-6f);
     }
     {
@@ -699,13 +699,24 @@ TEST(SsrMath, ConfidenceFades) {
         mid.sigma_enter = 0.0f;
         mid.sigma_exit = 165.0f;
         mid.res = Vec2{320.0f, 180.0f};
-        EXPECT_FLOAT_EQ(HitConfidence(mid, 160.0f, 1000.0f, 0.0f, 20.0f), 1.0f)
+        EXPECT_FLOAT_EQ(HitConfidence(mid, 160.0f, 1000.0f,
+                                     jpov::ssr::FadeParams{/*budget=*/0.0f,
+                                                           /*refl_edge=*/20.0f,
+                                                           /*hit_edge=*/0.0f}),
+                        1.0f)
             << "画面中部的镜子像素被\"命中点贴边\"压掉了";
         EXPECT_LT(FadeWeight(14.0f, 20.0f), 0.9f) << "负向对照应当是明显 <1 的";
+        // 但 ③（命中点贴边）**应该**在这个位置生效：σ=146 ⇒ hit=(306,90)，离右边 14px。
+        EXPECT_NEAR(HitConfidence(mid, 146.0f, 1000.0f,
+                                  jpov::ssr::FadeParams{/*budget=*/0.0f,
+                                                        /*refl_edge=*/0.0f,
+                                                        /*hit_edge=*/20.0f}),
+                    FadeWeight(14.0f, 20.0f), 1.0e-6f)
+            << "命中点贴边时必须衰减（数据可信度那条）";
     }
 
     // ⑤ 两个衰减相乘：任一为 0 ⇒ A=0。
-    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, 50.0f, 50.0f), 0.0f);
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 300.0f, 300.0f, jpov::ssr::FadeParams{/*budget=*/50.0f, /*refl_edge=*/50.0f, /*hit_edge=*/0.0f}), 0.0f);
 }
 
 TEST(SsrMath, DerivedParams) {

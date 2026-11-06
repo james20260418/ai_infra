@@ -303,24 +303,36 @@ inline float FadeWeight(float remain_px, float width_px) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-// 命中点 σ 处的 A。两个带宽相乘。
-// ⚠️ σ / max_ray_pixels / 带宽**必须同一空间**（本模块一律 SSR 像素；接入层负责把
-//    屏幕像素的配置按 1/N 折下来）。
+// 三个带宽（单位一律 **SSR 像素**；接入层负责把屏幕像素的配置按 1/N 折下来）。
+// 0 = 关闭该衰减。
+struct FadeParams {
+    float budget_px = 0.0f;          // ① 命中点离 march 预算还有多远
+    float reflector_edge_px = 0.0f;  // ② **反射体像素**离画面边框多远（观感缓冲带）
+    float hit_edge_px = 0.0f;        // ③ **命中点**离画面边框多远（数据可信度）
+};
+
+// 到最近画面边的像素距离。
+inline float DistToScreenEdge(const Vec2& p, const ScreenRay& ray) {
+    return std::min(std::min(p.x, ray.res.x - p.x), std::min(p.y, ray.res.y - p.y));
+}
+
+// 命中点 σ 处的 A。三个带宽相乘。
+//
+// ② 与 ③ 是两个**不同的问题**，都很便宜、都直接用图像空间量，没有近似游戏：
+//   ② 反射体（= 倒影在屏幕上的位置）贴边 ⇒ 镜子被画面边缘切断的观感，需要缓冲带；
+//   ③ 命中点（= 反射源）贴边     ⇒ 那块内容本身就在画面外沿，可信度低，需要软化。
+//   同一个画面里它们落的位置完全不同：② 贴着画面边框，③ 跟着"倒影映到的东西"走。
+//   关掉任何一个都只是少一个旋钮，不会互相干扰（乘法）。
 inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixels,
-                           float fade_budget_px, float fade_edge_px) {
-    const float a_budget = FadeWeight(max_ray_pixels - sigma, fade_budget_px);
-    if (!(fade_edge_px > 0.0f)) {
-        return a_budget;   // 关闭时不必算位置（也避免 res 未填时算出负距离）
+                           const FadeParams& fade) {
+    float a = FadeWeight(max_ray_pixels - sigma, fade.budget_px);
+    if (fade.reflector_edge_px > 0.0f) {
+        a *= FadeWeight(DistToScreenEdge(ray.s0, ray), fade.reflector_edge_px);
     }
-    // 用**反射体像素**（ray.s0 = σ=0 处）到最近边的距离，不是命中点的。
-    // 为什么（2026-11-06 Danis 第二次验收）：倒影"看起来在屏幕上的位置"是**镜子像素**，
-    // 命中点在镜子里被反射到的那个物体上（通常在画面上方、甚至横向很远）。
-    // 用命中点算 ⇒ 左下角的倒影只会出现"水平渐变"、没有"上下渐变"（实测如此）。
-    // 用镜子像素算 ⇒ 四条边对称，角上是二维渐变，与"给屏幕边缘留个 buffer"的直觉一致。
-    const Vec2 p = ray.s0;
-    const float d_edge = std::min(std::min(p.x, ray.res.x - p.x),
-                                  std::min(p.y, ray.res.y - p.y));
-    return a_budget * FadeWeight(d_edge, fade_edge_px);
+    if (fade.hit_edge_px > 0.0f) {
+        a *= FadeWeight(DistToScreenEdge(PosAt(ray, sigma), ray), fade.hit_edge_px);
+    }
+    return a;
 }
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────

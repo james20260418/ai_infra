@@ -133,6 +133,8 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     // 柔和过渡的三个旋钮：范围写在这里（面板滑条之外还有人会直接改配置）。
     CHECK(in.cfg.fade_budget_pixels >= 0.0f) << "SsrConfig::fade_budget_pixels 必须 ≥ 0（0 = 关闭）";
     CHECK(in.cfg.fade_edge_pixels >= 0.0f) << "SsrConfig::fade_edge_pixels 必须 ≥ 0（0 = 关闭）";
+    CHECK(in.cfg.fade_hit_edge_pixels >= 0.0f)
+        << "SsrConfig::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭）";
     CHECK(in.cfg.backface_env_scale >= 0.0f && in.cfg.backface_env_scale <= 1.0f)
         << "SsrConfig::backface_env_scale 必须在 [0,1]（1 = 不压暗），得到 "
         << in.cfg.backface_env_scale;
@@ -202,6 +204,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     // 除以 N 就是全部换算 —— 模块不替你猜"你说的是哪个空间"（见 SsrInputs 的字段注释）。
     si.fade_budget_pixels = in.cfg.fade_budget_pixels / static_cast<float>(scale);
     si.fade_edge_pixels = in.cfg.fade_edge_pixels / static_cast<float>(scale);
+    si.fade_hit_edge_pixels = in.cfg.fade_hit_edge_pixels / static_cast<float>(scale);
     si.tile_size = in.cfg.tile_size;
     si.rough_tex = downsample_.rough_tex();       // 逐像素 roughness（发射线截止用）
     si.roughness_cutoff = in.cfg.roughness_cutoff;
