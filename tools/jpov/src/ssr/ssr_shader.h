@@ -259,8 +259,11 @@ float SsrFade(float remain_px, float width_px) {
 //    带宽 163 屏幕像素时倒影覆盖区的 A 只剩 60.6%（全屏 10.8% 像素被改）⇒ 镜面掠射
 //    直接糊成哑光。理由与实测数字见 ssr_math.h 的 ②.5 节。
 float SsrHitConfidence(SsrRay ray, float s) {
-    float budget_limit = min(uMaxRayPixels, ray.span);
-    float a_budget = SsrFade(budget_limit - s, uFadeBudget);
+    // d_budget **只用 uMaxRayPixels**（march 的预算），不取 min(·, span)：
+    // 掠射时"投影后的射线长度"span 会被压到几十像素（射线在天上飞 20 米、屏幕上只走 30 像素），
+    // 一旦拿 min(·, span) 当上限，几乎每个命中点都贴着这个上限 ⇒ 一开带宽就整片变淡
+    // （2026-11-06 实测：带宽 50 屏幕像素时 91% 的覆盖区被压）。见 ssr_math.h 的 ②.5 节。
+    float a_budget = SsrFade(uMaxRayPixels - s, uFadeBudget);
     if (!(uFadeEdge > 0.0)) {
         return a_budget;
     }

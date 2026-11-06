@@ -792,6 +792,56 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
     app.ssr_fade_edge_px_ = 0.0f;
     app.view_ = saved_view;
 
+    // ── 预算衰减扫描（Danis 2026-11-06 14:38："这个机位下稍微调大预算衰减，倒影整体
+    // 迅速变淡，而不是从下侧开始变淡"）──
+    // 机位照他的 HUD 复刻：pos ≈ (-0.06, 0.07, 3.98) / fov 60 ⇒ 贴地 7cm、R≈4、仰角≈1°。
+    // 面板值：1:2 / 厚度 6 / 预算 220 / 磨砂 8 / 门槛 0.60；两个衰减先全关，只开预算。
+    // 每个带宽出两张：可见光渲染 + A 灰度（A 的衰减形状直接说明"谁先淡"）。
+    {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.018f;
+        app.view_.theta = 0.0f;
+        app.view_.R     = 3.98f;
+        app.ssr_scale_ = 0.5f;
+        app.ssr_thickness_px_ = 6.0f;
+        app.ssr_max_ray_px_ = 220;
+        app.ssr_rough_to_lod_ = 8.0f;
+        app.ssr_rough_cutoff_ = 0.60f;
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_backface_env_ = 1.0f;
+        app.ssr_debug_ = 0;
+        const float widths[5] = {0.0f, 50.0f, 100.0f, 200.0f, 400.0f};
+        for (int i = 0; i < 5; ++i) {
+            char name[64];
+            app.ssr_fade_budget_px_ = widths[i];
+            std::snprintf(name, sizeof(name), "/budget_w%03d.png", static_cast<int>(widths[i]));
+            app.RunOnce(input, winfo, (out_dir + name).c_str());
+            app.ssr_debug_ = 4;
+            std::snprintf(name, sizeof(name), "/budget_a_w%03d.png", static_cast<int>(widths[i]));
+            app.RunOnce(input, winfo, (out_dir + name).c_str());
+            app.ssr_debug_ = 0;
+        }
+        app.ssr_fade_budget_px_ = 0.0f;
+
+        // 对照：把预算抬到 800 SSR px（≈1600 屏幕像素）再看同一个带宽扫一遍。
+        // 若命中点不再扎堆在预算末端，就证明上面那组"整体变淡"是**预算本身在卡**
+        // （可见倒影恰好全在预算边缘），不是判据写错。
+        app.ssr_max_ray_px_ = 800;
+        for (int i = 0; i < 3; ++i) {
+            char name[64];
+            const float w2[3] = {0.0f, 100.0f, 400.0f};
+            app.ssr_fade_budget_px_ = w2[i];
+            app.ssr_debug_ = 4;
+            std::snprintf(name, sizeof(name), "/budget_a_big_w%03d.png", static_cast<int>(w2[i]));
+            app.RunOnce(input, winfo, (out_dir + name).c_str());
+            app.ssr_debug_ = 0;
+        }
+        app.ssr_fade_budget_px_ = 0.0f;
+        app.ssr_max_ray_px_ = 220;
+
+        app.ssr_debug_ = 0;
+    }
+
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;
     app.Finalize();
     return 0;

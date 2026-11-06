@@ -639,15 +639,20 @@ TEST(SsrMath, ConfidenceFades) {
     EXPECT_LT(FadeWeight(0.05f, 50.0f), 1.0e-4f) << "端点仍在爬 ⇒ 不是 smoothstep";
     EXPECT_GT(FadeWeight(49.0f, 50.0f), 0.998f);
 
-    // ③ limit 取 min(max_ray_pixels, span)：近平面/米制上限先把射线截到 40 px 时，
-    //    σ=38 必须**已经**在衰减里（若只看 300 会算出余量 262 ⇒ 恒 1）。
-    ScreenRay short_ray = ray;
+    // ③ 预算判据**只看 max_ray_pixels**，不取 min(·, span)。
+    //    掠射时投影后的 span 会被压到几十像素（射线在世界上飞十几米、屏幕上只走 30 像素），
+    //    若拿 min(·, span) 当上限，几乎每个命中点都贴着它 ⇒ 一开带宽整片变淡
+    //    （2026-11-06 实测：带宽 50 屏幕像素时 91% 的覆盖区被压）。
+    ScreenRay short_ray = ray;      // 用户视角：预算 300，这条射线的投影只有 40 px
     short_ray.span = 40.0f;
     short_ray.sigma_exit = 40.0f;
-    EXPECT_NEAR(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), FadeWeight(2.0f, 10.0f),
+    EXPECT_FLOAT_EQ(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), 1.0f)
+        << "span 短 ≠ 预算用尽：掠射下这条会让整片倒影变淡";
+    // 负向对照：把同一个 σ 放到**预算末端**（预算 40）⇒ 必须衰减到 0 附近。
+    EXPECT_NEAR(HitConfidence(short_ray, 38.0f, 40.0f, 10.0f, 0.0f), FadeWeight(2.0f, 10.0f),
                 1.0e-6f);
-    EXPECT_LT(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), 0.2f)
-        << "只用 max_ray_pixels 判余量 ⇒ 短射线尽头的那次命中不会被衰减";
+    EXPECT_LT(HitConfidence(short_ray, 38.0f, 40.0f, 10.0f, 0.0f), 0.2f)
+        << "真的用完预算时不衰减 ⇒ 那条本测试要防的硬缝还在";
 
     // ④ 边缘衰减按**命中点到最近屏幕边的距离**（图像空间），不是"沿射线到出屏点"。
     //    这一组是 2026-11-06 的实测回归：后者在掠射下会把远处倒影整片吃掉。

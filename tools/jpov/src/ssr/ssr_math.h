@@ -268,7 +268,7 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 // A = "这个像素的答案有多少值得用"，∈ [0,1]。以前它是二值的（命中 1 / 未命中 0），
 // 于是"射线刚好在预算内命中"与"刚好差一格没命中"相邻时会硬切。现在乘上两个衰减：
 //
-//   d_budget = min(max_ray_pixels, ray.span) − σ     命中点离**射线长度上限**还有多远
+//   d_budget = max_ray_pixels − σ                    命中点离**march 预算**还有多远
 //   d_edge   = 命中点到**最近屏幕边**的距离           （图像空间，不是沿射线）
 //   A        = fade(d_budget, 预算带宽) · fade(d_edge, 边缘带宽)
 //
@@ -282,8 +282,13 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 //   代价：一条平行于边框飞的射线，命中点贴着边框时也会被衰减 —— 但那只是沿边框的一条
 //   窄带，不会误伤画面中部的反射。
 //
-// 为什么 d_budget 用 min(max_ray_pixels, span)：米制上限（max_distance_m）或近平面
-// 裁剪可能先截断，此时射线的真实尽头与像素预算无关；只量像素轴会漏掉这两类。
+// 为什么 d_budget **不**取 min(max_ray_pixels, ray.span)（2026-11-06 实测改回来）：
+//   掠射时"投影后的射线全长"span 会被压到几十像素（射线在世界上飞十几米、屏幕上只走
+//   30 像素），于是几乎每个命中点都贴着这个上限 ⇒ 一开带宽就整片变淡
+//   （实测：带宽 50 屏幕像素时覆盖区 91% 被压）。span 短**不等于**预算用尽：
+//   射线是被世界距离/近平面截断的，那里本来就该由边缘/兜底逻辑管，不该算作"快到预算极限"。
+//   代价：被 max_distance_m 截断的射线不再有预算淡出 —— 目前 max_distance 远大于实际射线，
+//   这个损失是零。
 //
 // 与 ssr_shader.h 的 SsrFade / SsrHitConfidence **逐字同一形式**。
 
@@ -303,8 +308,7 @@ inline float FadeWeight(float remain_px, float width_px) {
 //    屏幕像素的配置按 1/N 折下来）。
 inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixels,
                            float fade_budget_px, float fade_edge_px) {
-    const float budget_limit = std::min(max_ray_pixels, ray.span);
-    const float a_budget = FadeWeight(budget_limit - sigma, fade_budget_px);
+    const float a_budget = FadeWeight(max_ray_pixels - sigma, fade_budget_px);
     if (!(fade_edge_px > 0.0f)) {
         return a_budget;   // 关闭时不必算位置（也避免 res 未填时算出负距离）
     }
