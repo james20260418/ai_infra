@@ -79,7 +79,7 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
 - ✅ `com_github_gflags_gflags` → 整条删除（glog 是预编译 .a，构建期不需要 gflags；全仓 0 处引用）
 
 `third_party/protobuf-3.14.0-rc3/protobuf_deps.bzl` 里仍有 7 个 `http_archive`，
-其中**实测只有 5 个会被 fetch**，它们的**原始 tarball 已入库** `third_party/distdir/`
+其中 **6 个会被 fetch**，它们的**原始 tarball 已入库** `third_party/distdir/`
 （压缩包原样、不展开源码，git 只涨 ~3.0MB）：
 
 | archive | 版本 | distdir 文件名 | tar.gz |
@@ -87,16 +87,21 @@ genVolume 镜像（Mantaflow 重烘）      ─┘
 | bazel_skylib | 1.0.2 | `bazel-skylib-1.0.2.tar.gz` | 31K |
 | zlib | 1.2.11 | `v1.2.11.tar.gz` | 630K |
 | rules_cc | 818289e | `818289e5613731ae410efb54218a4077fb9dbb03.tar.gz` | 112K |
+| rules_java | 981f06c | `981f06c3d2bd10225e85209904090eb7b5fb26bd.tar.gz` | 6.5K |
 | rules_proto | 4029855 | `40298556293ae502c66579620a7ce867d5f57311.tar.gz` | 12K |
 | rules_python | 4b84ad2 | `4b84ad270387a7c439ebdccfd530e2339601ef27.tar.gz` | 2.3M |
 
-声明了但**当前构建从不 fetch**、因此没入库的 2 个（用「移走 tarball + 空 output_base +
-`--experimental_repository_disable_download` + `cquery deps(//tools/jpov/...)`」逐个验证）：
+声明了但**当前构建从不 fetch**、因此没入库的只有 1 个：
 
 | archive | 原因 |
 |---|---|
 | `six` 1.12.0 | Bazel 从未下载过该 repo（repository cache 里就没有） |
-| `rules_java` 981f06c | 移走它离线 cquery 仍 415 targets 全通过；只在 java toolchain 解析时用，而本仓库没有 java 目标、coverage 也被 §4.1 绕开 |
+
+> ⚠️ **`rules_java` 曾经被误判成「不用」**（2026-11-06，本地离线探针显示去掉它也全绿）。
+> 那个结论不可移植：**本机没有 JDK** ⇒ `@local_jdk` 解析失败 ⇒ Bazel 跳过注册的
+> `runtime_toolchain_definition` ⇒ 不需要 `rules_java`。而 **GitHub runner 预装了 JDK**，
+> `@local_jdk` 能解析，它注册的 toolchain 依赖 `@rules_java//java` ⇒ CI 上必须能从 distdir
+> 取到（当时 CI 两条 job 就是这么红的）。所以 `rules_java` 必须留在 distdir 里。
 
 规则：
 

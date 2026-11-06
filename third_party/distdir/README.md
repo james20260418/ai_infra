@@ -15,26 +15,32 @@
 | 源码树 vendoring（像 gtest 那样） | ~2.6MB（pack 后） | +13MB | 要改 `build_file`（zlib/six 用的是 protobuf 自带的 BUILD） |
 | **distdir 压缩包（本目录）** | **~3MB** | 0 | 上游定义一字不改，sha256 校验照旧，升级只换文件 |
 
-## 文件清单（5 个，构建确实会 fetch 的）
+## 文件清单（6 个，构建确实会 fetch 的）
 
 | 文件 | 来源 archive | sha256 |
 |---|---|---|
 | `bazel-skylib-1.0.2.tar.gz` | `bazel_skylib` 1.0.2 | `97e70364…` |
 | `v1.2.11.tar.gz` | `zlib` 1.2.11 | `629380c9…` |
 | `818289e5613731ae410efb54218a4077fb9dbb03.tar.gz` | `rules_cc` | `9d48151e…` |
+| `981f06c3d2bd10225e85209904090eb7b5fb26bd.tar.gz` | `rules_java` | `f5a3e477…` |
 | `40298556293ae502c66579620a7ce867d5f57311.tar.gz` | `rules_proto` | `aa1ee192…` |
 | `4b84ad270387a7c439ebdccfd530e2339601ef27.tar.gz` | `rules_python` | `e5470e92…` |
 
-**声明了但没入库的 2 个**（2026-11-06 用「移走 tarball + 空 output_base +
-`--experimental_repository_disable_download` + `cquery deps(//tools/jpov/...)`」逐个验证）：
+**声明了但没入库的只有 1 个**（2026-11-06 验证：Bazel 从未下载过该 repo，
+repository cache 里都没有）：
 
 | archive | 为什么不入库 |
 |---|---|
-| `six` 1.12.0 | 当前构建从不引用（Bazel 从未下载过该 repo，repository cache 里都没有） |
-| `rules_java` | 只在 java toolchain 解析时用。本仓库没有 java 目标，`cc_test` 的 coverage 依赖已被 `.bazelrc` 绕开（见 `docs/jpov_environment.md` §4.1） |
+| `six` 1.12.0 | 当前构建从不引用 |
+
+> ⚠️ `rules_java` **必须留在这里**，别学 `six` 删掉。
+> 本地（容器没有 JDK）去掉它离线也能全绿，但那是因为 `@local_jdk` 解析失败、
+> Bazel 跳过了注册的 toolchain；**GitHub runner 预装 JDK**，`@local_jdk` 能解析，
+> 它注册的 `runtime_toolchain_definition` 依赖 `@rules_java//java`，缺了就红。
+> 这个坑真实踩过：PR #254 的 CI 两条 job 因此各红了一次。
 
 > 以后真要启用 Java（`java_library` / `java_proto_library` / `bazel coverage`），
-> 光补 `rules_java` 不够，还要 `remote_java_tools`(42M) + Zulu JDK(194M)。
+> 光有 `rules_java` 不够，还要 `remote_java_tools`(42M) + Zulu JDK(194M)。
 
 ## 加新依赖 / 升级版本
 

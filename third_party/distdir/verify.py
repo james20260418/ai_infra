@@ -30,14 +30,16 @@ DEPS_BZL = os.path.join(
     REPO_ROOT, "third_party", "protobuf-3.14.0-rc3", "protobuf_deps.bzl"
 )
 
-# 声明了、但当前构建（纯 C++，不解析 java toolchain）从不 fetch 的。
-# 2026-11-06 用「移走 tarball + 空 output_base + --experimental_repository_disable_download
-# + cquery deps(//tools/jpov/...)」逐个验证过：
-#   six        —— Bazel 从未下载过该 repo（连 repository cache 里都没有）
-#   rules_java —— 移走它，离线 cquery 仍然 415 targets 全通过
+# 声明了、但当前构建从不 fetch 的。
+#   2026-11-06 验证：Bazel 从未下载过该 repo（连 repository cache 里都没有），
+#   移走/缺少它时离线 `bazel build //...` 仍然全绿。
+#
+# 注意 rules_java **不能** 放进这里（曾经误判过）：
+#   「本机没有 JDK ⇒ @local_jdk 解析失败 ⇒ 注册 toolchain 被跳过 ⇒ 不需要 rules_java」
+#   这个结论不可移植。GitHub runner 预装了 JDK，@local_jdk 能解析，它注册的
+#   `runtime_toolchain_definition` 依赖 @rules_java//java ⇒ CI 上必须能从 distdir 取到。
 SKIP = {
     "six": "当前构建从不引用（Bazel 从未下载过）",
-    "rules_java": "只在 java toolchain 解析时用；本仓库没有 java 目标，且 coverage 已另作处理",
 }
 
 
