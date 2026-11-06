@@ -872,6 +872,45 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
         app.ssr_fade_hit_edge_px_ = 0.0f;
     }
 
+    // ── 侧边漏亮线定位（Danis 2026-11-06 16:47）──
+    // 机位照 HUD 复刻：pos ≈ (20.51, 0.80, 9.21) → 原心 ⇒ R≈22.5、仰角≈2°、方位≈66°。
+    // 出图：1:2（默认）/ 1:1 / 1:2 的 SSR 辐亮度（升采样前）/ 1:2 的 A。
+    // 判据：1:1 没有、1:2 有 ⇒ 升采样；1:1 也有 ⇒ SSR 侧（厚度/剪影）。
+    {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.0355f;
+        app.view_.theta = 1.148f;
+        app.view_.R     = 22.5f;
+        app.floor_preset_ = 0;
+        app.ssr_thickness_px_ = 6.0f;
+        app.ssr_max_ray_px_ = 220;
+        app.ssr_rough_to_lod_ = 8.0f;
+        app.ssr_rough_cutoff_ = 0.60f;
+        app.ssr_fade_budget_px_ = 0.0f;
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_fade_hit_edge_px_ = 0.0f;
+        app.ssr_backface_env_ = 1.0f;
+        app.ssr_debug_ = 0;
+        app.ssr_scale_ = 0.5f;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half.png").c_str());
+        app.ssr_scale_ = 1.0f;
+        app.RunOnce(input, winfo, (out_dir + "/leak_full.png").c_str());
+        app.ssr_scale_ = 0.5f;
+        app.ssr_debug_ = 3;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_radiance.png").c_str());
+        app.ssr_debug_ = 4;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_a.png").c_str());
+        // 直通 hdr（不过 SSR）与 1:1 的 A：用来排除"亮线来自 3D pass"，
+        // 并看 A 的凹陷在 1:1 下是否同样存在。
+        app.ssr_debug_ = 2;
+        app.RunOnce(input, winfo, (out_dir + "/leak_half_hdr.png").c_str());
+        app.ssr_debug_ = 4;
+        app.ssr_scale_ = 1.0f;
+        app.RunOnce(input, winfo, (out_dir + "/leak_full_a.png").c_str());
+        app.ssr_debug_ = 0;
+        app.ssr_scale_ = 0.5f;
+    }
+
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;
     app.Finalize();
     return 0;
