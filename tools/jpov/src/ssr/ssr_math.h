@@ -173,6 +173,9 @@ struct ScreenRay {
     float w1 = 0.0f;      // σ = span 处的 1/d
     float sigma_enter = 0.0f;  // 屏幕矩形裁剪后仍可见的 σ 区间
     float sigma_exit = 0.0f;
+    // 本射线所在的 SSR 栅格尺寸（像素）。只给"命中点到屏幕边的距离"用（见 HitConfidence）。
+    // 存在这里而不是当参数传：BuildScreenRay 本来就知道，且它与 s0/dir 是同一套坐标。
+    Vec2 res{0.0f, 0.0f};
     // true = 射线在 sigma_exit 处撞到屏幕边界（或近平面裁剪）；false = 走完了整段。
     // 只用于调试原因位（kSky vs kOffscreen），不参与取色。
 };
@@ -208,6 +211,7 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     const Vec2 s1{(nq.x * 0.5f + 0.5f) * w, (nq.y * 0.5f + 0.5f) * h};
     out->w0 = 1.0f / d0;
     out->w1 = 1.0f / d1;
+    out->res = Vec2{w, h};
 
     const Vec2 delta = s1 - out->s0;
     out->span = Length(delta);
@@ -264,13 +268,19 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 // A = "这个像素的答案有多少值得用"，∈ [0,1]。以前它是二值的（命中 1 / 未命中 0），
 // 于是"射线刚好在预算内命中"与"刚好差一格没命中"相邻时会硬切。现在乘上两个衰减：
 //
-//   d_budget = min(max_ray_pixels, ray.span) − σ   命中点离射线长度上限还有多远
-//   d_edge   = ray.sigma_exit − σ                  沿射线到出屏点还有多远
+//   d_budget = min(max_ray_pixels, ray.span) − σ     命中点离**射线长度上限**还有多远
+//   d_edge   = 命中点到**最近屏幕边**的距离           （图像空间，不是沿射线）
 //   A        = fade(d_budget, 预算带宽) · fade(d_edge, 边缘带宽)
 //
-// 为什么 d_edge 用 sigma_exit 而不是"命中点到最近屏幕边的欧氏距离"：平行于屏幕边飞的
-// 射线永远不会出屏（它只是**靠近**边），那里没有任何信息缺口；用欧氏距离会把一整条
-// 有效反射带无故压暗。sigma_exit 是 Liang–Barsky 的自然产物，本来就算过了。
+// 为什么 d_edge 用图像空间而不是 "ray.sigma_exit − σ"（沿射线到出屏点的距离）：
+//   后者看着更"正确"（它度量的是射线还能走多远），但**在掠射下会把整片倒影吃掉** ——
+//   掠射时地面反射的是远处物体，而这些命中点本来就贴近射线的出屏点，
+//   sigma_exit − σ 对所有"远处的倒影"都天然很小。实测（1280×720、近掠射、
+//   带宽 163 屏幕像素、其它旋钮全关）：倒影覆盖区里 A 的保留率只有 60.6%，
+//   全屏 10.8% 的像素被改动 —— 观感就是"镜面掠射直接糊成哑光"（Danis 2026-11-06 报）。
+//   图像空间的判据只在**真正贴着画面边框**的那一圈衰减，符合"给边缘留个像素 buffer"的本意。
+//   代价：一条平行于边框飞的射线，命中点贴着边框时也会被衰减 —— 但那只是沿边框的一条
+//   窄带，不会误伤画面中部的反射。
 //
 // 为什么 d_budget 用 min(max_ray_pixels, span)：米制上限（max_distance_m）或近平面
 // 裁剪可能先截断，此时射线的真实尽头与像素预算无关；只量像素轴会漏掉这两类。
@@ -289,13 +299,19 @@ inline float FadeWeight(float remain_px, float width_px) {
 }
 
 // 命中点 σ 处的 A。两个带宽相乘。
-// ⚠️ σ 必须与 max_ray_pixels / 带宽**同一空间**（本模块一律 SSR 像素；接入层负责把
+// ⚠️ σ / max_ray_pixels / 带宽**必须同一空间**（本模块一律 SSR 像素；接入层负责把
 //    屏幕像素的配置按 1/N 折下来）。
 inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixels,
                            float fade_budget_px, float fade_edge_px) {
     const float budget_limit = std::min(max_ray_pixels, ray.span);
-    return FadeWeight(budget_limit - sigma, fade_budget_px) *
-           FadeWeight(ray.sigma_exit - sigma, fade_edge_px);
+    const float a_budget = FadeWeight(budget_limit - sigma, fade_budget_px);
+    if (!(fade_edge_px > 0.0f)) {
+        return a_budget;   // 关闭时不必算位置（也避免 res 未填时算出负距离）
+    }
+    const Vec2 p = PosAt(ray, sigma);
+    const float d_edge = std::min(std::min(p.x, ray.res.x - p.x),
+                                  std::min(p.y, ray.res.y - p.y));
+    return a_budget * FadeWeight(d_edge, fade_edge_px);
 }
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────

@@ -635,7 +635,7 @@ int RunCaptureSsr(const std::string& out_dir) {
 // 出图（同一机位/光照/材质，只改三个旋钮）：
 //   falloff_off.png        两个带宽 = 0、k = 1 —— 旧行为（基准）
 //   falloff_budget.png     只开预算衰减（带宽 260 px）—— 倒影在"射线看不下去了" 处淡回 env
-//   falloff_edge.png       只开边缘衰减（带宽 600 px）—— 命中点贴着出屏点的倒影淡回 env
+//   falloff_edge.png       只开边缘衰减（带宽 600 px）—— 命中点贴着**画面边框**的倒影淡回 env
 //   falloff_both.png       两个都开 —— 交付档
 //   falloff_a_debug.png    调试档 4（A 灰度）：直接看权重场
 //   falloff_backface.png   调试档 5（背面标记灰度）：看 k 到底压在哪些像素上
@@ -691,9 +691,8 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
     app.ssr_fade_edge_px_   = 0.0f;
     app.RunOnce(input, winfo, (out_dir + "/falloff_budget.png").c_str());
 
-    // 边缘衰减给到 600 px 才看得见：这个场景里命中点普遍离"沿射线出屏点"很远
-    // （镜面地板反射的是屏幕中部的物体，射线还要再飞很久才出屏），140 px 的带子
-    // 实际一个像素都碰不到 —— 这是**场景属性**，不是判据失效。
+    // 边缘衰减给到 600 px 才看得见：这个机位下命中点普遍在画面中部，
+    // 140 px 的边带碰不到它们 —— 这是**场景属性**，不是判据失效。
     app.ssr_fade_budget_px_ = 0.0f;
     app.ssr_fade_edge_px_   = 600.0f;
     app.RunOnce(input, winfo, (out_dir + "/falloff_edge.png").c_str());
@@ -726,6 +725,72 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/falloff_short_budget_on.png").c_str());
     app.ssr_fade_budget_px_ = 0.0f;
     app.ssr_max_ray_px_ = saved_budget;
+
+    // ── 掠射诊断（2026-11-06 Danis 反馈"掠射时倒影没了，怀疑改坏"）──
+    // 复刻他当时的参数：1:2 / 厚度 6 / 预算 310 / 磨砂 5.61 / 门槛 0.60 /
+    // 预算带宽 10 / 边缘带宽 163 / k 分别取 1 和 0。
+    // 四张：k=1（关压暗）、k=0（旧观感对照）、背面标记、A 置信度。
+    app.view_.phi   = 0.06f;   // ≈3.4°：接近掠射
+    app.view_.theta = 0.15f;
+    app.view_.R     = 45.0f;
+    app.ssr_max_ray_px_ = 310;
+    app.ssr_thickness_px_ = 6.0f;
+    app.ssr_rough_to_lod_ = 5.61f;
+    app.ssr_rough_cutoff_ = 0.60f;
+    app.ssr_fade_budget_px_ = 10.0f;
+    app.ssr_fade_edge_px_ = 163.0f;
+    app.ssr_backface_env_ = 1.0f;
+    app.RunOnce(input, winfo, (out_dir + "/graze_k1.png").c_str());
+    app.ssr_backface_env_ = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/graze_k0.png").c_str());
+    app.ssr_debug_ = 5;
+    app.RunOnce(input, winfo, (out_dir + "/graze_backface.png").c_str());
+    app.ssr_debug_ = 4;
+    app.RunOnce(input, winfo, (out_dir + "/graze_a_debug.png").c_str());
+    // 隔离实验：同一帧，分别把两个衰减单独关掉，看是谁把 A 压下去的。
+    const float saved_fade_b = app.ssr_fade_budget_px_;
+    const float saved_fade_e = app.ssr_fade_edge_px_;
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/graze_a_nofade.png").c_str());
+    app.ssr_fade_budget_px_ = saved_fade_b;
+    app.RunOnce(input, winfo, (out_dir + "/graze_a_budget_only.png").c_str());
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = saved_fade_e;
+    app.RunOnce(input, winfo, (out_dir + "/graze_a_edge_only.png").c_str());
+    app.ssr_fade_budget_px_ = saved_fade_b;
+    app.ssr_debug_ = 0;
+    app.ssr_backface_env_ = 1.0f;
+
+    // 近距离掠射（复刻 Danis 截图那种"树在眼前、地面只剩一条"的视角）：
+    // 量背面标记的覆盖面，以及 k=0 在那里到底压掉多少东西。
+    const jpov_viewer::ViewConfig saved_view = app.view_;
+    app.view_.phi   = 0.03f;
+    app.view_.theta = 0.15f;
+    app.view_.R     = 16.0f;
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = 0.0f;
+    app.ssr_backface_env_ = 1.0f;
+    app.ssr_debug_ = 0;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_k1.png").c_str());
+    app.ssr_backface_env_ = 0.0f;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_k0.png").c_str());
+    app.ssr_backface_env_ = 1.0f;
+    app.ssr_debug_ = 5;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_bf.png").c_str());
+    app.ssr_debug_ = 4;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_a.png").c_str());
+    app.ssr_debug_ = 0;
+    // Danis 当时的两个衰减值（10 / 163），只开它们、k 保持 1：看他"发虚"到底是谁干的。
+    app.ssr_fade_budget_px_ = 10.0f;
+    app.ssr_fade_edge_px_ = 163.0f;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_fades.png").c_str());
+    app.ssr_debug_ = 4;
+    app.RunOnce(input, winfo, (out_dir + "/graze_near_a_fades.png").c_str());
+    app.ssr_debug_ = 0;
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = 0.0f;
+    app.view_ = saved_view;
 
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;
     app.Finalize();

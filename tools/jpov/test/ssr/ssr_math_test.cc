@@ -649,28 +649,48 @@ TEST(SsrMath, ConfidenceFades) {
     EXPECT_LT(HitConfidence(short_ray, 38.0f, 300.0f, 10.0f, 0.0f), 0.2f)
         << "只用 max_ray_pixels 判余量 ⇒ 短射线尽头的那次命中不会被衰减";
 
-    // ④ 边缘衰减按**沿射线到出屏点**的距离，而且必须是**不对称**的。
+    // ④ 边缘衰减按**命中点到最近屏幕边的距离**（图像空间），不是"沿射线到出屏点"。
+    //    这一组是 2026-11-06 的实测回归：后者在掠射下会把远处倒影整片吃掉。
     {
-        // 平行于左边飞的射线：命中点离左边只有 6 px，但它永远不会出屏（σ_exit 远）。
-        ScreenRay along_edge;
-        along_edge.s0 = Vec2{1.0f, 100.0f};
-        along_edge.dir = Vec2{1.0f, 0.0f};
-        along_edge.span = 400.0f;
-        along_edge.sigma_exit = 400.0f;
-        const float a = HitConfidence(along_edge, 5.0f, 300.0f, 0.0f, 20.0f);
-        EXPECT_FLOAT_EQ(a, 1.0f) << "离边 6 px 但不出屏 ⇒ 不该衰减";
-        // 负向对照：若按"到最近边的欧氏距离"判，这里会掉到 0.28。
-        EXPECT_LT(FadeWeight(/*到左边距离=*/6.0f, 20.0f), 0.5f)
-            << "那条错误实现其实会给出很小的权重 —— 证明上面那条断言有牙";
+        // 命中点 (306,100)（res 320×180）：离右边 14 px ⇒ 带宽 20 时 smoothstep(0.7)=0.784。
+        ScreenRay near_right;
+        near_right.s0 = Vec2{10.0f, 100.0f};
+        near_right.dir = Vec2{1.0f, 0.0f};
+        near_right.span = 400.0f;
+        near_right.sigma_enter = 0.0f;
+        near_right.sigma_exit = 310.0f;
+        near_right.res = Vec2{320.0f, 180.0f};
+        EXPECT_NEAR(HitConfidence(near_right, 296.0f, 1000.0f, 0.0f, 20.0f),
+                    FadeWeight(14.0f, 20.0f), 1.0e-6f);
     }
     {
-        // 反方向飞的射线：命中点离**出屏点**只有 10 px ⇒ 半程。
-        ScreenRay toward_edge;
-        toward_edge.s0 = Vec2{310.0f, 100.0f};
-        toward_edge.dir = Vec2{-1.0f, 0.0f};
-        toward_edge.span = 400.0f;
-        toward_edge.sigma_exit = 310.0f;   // x 从 310 走到 0
-        EXPECT_NEAR(HitConfidence(toward_edge, 300.0f, 300.0f, 0.0f, 20.0f), 0.5f, 1.0e-6f);
+        // 画面**中部**命中：pos=(170,90)、离四边的距离 {170,150,90,90}，全都 > 20 ⇒ A=1。
+        // 但它紧贴射线的出屏点（exit=165，s=160 ⇒ exit−s=5）。
+        // 沿射线判据会给出 FadeWeight(5,20)=0.156 —— 这就是"掠射倒影被整片吃掉"的形状。
+        ScreenRay mid;
+        mid.s0 = Vec2{10.0f, 90.0f};
+        mid.dir = Vec2{1.0f, 0.0f};
+        mid.span = 400.0f;
+        mid.sigma_enter = 0.0f;
+        mid.sigma_exit = 165.0f;
+        mid.res = Vec2{320.0f, 180.0f};
+        EXPECT_FLOAT_EQ(HitConfidence(mid, 160.0f, 1000.0f, 0.0f, 20.0f), 1.0f)
+            << "画面中部的命中被\"接近出屏点\"衰减了 ⇒ 掠射倒影会被整片吃掉";
+        // 负向对照：错误判据在同一位置只有 0.156，与 1.0 差 6 倍。
+        EXPECT_LT(FadeWeight(5.0f, 20.0f), 0.2f);
+    }
+    {
+        // 贴着**下**边框也必须算边：命中点 (160,13) ⇒ 离下边 13 px，带宽 20 ⇒ 0.35。
+        ScreenRay bottom;
+        bottom.s0 = Vec2{160.0f, 3.0f};
+        bottom.dir = Vec2{0.0f, 1.0f};
+        bottom.span = 400.0f;
+        bottom.sigma_enter = 0.0f;
+        bottom.sigma_exit = 177.0f;   // y 从 3 走到 180
+        bottom.res = Vec2{320.0f, 180.0f};
+        EXPECT_NEAR(HitConfidence(bottom, 10.0f, 1000.0f, 0.0f, 20.0f),
+                    FadeWeight(13.0f, 20.0f), 1.0e-6f)
+            << "下边框不是边";
     }
 
     // ⑤ 两个衰减相乘：任一为 0 ⇒ A=0。

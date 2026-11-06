@@ -229,7 +229,7 @@ struct SsrInputs {
     // 两个衰减带宽，单位 **SSR 像素**（不是屏幕像素 —— 接入层已按 1/N 折过）。
     //   0 = **关闭该衰减**（定义写清：0 不是"衰减 0 像素"）。
     // 算式：A = fade(min(max_ray_pixels, span) − s, fade_budget)
-    //            · fade(sigma_exit − s, fade_edge)
+    //            · fade(命中点到最近屏幕边的像素距离, fade_edge)
     // 详见 ssr_math.h 的 ②.5 节（唯一文字形式）。
     float fade_budget_pixels = 0.0f;  // ≥ 0
     float fade_edge_pixels = 0.0f;    // ≥ 0

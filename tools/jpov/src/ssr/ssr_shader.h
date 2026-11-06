@@ -252,10 +252,21 @@ float SsrFade(float remain_px, float width_px) {
 
 // ssr_math.h::HitConfidence。
 //   d_budget = min(uMaxRayPixels, span) − s    （米制上限 / 近平面可能先截断，所以取 min）
-//   d_edge   = exit − s                        （**沿射线**到出屏点，不是到最近边的欧氏距离）
+//   d_edge   = 命中点到**最近屏幕边**的距离（**图像空间**，不是沿射线到出屏点的距离）
+//
+// ⚠️ 为什么不是 `exit − s`（2026-11-06 实测改回来的）：掠射时地面反射的是远处物体，
+//    这些命中点本来就贴着射线的出屏点 ⇒ `exit − s` 对所有"远处的倒影"都天然很小 ⇒
+//    带宽 163 屏幕像素时倒影覆盖区的 A 只剩 60.6%（全屏 10.8% 像素被改）⇒ 镜面掠射
+//    直接糊成哑光。理由与实测数字见 ssr_math.h 的 ②.5 节。
 float SsrHitConfidence(SsrRay ray, float s) {
     float budget_limit = min(uMaxRayPixels, ray.span);
-    return SsrFade(budget_limit - s, uFadeBudget) * SsrFade(ray.exit - s, uFadeEdge);
+    float a_budget = SsrFade(budget_limit - s, uFadeBudget);
+    if (!(uFadeEdge > 0.0)) {
+        return a_budget;
+    }
+    vec2 p = ray.s0 + ray.dir * s;
+    float d_edge = min(min(p.x, uRes.x - p.x), min(p.y, uRes.y - p.y));
+    return a_budget * SsrFade(d_edge, uFadeEdge);
 }
 
 )glsl";
