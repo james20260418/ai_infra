@@ -151,6 +151,22 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# 矩阵小工具（header-only）：4x4 列主序求逆。雾的 froxel 构建与合成趟共用一份。
+cc_library(
+    name = "matrix_util",
+    hdrs = ["matrix_util.h"],
+    visibility = ["//visibility:public"],
+)
+
+# 透明层契约（header-only POD）：任何 WBO 解算结果喂给合成器的统一形态。
+# 见 transparent_layer.h（合成器只认层，不认层是谁生产的）。
+cc_library(
+    name = "transparent_layer",
+    hdrs = ["transparent_layer.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@glog_static//:glog"],
+)
+
 # InstanceBuffer — 一次 Instanced draw 的 per-instance attribute 数据缓冲。
 # 实例数据属于「这次 draw」（每帧由调用方给），不属于不可变几何（GPUMesh），
 # 故由渲染器持有、跨 draw 复用，draw 前临时挂到 mesh VAO（RAII 配对，见头文件）。
@@ -390,7 +406,8 @@ cc_library(
         ":horizon_fog_renderer",
         ":env_specular",
         "//tools/jpov/src/ssr:ssr_integration",
-        "//tools/jpov/src/fire_fog:fire_fog_renderer",
+        "//tools/jpov/src/fog:fog_composite_renderer",
+        "//tools/jpov/src/fog:fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
         "//tools/jpov/src/strip:strip_renderer",

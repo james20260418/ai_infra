@@ -1,7 +1,7 @@
 # JPOV Froxel 体积雾 —— 屏幕空间摊销 Z 轴采样（设计草案）
 
 > 状态：**已实现（froxel MVP，PR #163）**。作者：James / Danis。日期：2026-10-09（2026-10-10 随实现同步）。
-> 关联：`jpov_fire_fog_design.md`（点状雾 + 逐像素 ZDist）、`jpov_tpz_volumetric_fog_design.md`、`jpov_volumetric_fog_design.md`。
+> 关联：`jpov_fog_design.md`（点状雾 + 逐像素 ZDist）、`jpov_tpz_volumetric_fog_design.md`、`jpov_volumetric_fog_design.md`。
 >
 > 目标：把「沿 z 的体积散射积分」从「**每全屏像素 × 多次深度采样**」摊销到
 > 「**低分辨率 froxel 网格 + 屏幕空间并行**」，根治当前 ZDist 管线的两个顽疾：
@@ -20,7 +20,7 @@
 
 froxel 网格 = 视锥对齐 3D：`Nxy`（低分辨率屏幕 tile）× `Nz`（**指数分布**的 z 切片）。
 **MVP 参数（第一轮）：`Nz=256`、`tile=16px`、`near=0.1m`、`far=2000m`**。
-实现里 `Nz` 与 `tile_px` 是**两个独立自由度**（`FireFogParams::nz / tile_px`）：
+实现里 `Nz` 与 `tile_px` 是**两个独立自由度**（`FogParams::nz / tile_px`）：
 `Nxy = ⌈W/tile_px⌉ × ⌈H/tile_px⌉`、每柱边长 `sblock=√nz`、超屏倍数 `k = sblock/tile_px`（每轴）；
 耗时 ∝ `Nxy·Nz` = `k²`（只有加 `k` 才涨，`Nz↔Nxy` 平移免费）。
 用**「2D 铺砖」**把一个 3D froxel 柱编进一块 `sblock×sblock` 纹理区域
@@ -34,7 +34,7 @@ Inject 做成**金字塔** `L1(满) → L2(½) → L3(¼) → L4(⅛)`：每级�
 
 ## 1. 背景与动机
 
-现有 `jpov_fire_fog_design.md` 管线：逐（低分辨率）屏幕像素沿视线叠加雾团的 z 段 → ZDist →
+现有 `jpov_fog_design.md` 管线：逐（低分辨率）屏幕像素沿视线叠加雾团的 z 段 → ZDist →
 屏幕空间高斯去噪 → 合成。实测暴露：
 
 - **噪声源头是「每像素沿 z 的深度样本数」**（M）。噪声 ∝ 1/√M，从深度方向漏进屏幕方向；
@@ -191,7 +191,7 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
 4. **`Nz` 与 `tile_px` 是两个独立自由度**（不再是「Nz = tile 像素数」的老约束）：
    `nz` 须为**4 的幂**（`sblock=√nz` 为 2 的幂，金字塔才能整齐 4 合 1）；`tile_px` 为屏幕像素。
    超屏倍数 `k = sblock/tile_px`；`k>1` = 过采样、`k<1` = froxel 比屏幕粗。
-   `nz` 与 `tile_px` 各自还有合法范围与派生 froxel 纹理尺寸上限（实现里 `FireFogRenderer` 会 CHECK）。
+   `nz` 与 `tile_px` 各自还有合法范围与派生 froxel 纹理尺寸上限（实现里 `FogRenderer` 会 CHECK）。
 5. **L1 inject 用 tile 中心视线**（不是像素自己视线）；froxel = 整柱一个值。
 6. **空 froxel = 恒等**（τ=0,S=0，T=1,S=0）。
 7. **薄/锐介质**（厚玻璃若厚度<切片厚度）：网格表示不了 ⇒ per-object 解析（§7）。
@@ -215,13 +215,13 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
 - **表面型透明（玻璃只反射/菲涅尔）**：不进 froxel；Composite 按**该表面精确深度**截前缀
   （froxel 低分辨率只软化「雾自身」细节，**不**软化「雾被物体裁切」的剪影）。
 - **多层透明**：逐层按自身深度读前缀（§2.3 区间反解），front-to-back 合成。
-- **光照**：inject 阶段接现有 CSM（太阳）+ ambient + 相位（god ray），与 `jpov_fire_fog_design.md` 同源。
+- **光照**：inject 阶段接现有 CSM（太阳）+ ambient + 相位（god ray），与 `jpov_fog_design.md` 同源。
 
 ---
 
 ## 8. 与现有 ZDist 管线的关系
 
-| | 现有 ZDist（`jpov_fire_fog_design.md`） | 本设计（froxel） |
+| | 现有 ZDist（`jpov_fog_design.md`） | 本设计（froxel） |
 |---|---|---|
 | z 表示 | 每像素**自适应断点 ≤8** | 固定密集**指数 z 网格 Nz** |
 | 载体 | 6 texel/像素打包 | 主 FBO 尺寸 2D 铺砖（编 3D froxel） |
@@ -238,7 +238,7 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
       还是 compute（一线程/柱串行）——两者都可行，后者更简单但需要 compute 支持；
 - [ ] inject 的**切片内积分**（Frostbite 式）vs 中心点采样（近似）取舍；
 - [ ] 金字塔是否再加一级（L5）或改 base 8，权衡合并次数 vs 带宽；
-- [ ] 与现有 `Renderer` 的多趟/ FBO 复用、以及 **不踩 2D/字体状态**（见 fire_fog 的 blend-func 教训）；
+- [ ] 与现有 `Renderer` 的多趟/ FBO 复用、以及 **不踩 2D/字体状态**（见 fog 的 blend-func 教训）；
 - [ ] 时域重投影（TAA/EMA）进一步降噪（可选，本设计已从源头减噪）。
 
 ---

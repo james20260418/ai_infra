@@ -2,7 +2,7 @@
 """make_flipbook.py — 把 .jpovvol 体积（density+temperature 或 density-only）离线渲染成
 广告牌粒子用的 flipbook 序列帧贴图（PNG）。
 
-用途：给 `jpov_fire_fog_viewer` 的「粒子火」场景产出**真火纹理**（源自 Mantaflow 烘的
+用途：给 `jpov_fog_viewer` 的「粒子火」场景产出**真火纹理**（源自 Mantaflow 烘的
 火体积），或产出**黑烟**用的 puff flipbook。所有重活留在离线；引擎运行期只读 PNG。
 
 体数据格式（JPVOL1/JPVOL2）单一来源见同目录 `jpvol.py`：帧内 x 最快 → y → z，通道交错。

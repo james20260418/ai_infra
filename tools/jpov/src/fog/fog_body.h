@@ -1,6 +1,6 @@
-// JPOV FireFog — 后端「团」（FogBody）数据模型
+// JPOV Fog — 后端「团」（FogBody）数据模型
 //
-// 设计见 tools/jpov/docs/jpov_fire_fog_design.md §10。
+// 设计见 tools/jpov/docs/jpov_fog_design.md §10。
 //
 // 一切雾火效果（火 / 烟 / 薄雾 / 浪花 / 冲击波 …）在**命令层**各是不同子 command，
 // 但到**后端**统一降维成一种「团」= FogBody：
@@ -9,10 +9,10 @@
 //   - 其余（tile 剪枝 / ZDist 累加 / 末端积分）与 kind 无关（见设计文档 §10.4）。
 //
 // ⚠️ 本头文件只放**数据模型**（GL-free、可单测）；tile 剪枝与 pass 实现在
-// fire_fog_renderer.{h,cc}（见设计文档 §10.6 的 M1a）。
+// fog_renderer.{h,cc}（见设计文档 §10.6 的 M1a）。
 
-#ifndef JPOV_SRC_FIRE_FOG_FOG_BODY_H_
-#define JPOV_SRC_FIRE_FOG_FOG_BODY_H_
+#ifndef JPOV_SRC_FOG_FOG_BODY_H_
+#define JPOV_SRC_FOG_FOG_BODY_H_
 
 #include <cstdint>
 
@@ -64,8 +64,8 @@ struct FogBody {
 // **定长 tagged union**：每团的 texel 数（stride）对所有 kind 一致；公共头（前 2 texel）
 // 含义固定，其后是 union 区（按 kind 解释）。第一个字段 = kind（类型判别子）。
 //
-// ⚠️ 本表与 fire_fog_shader.h 里的 GLSL 布局（`//@FOGLAYOUT` 标记 + FOG_TEXELS_PER_BODY）
-//    必须逐项一致 —— 无编译器强制 ⇒ 用契约单测（fire_fog_contract_test.cc）解析 GLSL 字符串
+// ⚠️ 本表与 fog_shader.h 里的 GLSL 布局（`//@FOGLAYOUT` 标记 + FOG_TEXELS_PER_BODY）
+//    必须逐项一致 —— 无编译器强制 ⇒ 用契约单测（fog_contract_test.cc）解析 GLSL 字符串
 //    与本表比对。改布局：两处一起改，单测会抓漏。
 // ─────────────────────────────────────────────────────────────────────────────
 struct FogBodyLayoutEntry {
@@ -95,4 +95,4 @@ inline constexpr FogBodyLayoutEntry kFogBodyLayout[] = {
 
 }  // namespace jpov
 
-#endif  // JPOV_SRC_FIRE_FOG_FOG_BODY_H_
+#endif  // JPOV_SRC_FOG_FOG_BODY_H_

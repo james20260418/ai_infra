@@ -1,15 +1,14 @@
-// JPOV Fire-Fog 点光源雾散射 gold image test
+// JPOV Fog froxel gold image test
 //
-// 用固定场景渲染（见 fire_fog_gold_common.h 的 FireFogPointLightGoldApp：单个点雾 +
-// 一盏暖色点光源），与仓库 gold
-//   tools/jpov/test/fire_fog/fire_fog_pointlight_1280x720.png
-// 比对，验证 **fire_fog 消费点光源**（自持 Nxy tile culling + 点光内散射）没退化。
+// 用固定场景渲染（见 fog_gold_common.h），与仓库 gold
+//   tools/jpov/test/fog/fog_godray_1280x720.png
+// 比对，验证 froxel 体积雾（inject/scatter/composite）+ CSM god ray 链路没退化。
 //
 // 比对方式：与其它光照 gold 一致，用 **8×8 平铺 ROI 的块内平均色** 比对
 //（llvmpipe 软渲染下逐像素不可靠，见 compare_light.h），门禁 = 最大通道均值差。
 //
 // 运行：
-//   bazel test //tools/jpov/test/fire_fog:jpov_fire_fog_pointlight_gold_test
+//   bazel test //tools/jpov/test/fog:jpov_fog_gold_test
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,14 +20,14 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/test/compare_light.h"
-#include "tools/jpov/test/fire_fog/fire_fog_gold_common.h"
+#include "tools/jpov/test/fog/fog_gold_common.h"
 #include "tools/jpov/test/test_utils.h"
 
 namespace {
 
 std::string GoldPath() {
-    return jpov::GetTestDataDir() + "/fire_fog/" +
-           jpov_fire_fog_gold::kPointLightGoldPngName;
+    return jpov::GetTestDataDir() + "/fog/" +
+           jpov_fog_gold::kGoldPngName;
 }
 
 }  // namespace
@@ -40,26 +39,26 @@ int main() {
     {
         FILE* f = std::fopen(gold_path.c_str(), "rb");
         CHECK(f != nullptr)
-            << "gold image 缺失，请先跑 jpov_fire_fog_pointlight_gold_generator: " << gold_path;
+            << "gold image 缺失，请先跑 jpov_fog_gold_generator: " << gold_path;
         std::fclose(f);
         LOG(INFO) << "gold image 存在: " << gold_path;
     }
 
     // 1. 渲染到 output。
-    const std::string outdir = jpov::GetOutputDir() + "jpov_fire_fog_pointlight_gold_test/";
+    const std::string outdir = jpov::GetOutputDir() + "jpov_fog_gold_test/";
     std::system(("mkdir -p " + outdir).c_str());
     const std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "JPOV Fire-Fog Point-Light Gold Test";
+    cfg.title = "JPOV Fog Gold Test";
     cfg.headless = true;
-    jpov_fire_fog_gold::FireFogPointLightGoldApp app(cfg);
+    jpov_fog_gold::FogGoldApp app(cfg);
     app.Init();
     app.Install();
 
     jpov::WindowInfo winfo;
-    winfo.width  = static_cast<float>(jpov_fire_fog_gold::kResW);
-    winfo.height = static_cast<float>(jpov_fire_fog_gold::kResH);
+    winfo.width  = static_cast<float>(jpov_fog_gold::kResW);
+    winfo.height = static_cast<float>(jpov_fog_gold::kResH);
     jpov::InputSnapshot input{};
     app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
@@ -92,11 +91,11 @@ int main() {
     }
     if (max_diff > kThreshold) {
         LOG(ERROR) << "LIGHT COMPARE FAILED: max-channel-mean-diff=" << max_diff
-                   << " > threshold=" << kThreshold << " → fire_fog 点光源散射回归！";
+                   << " > threshold=" << kThreshold << " → fog 回归！";
         return 1;
     }
 
-    LOG(INFO) << "TEST PASSED: fire_fog 点光源 gold 匹配 (max-channel-mean-diff="
+    LOG(INFO) << "TEST PASSED: fog gold 匹配 (max-channel-mean-diff="
               << max_diff << ")";
     return 0;
 }

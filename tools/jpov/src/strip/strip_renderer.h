@@ -75,7 +75,7 @@
 
 namespace jpov {
 
-// CSM（级联阴影）输入：与 object3d / fire_fog **同一套资源**，由 Renderer 填。
+// CSM（级联阴影）输入：与 object3d / fog **同一套资源**，由 Renderer 填。
 //
 // 为什么是「外部填」而不是渲染器自己找：阴影 pass 属于主链路（Renderer 持有
 // shadow_fbos_ / 各级联矩阵），条带只是一个 effect pass，不该反过来持有它。
@@ -505,7 +505,7 @@ uniform float uSkyInjection;
 // 阴影开关：**与天光同一个开关** —— 有 sky_light 就采样 CSM 调制太阳项，没有独立开关。
 // 天光项（ambient）不乘阴影：环境光不该被直射光的影子遮住。
 // 条带自身仍不参与阴影生成（不写 shadow map，那需要给半透明片单开一次 shadow pass）。
-// 采样是**单级联单次采样、无 PCF**（实现见 csm_shadow_glsl.h，与 fire_fog 共用）。
+// 采样是**单级联单次采样、无 PCF**（实现见 csm_shadow_glsl.h，与 fog 共用）。
 uniform int uHasCsm;   // 0 = 不做阴影（无太阳 / 无级联）
 
 // 天光辐亮度（线性 HDR）。N 可以非单位（导数叉积/曲面叉积都有长度）：
