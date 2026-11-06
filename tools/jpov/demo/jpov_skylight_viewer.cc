@@ -839,7 +839,22 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
         app.ssr_fade_budget_px_ = 0.0f;
         app.ssr_max_ray_px_ = 220;
 
+        // 边缘衰减扫描（同机位）：0 / 100 / 200 / 400。
+        // 判据是**反射体像素**到最近边的距离 ⇒ 四条边都该出现渐变
+        // （Danis 2026-11-06 15:28 报"左下角只有水平渐变、没有上下渐变"）。
+        app.ssr_debug_ = 4;
+        for (int i = 0; i < 4; ++i) {
+            const float we[4] = {0.0f, 100.0f, 200.0f, 400.0f};
+            char name[64];
+            app.ssr_fade_edge_px_ = we[i];
+            std::snprintf(name, sizeof(name), "/edge_a_w%03d.png", static_cast<int>(we[i]));
+            app.RunOnce(input, winfo, (out_dir + name).c_str());
+        }
+        app.ssr_fade_edge_px_ = 0.0f;
         app.ssr_debug_ = 0;
+        app.ssr_fade_edge_px_ = 200.0f;
+        app.RunOnce(input, winfo, (out_dir + "/edge_w200.png").c_str());
+        app.ssr_fade_edge_px_ = 0.0f;
     }
 
     LOG(INFO) << "SSR 柔和过渡 captured to " << out_dir;

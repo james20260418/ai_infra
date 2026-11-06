@@ -252,7 +252,7 @@ float SsrFade(float remain_px, float width_px) {
 
 // ssr_math.h::HitConfidence。
 //   d_budget = min(uMaxRayPixels, span) − s    （米制上限 / 近平面可能先截断，所以取 min）
-//   d_edge   = 命中点到**最近屏幕边**的距离（**图像空间**，不是沿射线到出屏点的距离）
+//   d_edge   = **反射体像素**到最近屏幕边的距离（图像空间；不是沿射线，也不是命中点）
 //
 // ⚠️ 为什么不是 `exit − s`（2026-11-06 实测改回来的）：掠射时地面反射的是远处物体，
 //    这些命中点本来就贴着射线的出屏点 ⇒ `exit − s` 对所有"远处的倒影"都天然很小 ⇒
@@ -267,7 +267,10 @@ float SsrHitConfidence(SsrRay ray, float s) {
     if (!(uFadeEdge > 0.0)) {
         return a_budget;
     }
-    vec2 p = ray.s0 + ray.dir * s;
+    // 用**反射体像素**（ray.s0，σ=0 处）到最近边的距离，不是命中点：
+    // 倒影在屏幕上的位置是镜子像素；命中点可能在画面上方/横向很远。
+    // 用命中点算 ⇒ 角落里的倒影只有水平渐变、没有上下渐变（2026-11-06 实测）。
+    vec2 p = ray.s0;
     float d_edge = min(min(p.x, uRes.x - p.x), min(p.y, uRes.y - p.y));
     return a_budget * SsrFade(d_edge, uFadeEdge);
 }

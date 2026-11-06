@@ -654,48 +654,54 @@ TEST(SsrMath, ConfidenceFades) {
     EXPECT_LT(HitConfidence(short_ray, 38.0f, 40.0f, 10.0f, 0.0f), 0.2f)
         << "真的用完预算时不衰减 ⇒ 那条本测试要防的硬缝还在";
 
-    // ④ 边缘衰减按**命中点到最近屏幕边的距离**（图像空间），不是"沿射线到出屏点"。
-    //    这一组是 2026-11-06 的实测回归：后者在掠射下会把远处倒影整片吃掉。
+    // ④ 边缘衰减按**反射体像素**（ray.s0）到最近屏幕边的距离。
+    //    两次实测教训（2026-11-06）：
+    //      · 用"沿射线到出屏点"⇒ 掠射时整片远处倒影被压掉；
+    //      · 用"命中点"⇒ 画面左下角的倒影只有水平渐变、没有上下渐变
+    //        （倒影的位置是镜子像素，命中点在镜子里反射到的物体上，画面上方/横向都远）。
     {
-        // 命中点 (306,100)（res 320×180）：离右边 14 px ⇒ 带宽 20 时 smoothstep(0.7)=0.784。
-        ScreenRay near_right;
-        near_right.s0 = Vec2{10.0f, 100.0f};
-        near_right.dir = Vec2{1.0f, 0.0f};
-        near_right.span = 400.0f;
-        near_right.sigma_enter = 0.0f;
-        near_right.sigma_exit = 310.0f;
-        near_right.res = Vec2{320.0f, 180.0f};
-        EXPECT_NEAR(HitConfidence(near_right, 296.0f, 1000.0f, 0.0f, 20.0f),
-                    FadeWeight(14.0f, 20.0f), 1.0e-6f);
+        // 镜子像素 (10,100)：离左边 10 px ⇒ 带宽 20 时 fade(10,20)=0.5（水平方向）。
+        ScreenRay left;
+        left.s0 = Vec2{10.0f, 100.0f};
+        left.dir = Vec2{1.0f, 0.0f};
+        left.span = 400.0f;
+        left.sigma_enter = 0.0f;
+        left.sigma_exit = 310.0f;
+        left.res = Vec2{320.0f, 180.0f};
+        EXPECT_NEAR(HitConfidence(left, 296.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(10.0f, 20.0f),
+                    1.0e-6f);
     }
     {
-        // 画面**中部**命中：pos=(170,90)、离四边的距离 {170,150,90,90}，全都 > 20 ⇒ A=1。
-        // 但它紧贴射线的出屏点（exit=165，s=160 ⇒ exit−s=5）。
-        // 沿射线判据会给出 FadeWeight(5,20)=0.156 —— 这就是"掠射倒影被整片吃掉"的形状。
+        // 镜子像素 (160,3)：离**下**边 3 px ⇒ 必须衰减（"下边也是边"，这条是第二次报的 bug）。
+        ScreenRay bottom;
+        bottom.s0 = Vec2{160.0f, 3.0f};
+        bottom.dir = Vec2{0.0f, 1.0f};
+        bottom.span = 400.0f;
+        bottom.sigma_enter = 0.0f;
+        bottom.sigma_exit = 177.0f;
+        bottom.res = Vec2{320.0f, 180.0f};
+        EXPECT_NEAR(HitConfidence(bottom, 10.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(3.0f, 20.0f),
+                    1.0e-6f)
+            << "下边框不是边";
+        // 角上（离两边都近）取更小的那个：镜子像素 (4,5) ⇒ min(4,174,5,175)=4。
+        ScreenRay corner = bottom;
+        corner.s0 = Vec2{4.0f, 5.0f};
+        EXPECT_NEAR(HitConfidence(corner, 10.0f, 1000.0f, 0.0f, 20.0f), FadeWeight(4.0f, 20.0f),
+                    1.0e-6f);
+    }
+    {
+        // 镜子像素在画面中部 (160,90) ⇒ A=1，**哪怕命中点贴着右边/出屏点**。
+        // 负向对照：按命中点算（hit=(306,100) ⇒ 离右边 14px）会给出 0.784，与 1.0 明显不同。
         ScreenRay mid;
-        mid.s0 = Vec2{10.0f, 90.0f};
+        mid.s0 = Vec2{160.0f, 90.0f};
         mid.dir = Vec2{1.0f, 0.0f};
         mid.span = 400.0f;
         mid.sigma_enter = 0.0f;
         mid.sigma_exit = 165.0f;
         mid.res = Vec2{320.0f, 180.0f};
         EXPECT_FLOAT_EQ(HitConfidence(mid, 160.0f, 1000.0f, 0.0f, 20.0f), 1.0f)
-            << "画面中部的命中被\"接近出屏点\"衰减了 ⇒ 掠射倒影会被整片吃掉";
-        // 负向对照：错误判据在同一位置只有 0.156，与 1.0 差 6 倍。
-        EXPECT_LT(FadeWeight(5.0f, 20.0f), 0.2f);
-    }
-    {
-        // 贴着**下**边框也必须算边：命中点 (160,13) ⇒ 离下边 13 px，带宽 20 ⇒ 0.35。
-        ScreenRay bottom;
-        bottom.s0 = Vec2{160.0f, 3.0f};
-        bottom.dir = Vec2{0.0f, 1.0f};
-        bottom.span = 400.0f;
-        bottom.sigma_enter = 0.0f;
-        bottom.sigma_exit = 177.0f;   // y 从 3 走到 180
-        bottom.res = Vec2{320.0f, 180.0f};
-        EXPECT_NEAR(HitConfidence(bottom, 10.0f, 1000.0f, 0.0f, 20.0f),
-                    FadeWeight(13.0f, 20.0f), 1.0e-6f)
-            << "下边框不是边";
+            << "画面中部的镜子像素被\"命中点贴边\"压掉了";
+        EXPECT_LT(FadeWeight(14.0f, 20.0f), 0.9f) << "负向对照应当是明显 <1 的";
     }
 
     // ⑤ 两个衰减相乘：任一为 0 ⇒ A=0。

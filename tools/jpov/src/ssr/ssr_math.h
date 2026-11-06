@@ -269,7 +269,7 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 // 于是"射线刚好在预算内命中"与"刚好差一格没命中"相邻时会硬切。现在乘上两个衰减：
 //
 //   d_budget = max_ray_pixels − σ                    命中点离**march 预算**还有多远
-//   d_edge   = 命中点到**最近屏幕边**的距离           （图像空间，不是沿射线）
+//   d_edge   = **反射体像素**到最近屏幕边的距离       （图像空间，不是沿射线）
 //   A        = fade(d_budget, 预算带宽) · fade(d_edge, 边缘带宽)
 //
 // 为什么 d_edge 用图像空间而不是 "ray.sigma_exit − σ"（沿射线到出屏点的距离）：
@@ -312,7 +312,12 @@ inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixe
     if (!(fade_edge_px > 0.0f)) {
         return a_budget;   // 关闭时不必算位置（也避免 res 未填时算出负距离）
     }
-    const Vec2 p = PosAt(ray, sigma);
+    // 用**反射体像素**（ray.s0 = σ=0 处）到最近边的距离，不是命中点的。
+    // 为什么（2026-11-06 Danis 第二次验收）：倒影"看起来在屏幕上的位置"是**镜子像素**，
+    // 命中点在镜子里被反射到的那个物体上（通常在画面上方、甚至横向很远）。
+    // 用命中点算 ⇒ 左下角的倒影只会出现"水平渐变"、没有"上下渐变"（实测如此）。
+    // 用镜子像素算 ⇒ 四条边对称，角上是二维渐变，与"给屏幕边缘留个 buffer"的直觉一致。
+    const Vec2 p = ray.s0;
     const float d_edge = std::min(std::min(p.x, ray.res.x - p.x),
                                   std::min(p.y, ray.res.y - p.y));
     return a_budget * FadeWeight(d_edge, fade_edge_px);
