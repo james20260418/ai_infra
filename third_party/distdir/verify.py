@@ -63,18 +63,31 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
-def main() -> int:
-    if not os.path.exists(DEPS_BZL):
-        print(f"FAIL 找不到 {DEPS_BZL}")
+def main(argv: list[str]) -> int:
+    deps_bzl = argv[1] if len(argv) > 1 else DEPS_BZL  # 参数只为测试用
+    if not os.path.exists(deps_bzl):
+        print(f"FAIL 找不到 {deps_bzl}")
         return 1
 
-    declared = parse_deps(DEPS_BZL)
+    declared = parse_deps(deps_bzl)
     if not declared:
-        print(f"FAIL 没能从 {DEPS_BZL} 解析出任何 http_archive（格式变了？）")
+        print(f"FAIL 没能从 {deps_bzl} 解析出任何 http_archive（格式变了？）")
         return 1
 
     problems: list[str] = []
     warnings: list[str] = []
+
+    # distdir 只按 URL basename 找文件（Bazel 5 没有 sha256 兜底，实测），
+    # 两个 archive 撞 basename 时永远只有一个能被命中，必须报出来。
+    seen: dict[str, str] = {}
+    for dep in declared:
+        fn = os.path.basename(urllib.parse.urlparse(dep["url"]).path)
+        if fn in seen:
+            problems.append(
+                f"basename 冲突：{seen[fn]} 与 {dep['name']} 的 URL 都叫 {fn}（distdir 无法区分）"
+            )
+        else:
+            seen[fn] = dep["name"]
     expected_files: set[str] = set()
     known_files: set[str] = set()   # 声明过的全部（含 SKIP），用于孤儿判定
 
@@ -122,4 +135,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

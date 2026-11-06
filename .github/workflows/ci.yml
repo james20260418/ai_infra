@@ -23,8 +23,15 @@ jobs:
           chmod +x bazelisk-linux-amd64
           sudo mv bazelisk-linux-amd64 /usr/local/bin/bazel
 
-      - name: Build (Linux)
-        run: bazel build //...
+      # --experimental_repository_disable_download：禁掉所有 @repo 的联网下载。
+      # 第三方包全部来自 third_party/distdir/（见 docs/jpov_environment.md §4）。
+      # 加这个 flag 是把「断网可构建」变成 CI 的受检属性：谁加了新的 http_archive
+      # 却没把 tarball 放进 distdir，这里立刻红，而不是等真断网那天才发现。
+      - name: Verify offline deps (distdir)
+        run: python3 third_party/distdir/verify.py
+
+      - name: Build (Linux, offline deps)
+        run: bazel build //... --experimental_repository_disable_download
 
       - name: Setup Xvfb
         run: |
@@ -33,8 +40,8 @@ jobs:
           sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Test (Linux)
-        run: bazel test //...
+      - name: Test (Linux, offline deps)
+        run: bazel test //... --experimental_repository_disable_download
         env:
           DISPLAY: :99
 
@@ -53,12 +60,13 @@ jobs:
       - name: Install MinGW cross-compiler
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
 
-      - name: Build (Windows cross-compile)
+      - name: Build (Windows cross-compile, offline deps)
         # 每个交互式 viewer 都有 .exe 变体（build_<viewer>.sh --windows 编的就是它）。
         # 全列在这里，免得某个 viewer 的 Windows 链路（MinGW 宏冲突 / 缺符号）烂掉
         # 却没人发现 —— 这类问题在 Linux 侧一次都不会暴露。
+        # 同样禁网络：Windows 链路用的 rules_cc / zlib 等也必须从 distdir 取。
         run: |
-          bazel build --config=windows \
+          bazel build --config=windows --experimental_repository_disable_download \
             //demo/... \
             //tools/jpov:jpov_demo.exe \
             //tools/jpov:jpov_skylight_viewer.exe \
