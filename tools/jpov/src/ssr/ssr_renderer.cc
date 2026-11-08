@@ -42,6 +42,7 @@ namespace {
 constexpr int kTexUnitMarchDepth = 0;
 constexpr int kTexUnitMarchNormal = 1;
 constexpr int kTexUnitMarchRough = 2;
+constexpr int kTexUnitMarchThick = 3;   // R32F：真实厚度（背面 pass）
 constexpr int kTexUnitResolveSlice = 0;
 constexpr int kTexUnitResolveDepth = 1;
 constexpr int kTexUnitResolveNormal = 2;
@@ -348,9 +349,13 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchThick);
+    glBindTexture(GL_TEXTURE_2D, in.thick_tex);
     set1i(prog_march_, "uW", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
+    set1i(prog_march_, "uThick", kTexUnitMarchThick);
+    set1i(prog_march_, "uRealThickness", in.use_real_thickness ? 1 : 0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──

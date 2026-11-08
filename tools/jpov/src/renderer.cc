@@ -1785,12 +1785,18 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 注意用 Render 的**局部** fbo_3d_w/h（成员 fbo_3d_w_ 只在 LDR 路径赋值）。
             // 返回 false = 本帧一个 ssr_reflector 都没有 ⇒ 属性纹理不存在/是旧帧残留，
             // 整条链路（属性 pass / 降采样 / 模块 / 合成）一起跳过（见该函数注释）。
+            // 背面深度 pass（可选）：必须在属性 pass **之前**跑，因为属性 pass 会改 GL 状态/
+            // 绑定 FBO；两趟互不依赖，顺序只为把状态改动集中在前。
+            if (cmds.ssr->backface_depth) {
+                DrawBackfaceDepthPass(cmds);
+            }
             if (DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h)) {
                 SsrPassInputs ssi;
                 ssi.hdr_color_tex = color_tex_hdr_;
                 ssi.scene_depth_tex = scene_depth_tex_hdr_;
                 ssi.attr_tex = ssr_attr_tex_;
                 ssi.attr_mat_tex = ssr_attr_mat_tex_;
+                ssi.backface_depth_tex = cmds.ssr->backface_depth ? backface_depth_tex_ : 0;
                 ssi.full_w = fbo_3d_w;
                 ssi.full_h = fbo_3d_h;
                 ssi.near_plane = cmds.camera.near;
@@ -2526,6 +2532,129 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
 
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+}
+
+
+// ── 背面深度 pass（z_back，2026-11-08）──────────────────────────────────────
+//
+// 与 CSM 阴影 pass 同构：相机视角、只写深度、不跑光照。三处差异：
+//   ① `glCullFace(GL_FRONT)`（只留背面）；
+//   ② 矩阵是**相机**的（vp = 主 pass 同一个 MVP；dvp = 沿相机 view 轴的线性深度）；
+//   ③ 目标是一张很宽的浮点纹理（不是级联数组），.r 存米制正向距离。
+//
+// 为什么写颜色而不是深度附件：llvmpipe 下采样深度纹理不可靠（见 EnsureShadowFBO 的注释）。
+// 哨兵 1e16 = "该像素没有背面"（单面卡片 / 天空），消费端据此退回经验厚度。
+void Renderer::DestroyBackfaceDepthFBO() {
+    if (backface_fbo_ != 0) {
+        glDeleteFramebuffers(1, &backface_fbo_);
+        backface_fbo_ = 0;
+    }
+    if (backface_depth_tex_ != 0) {
+        glDeleteTextures(1, &backface_depth_tex_);
+        backface_depth_tex_ = 0;
+    }
+    if (backface_rb_ != 0) {
+        glDeleteRenderbuffers(1, &backface_rb_);
+        backface_rb_ = 0;
+    }
+    backface_w_ = 0;
+    backface_h_ = 0;
+}
+
+void Renderer::EnsureBackfaceDepthFBO(int w, int h) {
+    if (backface_fbo_ != 0 && backface_w_ == w && backface_h_ == h) {
+        return;
+    }
+    DestroyBackfaceDepthFBO();
+    CHECK_GT(w, 0);
+    CHECK_GT(h, 0);
+    CHECK_LE(w, kMaxFboDim);
+    CHECK_LE(h, kMaxFboDim);
+    backface_w_ = w;
+    backface_h_ = h;
+
+    glGenTextures(1, &backface_depth_tex_);
+    glBindTexture(GL_TEXTURE_2D, backface_depth_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &backface_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, backface_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           backface_depth_tex_, 0);
+    glGenRenderbuffers(1, &backface_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, backface_rb_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, backface_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE) << "背面深度 FBO 不完整, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Renderer::DrawBackfaceDepthPass(const RenderCommandList& cmds) {
+    if (cmds.object3d.empty() && cmds.instanced_object.empty() && cmds.skinned_mesh.empty()) {
+        return;
+    }
+    const int w = cmds.camera.fbo_3d_width_ > 0 ? cmds.camera.fbo_3d_width_ : 1280;
+    const int h = cmds.camera.fbo_3d_height_ > 0 ? cmds.camera.fbo_3d_height_ : 720;
+    EnsureBackfaceDepthFBO(w, h);
+
+    // ① 主 pass 同一个 MVP（保证覆盖的像素与前景深度逐像素对应）。
+    float vp[16];
+    Primitives3DRenderer::BuildMVP(cmds.camera, w, h, vp);
+
+    // ② 沿相机 view 轴的**线性**深度（米）：DepthProj = diag(1,1,-1,1) ⇒ z = -view.z。
+    //    与 CSM 的区别只是没有 d_center 平移（我们要的是"到相机"的距离，不是"到主视锥中心"）。
+    const Vec3f eye = {cmds.camera.position.x(), cmds.camera.position.y(), cmds.camera.position.z()};
+    const Vec3f at = {cmds.camera.target.x(), cmds.camera.target.y(), cmds.camera.target.z()};
+    const Vec3f up = {0.0f, 1.0f, 0.0f};
+    float view[16];
+    BuildLookAt(eye, at, up, view);
+    const float depth_proj[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1};
+    float dvp[16];
+    RendererMat4Mul(const_cast<float*>(depth_proj), view, dvp);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, backface_fbo_);
+    glViewport(0, 0, w, h);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);      // ★ 只留背面
+    glFrontFace(GL_CCW);
+    glClearColor(1.0e16f, 1.0e16f, 1.0e16f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    const unsigned int prog = ShadowProg();
+    const unsigned int prog_cutout = ShadowProgCutout();
+    for (const auto& o : cmds.object3d) {
+        Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_, vp, dvp, prog,
+                                             prog_cutout);
+    }
+    for (const auto& io : cmds.instanced_object) {
+        InstancedObjectRenderer::DrawInstancedObjectShadow(
+            io, mesh_mgr_, texture_mgr_, shader_mgr_, vp, dvp, InstancedShadowProg(),
+            InstancedShadowProgCutout(), instanced_object_model_buf_,
+            instanced_object_wind_dir_blow_buf_, instanced_object_wind_params_buf_);
+    }
+    for (const auto& s : cmds.skinned_mesh) {
+        SkeletonManager* skel = GetSkeleton(s.skeleton_id);
+        CHECK(skel != nullptr) << "背面深度 pass: skeleton_id " << s.skeleton_id << " 未注册";
+        SkeletonRenderer::DrawSkinnedMeshShadow(
+            s, mesh_mgr_, texture_mgr_, shader_mgr_, skel->gpu_handles(), skel->pose_count(), vp,
+            dvp, SkinnedShadowProg(), SkinnedShadowProgCutout(), instance_model_buf_,
+            instance_pose_ids_buf_, instance_misc_buf_, instance_partial_buf_,
+            instance_partial_lag_buf_, instance_pos_lag_buf_);
+    }
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 // 拾取（color-ID）pass。cmds.pick.enabled 时调用：把所有 picking_id>0 的物体

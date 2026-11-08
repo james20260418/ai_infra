@@ -39,6 +39,8 @@ struct SsrPassInputs {
     unsigned int scene_depth_tex = 0;  // R32F：MRT#1 的 gl_FragCoord.z
     unsigned int attr_tex = 0;         // RGBA16F：rgb = 视空间法线，a = 掩码编码
     unsigned int attr_mat_tex = 0;     // RGBA16F：rgb = F0，a = roughness（逐像素材质）
+    // 背面深度（相机视角线性米深度，哨兵 1e16 = 没有背面）。0 = 本帧没跑背面 pass。
+    unsigned int backface_depth_tex = 0;
     int full_w = 0;
     int full_h = 0;
 

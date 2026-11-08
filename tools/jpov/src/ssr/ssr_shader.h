@@ -50,6 +50,10 @@ uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
 uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
 uniform float uMinThickness;  // 米，T 的下限
+// 真实厚度（背面深度 pass，2026-11-08）：R32F 米制厚度，0 = 该格没有背面数据。
+// uRealThickness != 0 时 c/T/深度假设都不参与判据，只剩 uMinThickness 当 epsilon。
+uniform sampler2D uThick;
+uniform int   uRealThickness;
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
 uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
@@ -334,9 +338,26 @@ void main() {
             }
             continue;
         }
+        // 每格判据：默认用经验厚度（c·z）；开了背面 pass 就用**真实厚度** z_back − z_front，
+        // 此时 c / T / 所有深度假设都不参与判据，只保留 min_thickness 当 epsilon。
+        float w_in_now = SsrWAt(ray, sigma);
+        float w_out_now = SsrWAt(ray, sigma_out);
+        bool cell_hit;
+        if (uRealThickness != 0) {
+            float thick = texelFetch(uThick, cell, 0).r;
+            if (thick > 0.0) {
+                float z = 1.0 / w_cell;
+                float w_hi = 1.0 / (z + max(thick, uMinThickness));
+                cell_hit = (min(w_in_now, w_out_now) <= w_cell) &&
+                           (max(w_in_now, w_out_now) >= w_hi);
+            } else {
+                cell_hit = SsrCellHit(w_in_now, w_out_now, w_cell);   // 没有背面数据 ⇒ 退回经验厚度
+            }
+        } else {
+            cell_hit = SsrCellHit(w_in_now, w_out_now, w_cell);
+        }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell) &&
-            SsrHitFacing(ray.d3, cell)) {
+        if (cell_hit && SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
         }

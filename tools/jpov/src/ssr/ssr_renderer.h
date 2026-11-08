@@ -206,6 +206,12 @@ struct SsrInputs {
     //     "不要写死一个绝对系数"；若你更想要原样传 c，改回来只是一个乘法。）
     float thickness_pixels = 0.0f;  // > 0
 
+    // ---- 真实厚度（背面深度 pass，2026-11-08）----
+    // thick_tex：R32F，米；0 = 该格没有背面数据 ⇒ 退回经验厚度。
+    // use_real_thickness = true 时 `thickness_pixels` **不参与判据**（只留 min_thickness_m 当 epsilon）。
+    unsigned int thick_tex = 0;
+    bool use_real_thickness = false;
+
     // 米，T 的数值下限。正常相机下恒不生效（T = c·d ≥ c·near > 0）——
     // 它的唯一职责是让"T 永远 > 0"这条不变量**不依赖**相机参数（near → 0 的退化相机）。
     // 建议 1e-4。不是物理量，不要拿它调观感。

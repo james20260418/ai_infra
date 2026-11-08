@@ -216,6 +216,7 @@ public:
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
+    bool  ssr_backface_ = false;    // 真实厚度：背面深度 pass（替换 c·z）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
@@ -370,6 +371,7 @@ public:
             sc.enabled = true;
             sc.resolution_scale = ssr_scale_;
             sc.thickness_pixels = ssr_thickness_px_;
+            sc.backface_depth = ssr_backface_;
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
@@ -466,6 +468,7 @@ private:
                         0.02f, 0.5f, 2);
         // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
         // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
+        ui_.Checkbox("SSR 真实厚度 (背面 pass)", &ssr_backface_, row(0, 15));
         ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 12));
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);

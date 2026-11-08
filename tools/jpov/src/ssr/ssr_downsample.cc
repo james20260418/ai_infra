@@ -31,6 +31,8 @@ uniform sampler2D uColor;
 uniform sampler2D uDepth;
 uniform sampler2D uAttr;
 uniform sampler2D uAttrMat;   // 属性纹理附件1：rgb = F0，a = roughness
+uniform sampler2D uBackDepth; // 背面深度（相机视角线性米深度）；哨兵 1e16 = 没有背面
+uniform int   uHasBackDepth;  // 0 = 没用背面 pass
 uniform ivec2 uFullRes;
 uniform int   uScale;      // 1 = 直通；2 = 2×2 选一
 uniform float uNear;
@@ -40,6 +42,7 @@ layout(location = 0) out vec4  FragColor;
 layout(location = 1) out float FragW;     // **w = 1/z_view**（0 = 没有几何）
 layout(location = 2) out vec4  FragNormal;   // rgb = 三维视空间法线；a = 掩码编码
 layout(location = 3) out float FragRough;    // 反射层 roughness（发射线前的截止用）
+layout(location = 4) out float FragThick;    // 真实厚度 z_back − z_front（米）；0 = 未知
 
 // 窗口深度 → 视距（米）。与 ssr_math.h::DepthFromWindowDepth 逐字同式（含 NaN 守卫）。
 float SsrZViewFromWindow(float depth, float zn, float zf) {
@@ -77,6 +80,16 @@ void main() {
     // 粗糙度必须与前三张**同源**（同一个 best texel）：跨表面的材质混进这条求交链，
     // 后果是"某块本该跳过的像素发了射线"，比颜色取错更难查。
     FragRough = texelFetch(uAttrMat, best, 0).a;
+    // 真实厚度（可选）：与前三张**同一个 best texel**，这样"哪一面/多厚"是同源的。
+    // 没有背面数据（单面卡片 / 天空 / 未跑背面 pass）⇒ 0，消费端退回经验厚度。
+    float thick = 0.0;
+    if (uHasBackDepth != 0 && best_z < 1.0) {
+        float zb = texelFetch(uBackDepth, best, 0).r;
+        if (zb < 1.0e15) {
+            thick = max(zb - SsrZViewFromWindow(best_z, uNear, uFar), 0.0);
+        }
+    }
+    FragThick = thick;
 }
 )glsl";
 
@@ -84,7 +97,8 @@ constexpr int kTexUnitColor = 0;
 constexpr int kTexUnitDepth = 1;
 constexpr int kTexUnitAttr = 2;
 constexpr int kTexUnitAttrMat = 3;
-constexpr int kTexUnitCount = 4;
+constexpr int kTexUnitBackDepth = 4;
+constexpr int kTexUnitCount = 5;
 
 }  // namespace
 
@@ -125,6 +139,10 @@ void SsrDownsample::DestroyTargets() {
         glDeleteTextures(1, &rough_tex_);
         rough_tex_ = 0;
     }
+    if (thick_tex_ != 0) {
+        glDeleteTextures(1, &thick_tex_);
+        thick_tex_ = 0;
+    }
     width_ = 0;
     height_ = 0;
 }
@@ -151,6 +169,7 @@ void SsrDownsample::EnsureTargets(int w, int h) {
     make_tex(&w_tex_, GL_R32F, GL_RED, w, h);
     make_tex(&normal_tex_, GL_RGBA16F, GL_RGBA, w, h);
     make_tex(&rough_tex_, GL_R16F, GL_RED, w, h);
+    make_tex(&thick_tex_, GL_R32F, GL_RED, w, h);
     // ⚠️ 命中取色走**双线性**（resolve 里 texture(uColor, pos/uRes)）⇒ 必须开 LINEAR。
     //    其它三张被 texelFetch 精确读取，保持 NEAREST（避免任何意外的插值）。
     glBindTexture(GL_TEXTURE_2D, color_tex_);
@@ -164,9 +183,10 @@ void SsrDownsample::EnsureTargets(int w, int h) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, w_tex_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, normal_tex_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, rough_tex_, 0);
-    const GLenum bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
-                            GL_COLOR_ATTACHMENT3};
-    glDrawBuffers(4, bufs);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, thick_tex_, 0);
+    const GLenum bufs[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
+                            GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
+    glDrawBuffers(5, bufs);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR 降采样 FBO 不完整（" << w << "×" << h << "）";
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -174,7 +194,8 @@ void SsrDownsample::EnsureTargets(int w, int h) {
 
 void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex,
                         unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-                        int full_w, int full_h, int scale, float near_plane, float far_plane) {
+                        unsigned int back_depth_tex, int full_w, int full_h, int scale,
+                        float near_plane, float far_plane) {
     CHECK(shader_mgr_ != nullptr) << "SsrDownsample::Run 前必须先 Init";
     CHECK_NE(full_color_tex, 0u);
     CHECK_NE(full_depth_tex, 0u);
@@ -199,7 +220,7 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     GLint prev_depth = 0;
     GLint prev_cull = 0;
     GLint prev_scissor = 0;
-    GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0};
+    GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0, 0};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
@@ -237,6 +258,10 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttrMat"), kTexUnitAttrMat);
     glUniform2i(shader_mgr_->GetUniform(prog_, "uFullRes"), full_w, full_h);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uScale"), scale);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitBackDepth);
+    glBindTexture(GL_TEXTURE_2D, back_depth_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uBackDepth"), kTexUnitBackDepth);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uHasBackDepth"), back_depth_tex != 0u ? 1 : 0);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uNear"), near_plane);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uFar"), far_plane);
     glDrawArrays(GL_TRIANGLES, 0, 3);
