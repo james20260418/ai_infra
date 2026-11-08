@@ -41,6 +41,7 @@ uniform sampler2D uNormal;    // 反射体视空间法线 .xy（z 由 sqrt 重�
 // 反射层**逐像素** roughness（R16F，降采样后）。2026-11-02 起材质进属性纹理，
 // 不再有"全场景一套粗糙度"；这里只用于一件事：超过 uRoughnessCutoff 的像素**不发射线**。
 uniform sampler2D uRough;
+uniform sampler2D uRange;     // RG32F：放宽后的 (w_lo, w_hi)（面斜率补偿的数据）
 uniform float uRoughnessCutoff;   // [0,1]；1 = 永不跳过（等价于旧行为）
 uniform vec2  uRes;           // 镜面像素栅格 (W, H)
 uniform float uNear;
@@ -50,6 +51,7 @@ uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
 uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
 uniform float uMinThickness;  // 米，T 的下限
+uniform int   uSlopeFix;      // 1 = 开面斜率补偿（2026-11-08）：c 不变，只**额外**接受平面求交命中的格
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
 uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
@@ -67,6 +69,7 @@ struct SsrRay {
     vec2 s0;
     vec2 dir;
     vec3 d3;          // 视空间单位方向（朝向判据用；ssr_math.h::ScreenRay::dir3）
+    vec3 p0;          // 视空间起点（面斜率补偿用；ssr_math.h::ScreenRay::p0）
     float span;
     float w0;
     float w1;
@@ -124,6 +127,18 @@ bool SsrCellHit(float w_in, float w_out, float w_cell) {
         return w_max >= 1.0 / (1.0 / w_cell + uMinThickness);
     }
     return w_max * (1.0 + uThicknessC) >= w_cell;
+}
+
+// 面斜率补偿（鲁棒版，2026-11-08）：**判据本身不变**，只是把每格的 z 区间换成
+// 预计算好的 (w_lo, w_hi)（由 SsrDownsample 第二趟按面斜率放宽，见 ssr_math.h::WidenCellZ）。
+// 因为没有锚点、没有除法、没有 P 依赖，也就不会出现"背面擦过被当成命中"。
+bool SsrRangeHit(float w_in, float w_out, vec2 rg) {
+    float w_min = min(w_in, w_out);
+    float w_max = max(w_in, w_out);
+    if (!(w_min > 0.0) || !(rg.x > 0.0) || !(rg.y > 0.0)) {
+        return false;
+    }
+    return w_min <= rg.x && w_max >= rg.y;
 }
 
 // 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
@@ -186,6 +201,7 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     ray.s0 = s0;
     ray.w0 = 1.0 / d0;
     ray.w1 = 1.0 / d1;
+    ray.p0 = P;
     // R 已经是单位向量：reflect(I, N) 在 |I| = |N| = 1 时保长度，因此**不再 normalize**
     //（一次 rsqrt 省下来；四个 lane 各建一次射线 ⇒ 每像素省 4 次）。
     ray.d3 = R;   // 朝向判据用（ssr_math.h::BuildScreenRay 同一行）
@@ -389,7 +405,12 @@ void main() {
         }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
         // 但**记下**它（写 −1），融合层拿它压暗 env fallback。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell)) {
+        bool cell_hit = SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell);
+        if (!cell_hit && uSlopeFix != 0) {
+            cell_hit = SsrRangeHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out),
+                                   texelFetch(uRange, cell, 0).xy);
+        }
+        if (cell_hit) {
             if (SsrHitFacing(ray.d3, cell)) {
                 FragS = 0.5 * (sigma + sigma_out);
                 return;

@@ -99,7 +99,8 @@ public:
     // near/far：窗口深度 → w = 1/z 的换算需要（见 ssr_math.h::WFromWindowDepth）。
     void Run(unsigned int full_color_tex, unsigned int full_depth_tex,
              unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-             int full_w, int full_h, int scale, float near_plane, float far_plane);
+             int full_w, int full_h, int scale, float near_plane, float far_plane,
+             float thickness_pixels, float tan_half_fov_y);
 
     unsigned int color_tex() const { return color_tex_; }    // RGBA16F，命中源色
     // R32F，**w = 1/z_view**（0 = 天空/无几何）。SSR 链路内部一律用 w。
@@ -108,6 +109,9 @@ public:
     // R16F：反射层**逐像素** roughness（属性纹理附件 1 的 .a）。
     // 只用于 march/resolve 的"太粗糙就不发射线"截止；材质本身（F0）由合成层在全分辨率读。
     unsigned int rough_tex() const { return rough_tex_; }
+    // RG32F：**放宽后的 z 区间**，(.x = w_lo = 1/z_lo, .y = w_hi = 1/z_hi)。0 = 空。
+    // 见 ssr_math.h::WidenCellZ（前置、独立的面斜率补偿；march 判据只读这两个数）。
+    unsigned int range_tex() const { return range_tex_; }
     int width() const { return width_; }
     int height() const { return height_; }
 
@@ -122,6 +126,9 @@ private:
     unsigned int w_tex_ = 0;       // R32F：w = 1/z_view（0 = 空）
     unsigned int normal_tex_ = 0;
     unsigned int rough_tex_ = 0;
+    unsigned int range_tex_ = 0;   // RG32F：放宽后的 (w_lo, w_hi)
+    unsigned int range_fbo_ = 0;
+    unsigned int prog_range_ = 0;
     int width_ = 0;
     int height_ = 0;
 };

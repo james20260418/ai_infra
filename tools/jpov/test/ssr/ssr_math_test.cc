@@ -34,6 +34,10 @@ namespace {
 using jpov::ssr::BuildScreenRay;
 using jpov::ssr::CellAtSigma;
 using jpov::ssr::CellHit;
+using jpov::ssr::CellRangeHit;
+using jpov::ssr::CellZRange;
+using jpov::ssr::CellNormalSlope;
+using jpov::ssr::WidenCellZ;
 using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
@@ -205,6 +209,71 @@ TEST(SsrMath, VoxelPredicate) {
             << "退化分支（min_thickness）的闭区间边界应算命中";
         EXPECT_FALSE(CellHit(1.0f / (z + 2.0f * t), 1.0f / (z + 3.0f * t), 1.0f / z, c, t))
             << "退化分支里明显在柱子后方的一段必须放行";
+    }
+}
+
+// ───────── 2.5 面斜率补偿（鲁棒版：前置放宽 z 区间，2026-11-08）─────────
+//
+// 这一版**不动 march 判据**，只把每格的 [z_lo, z_hi] 按面斜率放宽，且有两条硬约束：
+//   ① z_lo 不许比 3×3 邻域更近（平面在相邻格之间是连续的，越界就不是同一个面）
+//   ② z_hi 不许比 3×3 邻域更远，并且不超过全局 far（天的距离）
+// 两条约束代替了上一版需要的 cap 常数，也彻底避开了“锚点/P 依赖”。
+TEST(SsrMath, RobustSlantCompensationClampsByNeighbourhood) {
+    const float kZ = 10.0f;
+    const float kC = 0.01f;            // 原有厚度（不动）
+    const float kAngle = 0.002f;       // 一格的角宽（弧度）
+    const float kZmin3 = 9.95f;        // 3×3 邻域最近
+    const float kZmax3 = 10.15f;       // 3×3 邻域最远
+    const float kFar = 1000.0f;
+
+    // ① 斜率 0（正对相机）：区间 == 旧行为（[z, z(1+c)]），一个字节都不差。
+    {
+        const jpov::ssr::CellZRange r =
+            jpov::ssr::WidenCellZ(kZ, 0.0f, kAngle, kC, kZmin3, kZmax3, kFar);
+        EXPECT_NEAR(r.z_lo, kZ, 1e-6f);
+        EXPECT_NEAR(r.z_hi, kZ * (1.0f + kC), 1e-6f);
+    }
+    // ② 中等斜率：两端都放宽，但都不越过邻域。
+    {
+        const jpov::ssr::CellZRange r =
+            jpov::ssr::WidenCellZ(kZ, 5.0f, kAngle, kC, kZmin3, kZmax3, kFar);
+        EXPECT_NEAR(r.z_lo, std::max(kZ * (1.0f - kAngle * 5.0f), kZmin3), 1e-6f);
+        EXPECT_NEAR(r.z_hi, std::min(kZ * (1.0f + kC) * (1.0f + kAngle * 5.0f), kZmax3), 1e-6f);
+    }
+    // ③ 掠射（|n_z|→0）时斜率爆到 1000，区间被邻域**掐住**，不会无限放宽。
+    {
+        const float slope = jpov::ssr::CellNormalSlope(1.0f, 0.0f, 1.0e-4f);
+        EXPECT_GT(slope, 100.0f);
+        const jpov::ssr::CellZRange r =
+            jpov::ssr::WidenCellZ(kZ, slope, kAngle, kC, kZmin3, kZmax3, kFar);
+        EXPECT_NEAR(r.z_lo, kZmin3, 1e-6f) << "必须被邻域最近深度掐住";
+        EXPECT_NEAR(r.z_hi, kZmax3, 1e-6f) << "必须被邻域最远深度掐住";
+    }
+    // ④ 全局上界（天的距离）：邻域再远也不许越过 far。
+    {
+        const jpov::ssr::CellZRange r =
+            jpov::ssr::WidenCellZ(kZ, 100.0f, kAngle, kC, 9.0f, 1.0e6f, 10.05f);
+        EXPECT_NEAR(r.z_hi, 10.05f, 1e-6f);
+    }
+    // ⑤ 关掉（slope=0）时，扩区间判据与旧判据逐值等价（这是 toggle 的语义基础）。
+    {
+        const jpov::ssr::CellZRange r =
+            jpov::ssr::WidenCellZ(kZ, 0.0f, kAngle, kC, kZmin3, kZmax3, kFar);
+        for (int i = -6; i <= 6; ++i) {
+            const float z_in = 9.7f + 0.043f * static_cast<float>(i);
+            const float z_out = 10.3f + 0.043f * static_cast<float>(i);
+            // 跳过正好压在区间边界上的样本（闭区间端点的浮点等价判定不是这条用例的主题）
+            if (std::fabs(z_in - kZ) < 1e-3f || std::fabs(z_in - kZ * (1.0f + kC)) < 1e-3f ||
+                std::fabs(z_out - kZ) < 1e-3f || std::fabs(z_out - kZ * (1.0f + kC)) < 1e-3f) {
+                continue;
+            }
+            const float w_in = 1.0f / z_in;
+            const float w_out = 1.0f / z_out;
+            const bool old_hit = CellHit(w_in, w_out, 1.0f / kZ, kC, 1.0e-4f);
+            const bool new_hit =
+                jpov::ssr::CellRangeHit(w_in, w_out, 1.0f / r.z_lo, 1.0f / r.z_hi);
+            EXPECT_EQ(old_hit, new_hit) << "i=" << i;
+        }
     }
 }
 

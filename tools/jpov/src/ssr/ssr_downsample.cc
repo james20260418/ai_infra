@@ -4,6 +4,8 @@
 
 #include "tools/jpov/src/ssr/ssr_downsample.h"
 
+#include <cmath>
+
 #include <GL/gl.h>
 #include <GL/glext.h>
 
@@ -80,6 +82,62 @@ void main() {
 }
 )glsl";
 
+
+// 面斜率补偿（鲁棒版，2026-11-08）：**前置、独立**地把每格的 z 区间放宽。
+// march 的判据一行不改（仍是区间重叠），所以这里没有锚点、没有除法、没有 P 依赖。
+//
+//   c_slope = 格角宽 · (|n_x|+|n_y|)/|n_z|
+//   z_lo = max(z·(1−c_slope), min(z_3x3))                      // 向近补，但不比邻域更近
+//   z_hi = max(z·(1+c), min(z·(1+c)·(1+c_slope), max(z_3x3)))  // 向远补，但不比邻域更远
+//   z_hi = min(z_hi, uFarZ)                                    // 全局上界 = far_plane
+// 掠射 |n_z|→0 时 c_slope 会爆，但爆到超出邻域就被掐住 ⇒ 不需要 cap 参数。
+constexpr const char* kSsrRangeFs = R"glsl(
+#version 330 core
+uniform sampler2D uW;
+uniform sampler2D uNormal;
+uniform ivec2 uRes;
+uniform float uCellAngle;     // 一格的角宽（弧度）= N · fov_y / full_h
+uniform float uThicknessC;    // 原有 c（N_px · θ_px），**不动**
+uniform float uFarZ;          // 全局上界（far_plane）
+
+layout(location = 0) out vec2 FragRange;   // (w_lo, w_hi)
+
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    float w = texelFetch(uW, p, 0).r;
+    if (!(w > 0.0)) {
+        FragRange = vec2(0.0);
+        return;
+    }
+    float z = 1.0 / w;
+    vec3 n = texelFetch(uNormal, p, 0).rgb;
+    float slope = (abs(n.x) + abs(n.y)) / max(abs(n.z), 1.0e-3);
+
+    float zmin3 = z;
+    float zmax3 = z;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            ivec2 q = clamp(p + ivec2(i, j), ivec2(0), uRes - 1);
+            float wq = texelFetch(uW, q, 0).r;
+            if (wq > 0.0) {
+                float zq = 1.0 / wq;
+                zmin3 = min(zmin3, zq);
+                zmax3 = max(zmax3, zq);
+            }
+        }
+    }
+
+    float cs = uCellAngle * slope;
+    float z_far0 = z * (1.0 + uThicknessC);
+    float z_lo = max(z * (1.0 - cs), zmin3);
+    z_lo = min(z_lo, z);
+    float z_hi = max(z_far0, min(z_far0 * (1.0 + cs), zmax3));
+    z_hi = min(z_hi, uFarZ);
+    z_hi = max(z_hi, z_lo);
+    FragRange = vec2(1.0 / z_lo, 1.0 / z_hi);
+}
+)glsl";
+
 constexpr int kTexUnitColor = 0;
 constexpr int kTexUnitDepth = 1;
 constexpr int kTexUnitAttr = 2;
@@ -95,12 +153,15 @@ void SsrDownsample::Init(ShaderManager* shader_mgr) {
     CHECK(shader_mgr != nullptr);
     shader_mgr_ = shader_mgr;
     prog_ = shader_mgr_->GetOrCreate("ssr_downsample", {kSsrFullscreenVs, kSsrDownsampleFs, {}});
+    prog_range_ = shader_mgr_->GetOrCreate("ssr_downsample_range", {kSsrFullscreenVs, kSsrRangeFs, {}});
     CHECK_NE(prog_, 0u);
+    CHECK_NE(prog_range_, 0u);
 }
 
 void SsrDownsample::Finalize() {
     DestroyTargets();
     prog_ = 0;
+    prog_range_ = 0;
     shader_mgr_ = nullptr;
 }
 
@@ -124,6 +185,14 @@ void SsrDownsample::DestroyTargets() {
     if (rough_tex_ != 0) {
         glDeleteTextures(1, &rough_tex_);
         rough_tex_ = 0;
+    }
+    if (range_tex_ != 0) {
+        glDeleteTextures(1, &range_tex_);
+        range_tex_ = 0;
+    }
+    if (range_fbo_ != 0) {
+        glDeleteFramebuffers(1, &range_fbo_);
+        range_fbo_ = 0;
     }
     width_ = 0;
     height_ = 0;
@@ -151,6 +220,15 @@ void SsrDownsample::EnsureTargets(int w, int h) {
     make_tex(&w_tex_, GL_R32F, GL_RED, w, h);
     make_tex(&normal_tex_, GL_RGBA16F, GL_RGBA, w, h);
     make_tex(&rough_tex_, GL_R16F, GL_RED, w, h);
+    make_tex(&range_tex_, GL_RG32F, GL_RG, w, h);
+    glGenFramebuffers(1, &range_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, range_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, range_tex_, 0);
+    const GLenum rbuf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &rbuf);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
+        << "SSR z-range FBO 不完整";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     // ⚠️ 命中取色走**双线性**（resolve 里 texture(uColor, pos/uRes)）⇒ 必须开 LINEAR。
     //    其它三张被 texelFetch 精确读取，保持 NEAREST（避免任何意外的插值）。
     glBindTexture(GL_TEXTURE_2D, color_tex_);
@@ -174,7 +252,8 @@ void SsrDownsample::EnsureTargets(int w, int h) {
 
 void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex,
                         unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-                        int full_w, int full_h, int scale, float near_plane, float far_plane) {
+                        int full_w, int full_h, int scale, float near_plane, float far_plane,
+                        float thickness_pixels, float tan_half_fov_y) {
     CHECK(shader_mgr_ != nullptr) << "SsrDownsample::Run 前必须先 Init";
     CHECK_NE(full_color_tex, 0u);
     CHECK_NE(full_depth_tex, 0u);
@@ -240,6 +319,27 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     glUniform1f(shader_mgr_->GetUniform(prog_, "uNear"), near_plane);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uFar"), far_plane);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    // ── 第二趟：面斜率补偿（把 (w, n) 变成放宽后的 (w_lo, w_hi)）──
+    {
+        const float fov_y = 2.0f * std::atan(tan_half_fov_y);
+        const float cell_angle = static_cast<float>(scale) * fov_y / static_cast<float>(full_h);
+        float thickness_c = thickness_pixels * fov_y / static_cast<float>(scale == 0 ? 1 : h);
+        glBindFramebuffer(GL_FRAMEBUFFER, range_fbo_);
+        glViewport(0, 0, w, h);
+        glUseProgram(prog_range_);
+        glActiveTexture(GL_TEXTURE0 + 0);
+        glBindTexture(GL_TEXTURE_2D, w_tex_);
+        glActiveTexture(GL_TEXTURE0 + 1);
+        glBindTexture(GL_TEXTURE_2D, normal_tex_);
+        glUniform1i(shader_mgr_->GetUniform(prog_range_, "uW"), 0);
+        glUniform1i(shader_mgr_->GetUniform(prog_range_, "uNormal"), 1);
+        glUniform2i(shader_mgr_->GetUniform(prog_range_, "uRes"), w, h);
+        glUniform1f(shader_mgr_->GetUniform(prog_range_, "uCellAngle"), cell_angle);
+        glUniform1f(shader_mgr_->GetUniform(prog_range_, "uThicknessC"), thickness_c);
+        glUniform1f(shader_mgr_->GetUniform(prog_range_, "uFarZ"), far_plane);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
 
     // 恢复调用方状态
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));

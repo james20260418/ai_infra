@@ -713,6 +713,14 @@ struct SsrConfig {
     float thickness_pixels = 6.0f;
     float min_thickness_m = 1.0e-4f;
 
+    // 面斜率补偿（2026-11-08）：拿本格法线重建局部平面，与射线精确求交，交点落在本格内
+    // 也算命中。它**只加不减**：thickness_pixels 那套区间判据一字不动，两者是 OR。
+    //
+    // 治什么：“薄竖结构 + 近掠射”下的点阵/梳齿漏点 —— 根因是旧判据拿**格内最小深度**当整个
+    // 表面，而真实表面在射线自己的屏幕位置上可以更深（斜率 x 格宽）。关掉 = 旧行为逐字节不变。
+    // 代价：每次“旧判据否掉”的格多一次法线取纹理 + 一次平面求交（见 ssr_math.h::CellPlaneHit）。
+    bool slope_fix = false;
+
     // 射线长度上限：米（物理）与 **SSR 像素**（屏幕预算 = 覆盖范围 = 成本）。
     float max_distance_m = 1000.0f;
     int max_ray_pixels = 220;

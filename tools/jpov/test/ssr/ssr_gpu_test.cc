@@ -201,7 +201,8 @@ struct CpuResult {
 CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& derived,
                         float max_distance_m, bool use_facing = false,
                         float max_ray_pixels = 0.0f, float fade_budget_px = 0.0f,
-                        float fade_edge_px = 0.0f) {
+                        float fade_edge_px = 0.0f,
+                        const std::vector<jpov::ssr::CellZRange>* range = nullptr) {
     const size_t i = static_cast<size_t>(py) * kWidth + px;
     CpuResult out;
     // 与着色器同一条规则：没有深度数据 ⇒ 不发射线、a=0（ssr_math.h::HasDepthData）。
@@ -236,8 +237,21 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
         return jpov::ssr::HitFacesRay(d, n);
     };
+    // 放宽后的 z 区间（面斜率补偿）：与着色器读同一张 RG32F 纹理。
+    auto range_at = [&](int x, int y, float* w_lo, float* w_hi) -> bool {
+        if (range == nullptr || range->empty()) {
+            return false;
+        }
+        const jpov::ssr::CellZRange& r = (*range)[static_cast<size_t>(y) * kWidth + x];
+        if (!(r.z_lo > 0.0f) || !(r.z_hi > 0.0f)) {
+            return false;
+        }
+        *w_lo = 1.0f / r.z_lo;
+        *w_hi = 1.0f / r.z_hi;
+        return true;
+    };
     const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing,
-                               &out.saw_backface);
+                               &out.saw_backface, range_at);
     if (s < kNoHit) {
         out.hit = true;
         out.s = s;
@@ -261,7 +275,21 @@ struct Fixture {
     unsigned int normal_tex = 0;
     unsigned int color_tex = 0;
     unsigned int rough_tex = 0;
+    unsigned int range_tex = 0;
     SsrInputs in;
+
+    // 面斜率补偿的输入（RG32F：w_lo, w_hi）。不调用 ⇒ in.zrange_tex = 0 ⇒ 分支走不到。
+    void UploadRange(const std::vector<float>& rg) {
+        glGenTextures(1, &range_tex);
+        glBindTexture(GL_TEXTURE_2D, range_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, kWidth, kHeight, 0, GL_RG, GL_FLOAT, rg.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        in.zrange_tex = range_tex;
+    }
 
     void Setup(const Scene& sc, int tile, int max_ray_pixels) {
         GlEnv::Get().Ensure();
@@ -336,6 +364,9 @@ struct Fixture {
         }
         if (rough_tex != 0) {
             glDeleteTextures(1, &rough_tex);
+        }
+        if (range_tex != 0) {
+            glDeleteTextures(1, &range_tex);
         }
     }
 };
@@ -422,6 +453,112 @@ TEST(SsrGpu, MatchesCpuReference) {
             EXPECT_EQ(s_mismatch, 0) << "tile=" << tile << "：CPU 与 GPU 的命中位置 s 差 > 2 px"
                                      << "（worst=" << worst_s << "）";
         }
+    }
+}
+
+// ①-b 面斜率补偿（鲁棒版）的 CPU 对拍
+//
+// 着色器那侧的数据来自 SsrDownsample 的第二趟（前置放宽 z 区间）。本用例在 CPU 上
+// 用**同一个纯函数** WidenCellZ 算一遍、上传成 RG32F，再逐像素对拍命中/命中格/s。
+TEST(SsrGpu, SlopeFixMatchesCpuReference) {
+    for (bool two_layers : {false, true}) {
+        Fixture f;
+        f.Setup(MakeScene(two_layers, /*ny=*/0.95f, /*sky_rows=*/8), /*tile=*/2, 160);
+        // 把旧厚度压到很小：否则旧判据本来就命中绝大多数格，扩区间分支永远跑不到
+        // （那样这条用例是空转）。压小之后"旧判据漏、扩区间补"才会真的发生。
+        f.in.thickness_pixels = 0.25f;
+
+        const float fov_y = 2.0f * std::atan(kTanHalf);
+        const float cell_angle = fov_y / static_cast<float>(kHeight);
+        const float thickness_c = f.in.thickness_pixels * fov_y / static_cast<float>(kHeight);
+        std::vector<jpov::ssr::CellZRange> range(
+            static_cast<size_t>(kWidth) * kHeight);
+        std::vector<float> rg(range.size() * 2, 0.0f);
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const size_t i = static_cast<size_t>(y) * kWidth + x;
+                const float w = jpov::ssr::WFromWindowDepth(f.scene.window_depth[i], kNear, kFar);
+                if (!(w > 0.0f)) {
+                    continue;
+                }
+                const float z = 1.0f / w;
+                const Vec3 n = ReconstructNormal(f.scene.normal_xy[i * 2 + 0],
+                                                 f.scene.normal_xy[i * 2 + 1]);
+                float zmin3 = z;
+                float zmax3 = z;
+                for (int jj = -1; jj <= 1; ++jj) {
+                    for (int ii = -1; ii <= 1; ++ii) {
+                        const int qx = std::min(std::max(x + ii, 0), kWidth - 1);
+                        const int qy = std::min(std::max(y + jj, 0), kHeight - 1);
+                        const float wq = jpov::ssr::WFromWindowDepth(
+                            f.scene.window_depth[static_cast<size_t>(qy) * kWidth + qx], kNear, kFar);
+                        if (wq > 0.0f) {
+                            zmin3 = std::min(zmin3, 1.0f / wq);
+                            zmax3 = std::max(zmax3, 1.0f / wq);
+                        }
+                    }
+                }
+                range[i] = jpov::ssr::WidenCellZ(z, jpov::ssr::CellNormalSlope(n.x, n.y, n.z),
+                                                 cell_angle, thickness_c, zmin3, zmax3, kFar);
+                rg[i * 2 + 0] = (range[i].z_lo > 0.0f) ? 1.0f / range[i].z_lo : 0.0f;
+                rg[i * 2 + 1] = (range[i].z_hi > 0.0f) ? 1.0f / range[i].z_hi : 0.0f;
+            }
+        }
+        f.UploadRange(rg);
+        f.in.slope_fix = true;
+        f.in.debug_reason = true;
+        const SsrOutputs& out = f.ssr.Render(f.in);
+        ASSERT_NE(out.radiance_tex, 0u);
+
+        const DerivedParams derived =
+            DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf,
+                         kHeight);
+        const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+        const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+        const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
+
+        int compared = 0;
+        int hit_mismatch = 0;
+        int cell_mismatch = 0;
+        float worst_s = 0.0f;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const size_t i = static_cast<size_t>(y) * kWidth + x;
+                const CpuResult cpu = MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m,
+                                                    /*use_facing=*/false, 0.0f, 0.0f, 0.0f,
+                                                    &range);
+                const bool gpu_hit = type[i] == static_cast<unsigned char>(SsrResult::kHit);
+                ++compared;
+                if (cpu.hit != gpu_hit) {
+                    ++hit_mismatch;
+                    if (hit_mismatch < 4) {
+                        ADD_FAILURE() << "像素(" << x << "," << y << ") CPU hit=" << cpu.hit
+                                      << " GPU type=" << static_cast<int>(type[i]);
+                    }
+                    continue;
+                }
+                if (!gpu_hit) {
+                    continue;
+                }
+                const int cell_x =
+                    static_cast<int>(std::lround(rad[i * 4 + 0] * (kWidth + 1))) - 1;
+                const int cell_y =
+                    static_cast<int>(std::lround(rad[i * 4 + 1] * (kHeight + 1))) - 1;
+                if (cell_x != cpu.cell_x || cell_y != cpu.cell_y) {
+                    ++cell_mismatch;
+                }
+                worst_s = std::max(worst_s, std::fabs(hit_s[i] - cpu.s));
+            }
+        }
+        EXPECT_GT(compared, 5000);
+        EXPECT_EQ(hit_mismatch, 0) << "开面斜率补偿后 CPU 与 GPU 的命中判定不一致";
+        EXPECT_EQ(cell_mismatch, 0) << "命中的格必须一致";
+        EXPECT_LT(worst_s, 2.0f) << "命中位置 s 差 > 2 px（worst=" << worst_s << "）";
+
+        // 注：本合成场景是"均匀深度墙"，射线必然穿过柱子 ⇒ 旧判据本来就命中，
+        // 扩区间分支几乎跑不到（实测把区间收成零厚度，type 图也一个像素不变）。
+        // 所以**这里不做活性断言**（做了也是假的）；该分支的有效性由真实机位验证：
+        // 漏光相机 `--capture-slope` 下漏点 395 → 3（见 docs/jpov_ssr_v2_design.md §9.5）。
     }
 }
 

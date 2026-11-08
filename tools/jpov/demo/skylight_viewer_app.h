@@ -216,6 +216,7 @@ public:
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
+    bool  ssr_slope_fix_ = false;   // 面斜率补偿（2026-11-08）：与厚度判据 OR，只加不减
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
@@ -226,6 +227,7 @@ public:
     float ssr_backface_env_ = 1.0f;     // 背面命中时 env fallback 的乘子（1 = 不压暗）
     bool  ssr_cov_max_ = false;         // 融合层覆盖率取 2×2 max（修 1:2 的侧边漏亮线）
     int   ssr_debug_ = 0;
+    int   ssr_tile_env_ = 0;   // 诊断用：>0 时覆盖 tile_size（拍图脚本设，面板不管）
     void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -238,7 +240,9 @@ public:
         cmds->camera.fbo_3d_height_ = kViewerHeight;
 
         // 交互输入 → 改视角（同 model viewer 的 ApplyInput）；headless 不消费输入。
-        if (show_panel_) {
+        // 2026-11-08：相机输入**不再**受面板显隐开关约束（以前藏在 `if (show_panel_)` 里，
+        // 一按 H 隐藏面板就同时失去视角控制）。
+        {
             float dx = 0.0f, dy = 0.0f, scroll = 0.0f;
             if (input.right.IsDrag()) {
                 dx = input.mouse_dx;
@@ -248,6 +252,11 @@ public:
             jpov_viewer::ApplyInput(&view_, dx, dy, scroll,
                                     static_cast<int>(winfo.width),
                                     static_cast<int>(winfo.height));
+        }
+        // H：隐藏/显示左右两列面板。只影响绘制，不影响任何渲染参数 ——
+        // 截图对比 SSR 时用，避免面板底板盖住要看的像素。
+        if (input.GetKey(jpov::KeyCode::H).IsClick()) {
+            show_panel_ = !show_panel_;
         }
 
         // 相机由 view_ 推导（同 model viewer；target=原点）。
@@ -376,6 +385,7 @@ public:
             sc.enabled = true;
             sc.resolution_scale = ssr_scale_;
             sc.thickness_pixels = ssr_thickness_px_;
+            sc.slope_fix = ssr_slope_fix_;
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
@@ -385,6 +395,9 @@ public:
             sc.backface_env_scale = ssr_backface_env_;
             sc.upsample_coverage_max = ssr_cov_max_;
             sc.debug_coverage = ssr_debug_;
+            if (ssr_tile_env_ > 0) {
+                sc.tile_size = ssr_tile_env_;
+            }
             cmds->ssr = sc;
         }
 
@@ -479,6 +492,9 @@ private:
         // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
         // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
         ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 12));
+        // 面斜率补偿（2026-11-08）：与「SSR 厚度 N_px」**并列**，只加不减。
+        // 放在总闸旁边（列 1 的 0..19 已被占满）。
+        ui_.Checkbox("SSR 面斜率补偿 (无参数)", &ssr_slope_fix_, row(0, 14));
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 

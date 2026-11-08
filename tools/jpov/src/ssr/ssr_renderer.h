@@ -211,6 +211,19 @@ struct SsrInputs {
     // 建议 1e-4。不是物理量，不要拿它调观感。
     float min_thickness_m = 0.0f;  // > 0
 
+    // ---- 面斜率补偿（2026-11-08，可选，与厚度模型**并列**）----
+    //
+    // true ⇒ 除旧的区间判据（thickness_pixels 那套，**一字不改**）之外，再用本格法线重建
+    // 局部平面与射线精确求交，交点落在本格内也算命中。推导 / 代价 / 治不了的场合见
+    // ssr_math.h::CellPlaneHit 与 ssr_shader.h::SsrCellPlaneHit。
+    // false ⇒ 与引入它之前**逐字节一致**（老的 gold 不用重出）。
+    bool slope_fix = false;
+
+    // 面斜率补偿的**数据**：RG32F，(.x = w_lo = 1/z_lo, .y = w_hi = 1/z_hi)，
+    // 由 SsrDownsample 的第二趟算出（见 ssr_math.h::WidenCellZ）。
+    // 只有 slope_fix == true 时被读取；false 时不碰（老路径逐字节不变）。
+    unsigned int zrange_tex = 0;
+
     // ---- 行进 ----
     // 射线长度上限（米）。建议 = far_plane；超过 far 的部分没有任何深度数据，
     // 内部再与 far_plane 取 min（此处传大一点不会出错，只是无效）。

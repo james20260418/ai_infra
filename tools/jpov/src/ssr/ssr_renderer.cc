@@ -42,6 +42,7 @@ namespace {
 constexpr int kTexUnitMarchDepth = 0;
 constexpr int kTexUnitMarchNormal = 1;
 constexpr int kTexUnitMarchRough = 2;
+constexpr int kTexUnitMarchRange = 3;
 constexpr int kTexUnitResolveSlice = 0;
 constexpr int kTexUnitResolveDepth = 1;
 constexpr int kTexUnitResolveNormal = 2;
@@ -347,6 +348,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uMaxDistance", in.max_distance_m);
         set1f(prog, "uThicknessC", derived.thickness_coefficient);
         set1f(prog, "uMinThickness", in.min_thickness_m);
+        set1i(prog, "uSlopeFix", in.slope_fix ? 1 : 0);
         set1f(prog, "uSentinel", ssr::kNoHit);
         set1i(prog, "uTile", in.tile_size);
         set1f(prog, "uSlabPixels", derived.slab_pixels);
@@ -364,9 +366,12 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRange);
+    glBindTexture(GL_TEXTURE_2D, in.zrange_tex);
     set1i(prog_march_, "uW", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
+    set1i(prog_march_, "uRange", kTexUnitMarchRange);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──

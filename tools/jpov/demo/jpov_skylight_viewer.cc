@@ -878,8 +878,11 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
     // 判据：1:1 没有、1:2 有 ⇒ 升采样；1:1 也有 ⇒ SSR 侧（厚度/剪影）。
     {
         app.view_ = jpov_viewer::DefaultView();
-        app.view_.phi   = 0.0355f;
-        app.view_.theta = 1.148f;
+        // 2026-11-07 Danis 的 HUD：pos (20.5005, 1.0921, 9.2079) → 原心
+        //   ⇒ R = 22.5、仰角 = asin(1.0921/22.5) ≈ 2.78°、方位 = atan2(20.5005, 9.2079)
+        //   （上一版我用了 y=0.80 的机位，仰角差了 0.8°，他这条"搞错镜头"是对的）
+        app.view_.phi   = 0.048557f;
+        app.view_.theta = 1.14814f;
         app.view_.R     = 22.5f;
         app.floor_preset_ = 0;
         app.ssr_thickness_px_ = 6.0f;
@@ -930,6 +933,113 @@ int RunCaptureSsrFalloff(const std::string& out_dir) {
     return 0;
 }
 
+// 用法：jpov_skylight_viewer --capture-slope <out_dir>
+//
+// 面斜率补偿（SsrConfig::slope_fix，2026-11-08）的 A/B：**同机位、同参数，只切开关**。
+// 机位用 Danis 的 HUD：pos (20.5005, 1.0921, 9.2079) → 原点（仰角 2.78°）——
+// 那条“细竖结构 + 近掠射”的失效面就出现在这个机位上。
+//
+// 四张图两两成对：N_px = 6（面板默认）/ N_px = 1（把旧容差压到最小，更能看出斜率补偿本身
+// 撑起了多少），外加一张覆盖率灰度（看新增的命中落在哪）。
+int RunCaptureSlope(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 天光查看器（headless capture）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 机位 / 场景可由环境变量覆写（诊断用：直接复现用户截图里的 HUD 数值）。
+    auto env_f = [](const char* n, float d) {
+        const char* s = std::getenv(n);
+        return (s != nullptr) ? std::strtof(s, nullptr) : d;
+    };
+    auto env_i = [](const char* n, int d) {
+        const char* s = std::getenv(n);
+        return (s != nullptr) ? std::atoi(s) : d;
+    };
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = env_f("VIEW_PHI", 0.048557f);
+    app.view_.theta = env_f("VIEW_THETA", 1.14814f);
+    app.view_.R     = env_f("VIEW_R", 22.5f);
+    app.floor_preset_ = env_i("FLOOR", 0);
+    // 镜面地板 + 随机模型（SSR 的验收场景）＋ 环境镜面（SSR 要替换掉那一份）。
+    app.scene_index_ = env_i("SCENE", 1);
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.SetSsr(true);
+    app.ssr_max_ray_px_ = 220;
+    app.ssr_rough_to_lod_ = 8.0f;
+    app.ssr_rough_cutoff_ = 0.60f;
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = 0.0f;
+    app.ssr_fade_hit_edge_px_ = 0.0f;
+    app.ssr_backface_env_ = env_f("SSRBACK", 1.0f);
+    app.ssr_debug_ = env_i("SSR_DEBUG", 0);
+    app.ssr_scale_ = env_f("SSR_SCALE", 0.5f);   // 1.0 = 1:1（诊断用）
+    app.ssr_tile_env_ = env_i("SSR_TILE", 0);   // 0 = 不覆盖
+
+    const float kN[2] = {env_f("SSR_N", 6.0f), 1.0f};
+    const char* kSuffix[2] = {"n6", "n1"};
+    for (int i = 0; i < 2; ++i) {
+        app.ssr_thickness_px_ = kN[i];
+        app.ssr_slope_fix_ = false;
+        app.RunOnce(input, winfo, (out_dir + "/slope_off_" + kSuffix[i] + ".png").c_str());
+        app.ssr_slope_fix_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/slope_on_" + kSuffix[i] + ".png").c_str());
+        LOG(INFO) << "capture: " << out_dir << "/slope_{off,on}_" << kSuffix[i];
+    }
+    // 覆盖率灰度（A 通道）：绿色/亮 = 有答案。对比看“新增的命中”落在哪。
+    app.ssr_thickness_px_ = 6.0f;
+    app.ssr_debug_ = 4;
+    app.ssr_slope_fix_ = false;
+    app.RunOnce(input, winfo, (out_dir + "/slope_cov_off.png").c_str());
+    app.ssr_slope_fix_ = true;
+    app.RunOnce(input, winfo, (out_dir + "/slope_cov_on.png").c_str());
+    // 调试档（诊断背面压暗用）：5=背面标记 1=覆盖率 3=SSR 辐射度 4=A
+    {
+        const int want = env_i("SSR_DEBUG", 0);
+        if (want != 0) {
+            char nm[64];
+            app.ssr_debug_ = want;
+            app.ssr_slope_fix_ = true;
+            std::snprintf(nm, sizeof(nm), "/dbg%d.png", want);
+            app.RunOnce(input, winfo, (out_dir + nm).c_str());
+            app.ssr_debug_ = 0;
+        }
+    }
+    app.ssr_debug_ = 0;
+    app.ssr_slope_fix_ = false;
+
+    // 诊断用（2026-11-08）：面板一起画出来，用来判定“某个画面区域到底是 UI 还是 3D”。
+    app.SetShowPanel(true);
+    app.ssr_slope_fix_ = true;
+    app.RunOnce(input, winfo, (out_dir + "/panel_on.png").c_str());
+    app.SetShowPanel(false);
+
+    LOG(INFO) << "slope fix A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -939,6 +1049,7 @@ int main(int argc, char** argv) {
     std::string ssr_out_dir;
     std::string mat_out_dir;
     std::string falloff_out_dir;
+    std::string slope_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -953,6 +1064,8 @@ int main(int argc, char** argv) {
             mat_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ssr-falloff") == 0 && i + 1 < argc) {
             falloff_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-slope") == 0 && i + 1 < argc) {
+            slope_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -965,6 +1078,9 @@ int main(int argc, char** argv) {
     }
     if (!falloff_out_dir.empty()) {
         return RunCaptureSsrFalloff(falloff_out_dir);
+    }
+    if (!slope_out_dir.empty()) {
+        return RunCaptureSlope(slope_out_dir);
     }
     if (!ssr_out_dir.empty()) {
         return RunCaptureSsr(ssr_out_dir);

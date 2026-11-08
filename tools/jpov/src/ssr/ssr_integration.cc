@@ -183,7 +183,8 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
 
     // ── ② 输入准备（降采样）：全分辨率 → SSR 分辨率 ──
     downsample_.Run(in.hdr_color_tex, in.scene_depth_tex, in.attr_tex, in.attr_mat_tex,
-                    in.full_w, in.full_h, scale, in.near_plane, in.far_plane);
+                    in.full_w, in.full_h, scale, in.near_plane, in.far_plane,
+                    in.cfg.thickness_pixels, in.tan_half_fov_y);
 
     // ── ③ 算法（模块）：SSR 分辨率 → radiance + ray_ratio + 类型 ──
     SsrInputs si;
@@ -198,6 +199,8 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.aspect = in.aspect;
     si.thickness_pixels = in.cfg.thickness_pixels;
     si.min_thickness_m = in.cfg.min_thickness_m;
+    si.slope_fix = in.cfg.slope_fix;
+    si.zrange_tex = downsample_.range_tex();
     si.max_distance_m = in.cfg.max_distance_m;
     si.max_ray_pixels = in.cfg.max_ray_pixels;
     // 两个衰减带宽：配置是**全分辨率屏幕像素**（观感与分辨率解耦），模块内部一律 SSR 像素。

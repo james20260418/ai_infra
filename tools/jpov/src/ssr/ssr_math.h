@@ -168,6 +168,7 @@ struct ScreenRay {
     Vec2 s0;              // 起点像素坐标（未裁剪）
     Vec2 dir;             // 单位方向（像素空间）
     Vec3 dir3;            // **视空间**单位方向（朝向判据用；与 dir 是同一条光线的两种表达）
+    Vec3 p0;              // **视空间**起点（= BuildScreenRay 的 p，已做卫生偏移）。只给面斜率补偿用
     float span = 0.0f;    // 未裁剪线段长度 S（像素）
     float w0 = 0.0f;      // σ = 0 处的 1/d
     float w1 = 0.0f;      // σ = span 处的 1/d
@@ -211,6 +212,7 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     const Vec2 s1{(nq.x * 0.5f + 0.5f) * w, (nq.y * 0.5f + 0.5f) * h};
     out->w0 = 1.0f / d0;
     out->w1 = 1.0f / d1;
+    out->p0 = p;
     out->res = Vec2{w, h};
 
     const Vec2 delta = s1 - out->s0;
@@ -368,6 +370,53 @@ inline bool CellHit(float w_in, float w_out, float w_cell,
     return w_max * (1.0f + thickness_coefficient) >= w_cell;
 }
 
+// ────────── ③.6 鲁棒版面斜率补偿：**前置扩 z 区间**（2026-11-08）──────────
+//
+// 上一版在 march 里做“逐格射线-平面求交”，引入锚点近似与 P 依赖，还出过
+// “背面擦过被当命中 ⇒ backface 点亮 ⇒ env×0.2 ⇒ 矩形黑块”。这一版只做一件事：
+// **在判交之前，按面斜率把该格的 [z_lo, z_hi] 放宽**，march 的区间判据一行不改。
+// 因此：无锚点、无除法、无 P 依赖。
+//
+//   c_slope = 格角宽 · (|n_x|+|n_y|)/|n_z|
+//   z_lo = max(z·(1−c_slope), min(z_3x3))                        // 向近补，但不比邻域更近
+//   z_hi = max(z·(1+c), min(z·(1+c)·(1+c_slope), max(z_3x3)))    // 向远补，但不比邻域更远
+//   z_hi = min(z_hi, far_z)                                      // 全局上界 = far_plane
+//
+// 两个 cap 都由**邻域数据**给出，不是手调常数：平面上相邻格 z 连续，所以
+// “本格最多漂到邻域范围”就是几何允许的最大跨度；掠射 |n_z|→0 时 c_slope 会爆，
+// 爆到超出邻域就被这条掐住 ⇒ 不需要 cap 参数。c（原厚度 N_px）完全不动。
+struct CellZRange {
+    float z_lo = 0.0f;
+    float z_hi = 0.0f;
+};
+
+inline float CellNormalSlope(float nx, float ny, float nz) {
+    return (std::fabs(nx) + std::fabs(ny)) / std::max(std::fabs(nz), 1.0e-3f);
+}
+
+inline CellZRange WidenCellZ(float z, float slope, float cell_angle, float thickness_coefficient,
+                             float z_min_3x3, float z_max_3x3, float far_z) {
+    CellZRange r;
+    const float cs = cell_angle * slope;
+    const float z_far0 = z * (1.0f + thickness_coefficient);
+    r.z_lo = std::max(z * (1.0f - cs), z_min_3x3);
+    r.z_lo = std::min(r.z_lo, z);
+    r.z_hi = std::max(z_far0, std::min(z_far0 * (1.0f + cs), z_max_3x3));
+    r.z_hi = std::min(r.z_hi, far_z);
+    r.z_hi = std::max(r.z_hi, r.z_lo);
+    return r;
+}
+
+// 扩区间后的每格判据：w_lo = 1/z_lo、w_hi = 1/z_hi。语义与 CellHit 完全相同（区间重叠）。
+inline bool CellRangeHit(float w_in, float w_out, float w_lo, float w_hi) {
+    const float w_min = std::min(w_in, w_out);
+    const float w_max = std::max(w_in, w_out);
+    if (!(w_min > 0.0f) || !(w_lo > 0.0f) || !(w_hi > 0.0f)) {
+        return false;
+    }
+    return w_min <= w_lo && w_max >= w_hi;
+}
+
 // 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
 //
 //   R·N < 0 ⇒ 射线**扎进**这个面 = 合法的正面命中；
@@ -420,6 +469,13 @@ inline bool UpsampleDepthAccept(float w_hi, float gw_x, float gw_y, float dpx, f
 struct AcceptAllFacing {
     bool operator()(int /*cell_x*/, int /*cell_y*/, const Vec3& /*ray_dir*/) const {
         return true;
+    }
+};
+
+// 默认"没有放宽区间"：返回 false ⇒ 只用旧的区间判据（开关关闭时的行为）。
+struct NoRange {
+    bool operator()(int /*cell_x*/, int /*cell_y*/, float* /*w_lo*/, float* /*w_hi*/) const {
+        return false;
     }
 };
 
@@ -484,12 +540,12 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 //   `out_saw_backface`（可选出参）：整段里**有过**"进了柱体但朝向不对"的格 ⇒ true。
 //   融合层拿它把"没有答案"的像素的环境镜面项压暗（背面命中 = 屏幕里没有那个面的数据，
 //   纯 env 会透出一块过亮的探针色）。它与命中不互斥：后面若有合法命中，命中优先。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
+template <typename DepthFn, typename FacingFn = AcceptAllFacing, typename RangeFn = NoRange>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
                    bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
                    DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
                    int* hit_y = nullptr, FacingFn facing = FacingFn{},
-                   bool* out_saw_backface = nullptr) {
+                   bool* out_saw_backface = nullptr, RangeFn range = RangeFn{}) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
@@ -553,8 +609,16 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             }
             continue;
         }
-        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
-                    thickness_coefficient, min_thickness_m)) {
+        bool cell_hit = CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
+                                thickness_coefficient, min_thickness_m);
+        if (!cell_hit) {
+            float w_lo = 0.0f;
+            float w_hi = 0.0f;
+            if (range(cx, cy, &w_lo, &w_hi)) {
+                cell_hit = CellRangeHit(WAt(ray, sigma), WAt(ray, sigma_out), w_lo, w_hi);
+            }
+        }
+        if (cell_hit) {
             if (facing(cx, cy, ray.dir3)) {
                 if (hit_x != nullptr) {
                     *hit_x = cx;
@@ -585,24 +649,25 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
 }
 
 // 单线程版：整条射线一条 DDA 走到底（"K=1"的语义，也是等价性测试的对照）。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
+template <typename DepthFn, typename FacingFn = AcceptAllFacing, typename RangeFn = NoRange>
 float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
                     int max_cells, DepthFn&& w_at, int width, int height,
                     int* hit_x = nullptr, int* hit_y = nullptr,
-                    FacingFn facing = FacingFn{}, bool* out_saw_backface = nullptr) {
+                    FacingFn facing = FacingFn{}, bool* out_saw_backface = nullptr,
+                    RangeFn range = RangeFn{}) {
     const bool skip = ray.sigma_enter <= 0.0f;
     return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
                         thickness_coefficient, min_thickness_m, w_at, width, height,
-                        hit_x, hit_y, facing, out_saw_backface);
+                        hit_x, hit_y, facing, out_saw_backface, range);
 }
 
 // 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
 // **必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧"分段 + min"能成立的全部依据。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
+template <typename DepthFn, typename FacingFn = AcceptAllFacing, typename RangeFn = NoRange>
 float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
                  DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
                  int* hit_y = nullptr, FacingFn facing = FacingFn{},
-                 bool* out_saw_backface = nullptr) {
+                 bool* out_saw_backface = nullptr, RangeFn range = RangeFn{}) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
@@ -621,7 +686,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
                                      d.thickness_coefficient, min_thickness_m, w_at,
-                                     width, height, &cx, &cy, facing, &saw_backface);
+                                     width, height, &cx, &cy, facing, &saw_backface, range);
         if (s < best) {
             best = s;
             best_x = cx;
