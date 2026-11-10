@@ -346,8 +346,12 @@ void main() {
         if (uRealThickness != 0) {
             float thick = texelFetch(uThick, cell, 0).r;
             if (thick > 0.0) {
+                // 分辨率下限：物体比"射线在自己这一格里跨过的深度"还薄时，命中与否逐行抛硬币。
+                // 因此把厚度抬到至少等于这一格的射线深度跨度（data-driven，无常数）。
+                float dz_cell = abs(1.0 / max(w_in_now, 1.0e-9) - 1.0 / max(w_out_now, 1.0e-9));
+                float thick_eff = max(thick, dz_cell);
                 float z = 1.0 / w_cell;
-                float w_hi = 1.0 / (z + max(thick, uMinThickness));
+                float w_hi = 1.0 / (z + max(thick_eff, uMinThickness));
                 cell_hit = (min(w_in_now, w_out_now) <= w_cell) &&
                            (max(w_in_now, w_out_now) >= w_hi);
             } else {

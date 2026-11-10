@@ -677,12 +677,34 @@ int RunCaptureBackface(const std::string& out_dir) {
     app.ssr_rough_cutoff_ = 0.60f;
     app.ssr_debug_ = 0;
 
+    auto env_f = [](const char* n, float d) {
+        const char* v = std::getenv(n);
+        return (v != nullptr) ? std::strtof(v, nullptr) : d;
+    };
+    app.ssr_min_thickness_ = env_f("MINTHICK", 1.0e-4f);
+    const float scale = env_f("SSR_SCALE", 0.5f);
+
+    app.ssr_scale_ = scale;
     app.ssr_backface_ = false;
     app.RunOnce(input, winfo, (out_dir + "/backface_off.png").c_str());
     app.ssr_backface_ = true;
     app.RunOnce(input, winfo, (out_dir + "/backface_on.png").c_str());
     app.ssr_scale_ = 1.0f;
     app.RunOnce(input, winfo, (out_dir + "/backface_on_1x.png").c_str());
+    app.ssr_backface_ = false;
+    app.RunOnce(input, winfo, (out_dir + "/backface_off_1x.png").c_str());
+    // 调试档（诊断毛刺用）：4 = A 置信度；1 = 覆盖率灰度
+    if (const char* d = std::getenv("SSR_DEBUG")) {
+        const int want = std::atoi(d);
+        if (want != 0) {
+            app.ssr_debug_ = want;
+            app.ssr_backface_ = true;
+            app.RunOnce(input, winfo, (out_dir + "/dbg_on.png").c_str());
+            app.ssr_backface_ = false;
+            app.RunOnce(input, winfo, (out_dir + "/dbg_off.png").c_str());
+            app.ssr_debug_ = 0;
+        }
+    }
     app.ssr_scale_ = 0.5f;
     app.ssr_backface_ = false;
 
