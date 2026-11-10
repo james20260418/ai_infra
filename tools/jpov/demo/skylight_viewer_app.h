@@ -216,6 +216,8 @@ public:
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
+    bool  ssr_backface_ = false;    // 真实厚度：背面深度 pass（替换 c·z）
+    float ssr_min_thickness_ = 1.0e-4f;  // 真实厚度时的 epsilon（诊断可调）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
@@ -370,6 +372,8 @@ public:
             sc.enabled = true;
             sc.resolution_scale = ssr_scale_;
             sc.thickness_pixels = ssr_thickness_px_;
+            sc.backface_depth = ssr_backface_;
+            sc.min_thickness_m = ssr_min_thickness_;
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
@@ -466,20 +470,12 @@ private:
                         0.02f, 0.5f, 2);
         // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
         // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
+        ui_.Checkbox("SSR 真实厚度 (背面 pass)", &ssr_backface_, row(0, 15));
         ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 12));
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 
-        // ── 右列：远景仰角雾 ──
-        ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
-        ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
-        ui_.SliderFloat("满雾距离 m", &deg_.elev_fog_full, row(1, 2), 1.0f, 5000.0f, 1);
-        ui_.SliderFloat("仰角带内 °", &deg_.elev_fog_inner_deg, row(1, 3), 0.0f, 20.0f, 1);
-        ui_.SliderFloat("仰角带外 °", &deg_.elev_fog_outer_deg, row(1, 4), 0.1f, 40.0f, 1);
-        ui_.SliderFloat("雾浓度 σ", &deg_.elev_fog_density, row(1, 5), 0.0f, 8.0f, 2);
-        ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
-        // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
-        ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+        // ── 右列 0..7：远景仰角雾 UI 已移除（镜面验证模式不看雾；参数仍走默认值） ──
 
         // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
         {

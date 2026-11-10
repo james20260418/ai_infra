@@ -630,6 +630,89 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 背面深度（z_back）A/B：同一机位只切「真实厚度」开关。
+//   backface_off.png      经验厚度 c·z（现状）
+//   backface_on.png       真实厚度 z_back − z_front
+//   backface_on_1x.png    真实厚度 + 1:1（排除降采样干扰）
+// 机位用植物那一帧（竖向拉丝最明显）。
+int RunCaptureBackface(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SSR 背面深度（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.floor_preset_ = 0;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.292903f;   // pos (8.39266682, 3.24824572, -6.75089264) -> 原点
+    app.view_.theta = 2.248202f;
+    app.view_.R     = 11.25f;
+    app.SetSsr(true);
+    app.ssr_scale_ = 0.5f;
+    app.ssr_thickness_px_ = 6.0f;
+    app.ssr_max_ray_px_ = 220;
+    app.ssr_rough_to_lod_ = 8.0f;
+    app.ssr_rough_cutoff_ = 0.60f;
+    app.ssr_debug_ = 0;
+
+    auto env_f = [](const char* n, float d) {
+        const char* v = std::getenv(n);
+        return (v != nullptr) ? std::strtof(v, nullptr) : d;
+    };
+    app.ssr_min_thickness_ = env_f("MINTHICK", 1.0e-4f);
+    const float scale = env_f("SSR_SCALE", 0.5f);
+
+    app.ssr_scale_ = scale;
+    app.ssr_backface_ = false;
+    app.RunOnce(input, winfo, (out_dir + "/backface_off.png").c_str());
+    app.ssr_backface_ = true;
+    app.RunOnce(input, winfo, (out_dir + "/backface_on.png").c_str());
+    app.ssr_scale_ = 1.0f;
+    app.RunOnce(input, winfo, (out_dir + "/backface_on_1x.png").c_str());
+    app.ssr_backface_ = false;
+    app.RunOnce(input, winfo, (out_dir + "/backface_off_1x.png").c_str());
+    // 调试档（诊断毛刺用）：4 = A 置信度；1 = 覆盖率灰度
+    if (const char* d = std::getenv("SSR_DEBUG")) {
+        const int want = std::atoi(d);
+        if (want != 0) {
+            app.ssr_debug_ = want;
+            app.ssr_backface_ = true;
+            app.RunOnce(input, winfo, (out_dir + "/dbg_on.png").c_str());
+            app.ssr_backface_ = false;
+            app.RunOnce(input, winfo, (out_dir + "/dbg_off.png").c_str());
+            app.ssr_debug_ = 0;
+        }
+    }
+    app.ssr_scale_ = 0.5f;
+    app.ssr_backface_ = false;
+
+    LOG(INFO) << "backface depth A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -638,6 +721,7 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
+    std::string backface_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -650,12 +734,17 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
             mat_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-backface") == 0 && i + 1 < argc) {
+            backface_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!backface_out_dir.empty()) {
+        return RunCaptureBackface(backface_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);

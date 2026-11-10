@@ -713,6 +713,11 @@ struct SsrConfig {
     float thickness_pixels = 6.0f;
     float min_thickness_m = 1.0e-4f;
 
+    // 真实厚度（2026-11-08）：用**背面深度 pass**（相机视角、剔正面只留背面）算出的
+    // 每像素厚度 z_back − z_front 替换经验厚度 `T = c·z`。
+    // 开启后 `thickness_pixels` 不再参与判据，只剩一个 epsilon 防数值退化。
+    bool backface_depth = false;
+
     // 射线长度上限：米（物理）与 **SSR 像素**（屏幕预算 = 覆盖范围 = 成本）。
     float max_distance_m = 1000.0f;
     int max_ray_pixels = 220;

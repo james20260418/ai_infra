@@ -173,6 +173,12 @@ private:
 
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_tex_hdr_ = 0;
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
+    // 背面深度 pass 的目标（见 DrawBackfaceDepthPass）
+    unsigned int backface_depth_tex_ = 0;
+    unsigned int backface_fbo_ = 0;
+    unsigned int backface_rb_ = 0;
+    int backface_w_ = 0;
+    int backface_h_ = 0;
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
 
     // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）──
@@ -214,6 +220,17 @@ private:
     void Destroy3DFBO();
     void DestroyHDRFBO();
     void DestroyShadowFBO();
+
+    // ── 背面深度 pass（z_back，2026-11-08）────────────────────────────────
+    // 相机视角、`glCullFace(GL_FRONT)` 只留背面、只写深度的一个几何 pass（CSM 的同构版本）。
+    // 输出 = RGBA32F 颜色纹理，.r 存**沿相机 view 轴的正向距离（米）**；哨兵 1e16 = 该像素没有背面
+    // （单面卡片/天空）。SSR 的每格厚度 = z_back − z_front，用来替掉经验厚度 `c·z`。
+    //
+    // 为什么写颜色而不是深度附件：llvmpipe 下深度纹理采样不可靠（同 CSM 的踩坑记录）。
+    void EnsureBackfaceDepthFBO(int w, int h);
+    void DestroyBackfaceDepthFBO();
+    void DrawBackfaceDepthPass(const RenderCommandList& cmds);
+    unsigned int backface_depth_tex() const { return backface_depth_tex_; }
     void CompileShaders();
     void CreateStreamVBO();
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);

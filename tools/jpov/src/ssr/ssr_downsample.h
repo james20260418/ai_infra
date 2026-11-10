@@ -97,9 +97,11 @@ public:
     // 跑一趟。scale = 1/N（用 IsValidScale 校验）。
     // 返回后 color_tex()/w_tex()/normal_tex()/rough_tex() 为本帧结果，尺寸见 width()/height()。
     // near/far：窗口深度 → w = 1/z 的换算需要（见 ssr_math.h::WFromWindowDepth）。
+    // back_depth_tex：背面深度（相机视角、米制线性深度、哨兵 1e16 = 没有背面）。0 = 不用。
     void Run(unsigned int full_color_tex, unsigned int full_depth_tex,
              unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-             int full_w, int full_h, int scale, float near_plane, float far_plane);
+             unsigned int back_depth_tex, int full_w, int full_h, int scale, float near_plane,
+             float far_plane);
 
     unsigned int color_tex() const { return color_tex_; }    // RGBA16F，命中源色
     // R32F，**w = 1/z_view**（0 = 天空/无几何）。SSR 链路内部一律用 w。
@@ -108,6 +110,9 @@ public:
     // R16F：反射层**逐像素** roughness（属性纹理附件 1 的 .a）。
     // 只用于 march/resolve 的"太粗糙就不发射线"截止；材质本身（F0）由合成层在全分辨率读。
     unsigned int rough_tex() const { return rough_tex_; }
+    // R32F：**真实厚度**（米）= z_back − z_front，取自与前三张同一个 texel。0 = 没有背面数据
+    // （单面卡片/天空）⇒ 消费端退回经验厚度 c·z。
+    unsigned int thick_tex() const { return thick_tex_; }
     int width() const { return width_; }
     int height() const { return height_; }
 
@@ -122,6 +127,7 @@ private:
     unsigned int w_tex_ = 0;       // R32F：w = 1/z_view（0 = 空）
     unsigned int normal_tex_ = 0;
     unsigned int rough_tex_ = 0;
+    unsigned int thick_tex_ = 0;   // R32F：真实厚度（米），0 = 未知
     int width_ = 0;
     int height_ = 0;
 };
