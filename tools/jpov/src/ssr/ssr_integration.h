@@ -39,6 +39,7 @@ struct SsrPassInputs {
     unsigned int scene_depth_tex = 0;  // R32F：MRT#1 的 gl_FragCoord.z
     unsigned int attr_tex = 0;         // RGBA16F：rgb = 视空间法线，a = 掩码编码
     unsigned int attr_mat_tex = 0;     // RGBA16F：rgb = F0，a = roughness（逐像素材质）
+    unsigned int attr_slab_tex = 0;    // RG32F：体素柱 [front, back]（w = 1/z_view，0/0 = 空格）
     int full_w = 0;
     int full_h = 0;
 

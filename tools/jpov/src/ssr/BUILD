@@ -42,13 +42,14 @@ cc_library(
     linkstatic = 1,
 )
 
-# SSR 输入准备：全分辨率 (color,depth,attr) → SSR 分辨率 (color,depth,normal)。
+# SSR 输入准备：全分辨率 (color,depth,attr,slab) → SSR 分辨率 (color,slab,normal,rough)。
 cc_library(
     name = "ssr_downsample",
     srcs = ["ssr_downsample.cc"],
     hdrs = ["ssr_downsample.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":ssr_math",
         ":ssr_shader",
         "//tools/jpov/src:shader_manager",
         "@glog_static//:glog",

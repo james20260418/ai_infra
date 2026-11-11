@@ -211,7 +211,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     // ── Pre-condition（见头文件；不静默退化）──
     CHECK(initialized_) << "SsrRenderer::Render 前必须先 Init";
     CHECK_NE(in.color_tex, 0u) << "SsrInputs::color_tex 未设置";
-    CHECK_NE(in.w_tex, 0u) << "SsrInputs::w_tex 未设置（w = 1/z）";
+    CHECK_NE(in.slab_tex, 0u) << "SsrInputs::slab_tex 未设置（体素柱 [front, back]）";
     CHECK_NE(in.normal_tex, 0u) << "SsrInputs::normal_tex 未设置";
     CHECK_NE(in.rough_tex, 0u) << "SsrInputs::rough_tex 未设置（逐像素 roughness）";
     CHECK_GT(in.width, 0) << "SsrInputs::width 未设置";
@@ -220,8 +220,6 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK_GT(in.far_plane, in.near_plane) << "SsrInputs::far_plane 必须 > near_plane";
     CHECK_GT(in.tan_half_fov_y, 0.0f) << "SsrInputs::tan_half_fov_y 未设置";
     CHECK_GT(in.aspect, 0.0f) << "SsrInputs::aspect 未设置";
-    CHECK_GT(in.thickness_pixels, 0.0f) << "SsrInputs::thickness_pixels 未设置";
-    CHECK_GT(in.min_thickness_m, 0.0f) << "SsrInputs::min_thickness_m 未设置";
     CHECK_GT(in.max_distance_m, 0.0f) << "SsrInputs::max_distance_m 未设置";
     CHECK_GT(in.max_ray_pixels, 0) << "SsrInputs::max_ray_pixels 未设置";
     CHECK(IsValidTile(in.tile_size))
@@ -233,8 +231,8 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         << "color_tex 的宽度与 SsrInputs::width 不一致";
     CHECK_EQ(TextureHeight(in.color_tex), in.height)
         << "color_tex 的高度与 SsrInputs::height 不一致";
-    CHECK_EQ(TextureWidth(in.w_tex), in.width) << "w_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.w_tex), in.height) << "w_tex 的高度与 height 不一致";
+    CHECK_EQ(TextureWidth(in.slab_tex), in.width) << "slab_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.slab_tex), in.height) << "slab_tex 的高度与 height 不一致";
     CHECK_EQ(TextureWidth(in.normal_tex), in.width) << "normal_tex 的宽度与 width 不一致";
     CHECK_EQ(TextureHeight(in.normal_tex), in.height) << "normal_tex 的高度与 height 不一致";
 
@@ -259,15 +257,13 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     //     与 uStepsPerLane 这个上限无关。见 test/ssr:ssr_gpu_test 的 HugeBudgetIsHarmless。
     //   · tile 与预算的搭配（tile² ≤ max_ray_pixels/4）写在 ssr_renderer.h 的字段注释里，
     //     要查的人会去查那里，而不是在运行时日志里捞。
-    const ssr::DerivedParams derived =
-        ssr::DeriveParams(in.tile_size, in.max_ray_pixels, in.thickness_pixels,
-                          in.tan_half_fov_y, in.height);
+    const ssr::DerivedParams derived = ssr::DeriveParams(in.tile_size, in.max_ray_pixels);
 
     // 皮肤检查（契约 6）：不许把本模块自己的输出再喂回来。
-    CHECK(in.color_tex != outputs_.radiance_tex && in.w_tex != outputs_.radiance_tex &&
+    CHECK(in.color_tex != outputs_.radiance_tex && in.slab_tex != outputs_.radiance_tex &&
               in.normal_tex != outputs_.radiance_tex)
         << "输入纹理是本模块自己的 radiance_tex（反馈环）";
-    CHECK(in.color_tex != outputs_.hit_s_tex && in.w_tex != outputs_.hit_s_tex &&
+    CHECK(in.color_tex != outputs_.hit_s_tex && in.slab_tex != outputs_.hit_s_tex &&
               in.normal_tex != outputs_.hit_s_tex)
         << "输入纹理是本模块自己的 hit_s_tex（反馈环）";
 
@@ -332,8 +328,6 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uTanHalf", in.tan_half_fov_y);
         set1f(prog, "uAspect", in.aspect);
         set1f(prog, "uMaxDistance", in.max_distance_m);
-        set1f(prog, "uThicknessC", derived.thickness_coefficient);
-        set1f(prog, "uMinThickness", in.min_thickness_m);
         set1f(prog, "uSentinel", ssr::kNoHit);
         set1i(prog, "uTile", in.tile_size);
         set1f(prog, "uSlabPixels", derived.slab_pixels);
@@ -343,12 +337,12 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     };
     upload_common(prog_march_);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchDepth);
-    glBindTexture(GL_TEXTURE_2D, in.w_tex);
+    glBindTexture(GL_TEXTURE_2D, in.slab_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchNormal);
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
-    set1i(prog_march_, "uW", kTexUnitMarchDepth);
+    set1i(prog_march_, "uSlab", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -362,13 +356,13 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveSlice);
     glBindTexture(GL_TEXTURE_2D, slice_tex_);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveDepth);
-    glBindTexture(GL_TEXTURE_2D, in.w_tex);
+    glBindTexture(GL_TEXTURE_2D, in.slab_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveNormal);
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveColor);
     glBindTexture(GL_TEXTURE_2D, in.color_tex);
     set1i(prog_resolve, "uSlice", kTexUnitResolveSlice);
-    set1i(prog_resolve, "uW", kTexUnitResolveDepth);
+    set1i(prog_resolve, "uSlab", kTexUnitResolveDepth);
     set1i(prog_resolve, "uNormal", kTexUnitResolveNormal);
     set1i(prog_resolve, "uColor", kTexUnitResolveColor);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveRough);

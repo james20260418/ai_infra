@@ -215,7 +215,6 @@ public:
     int   floor_preset_ = 0;
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
-    float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
@@ -369,7 +368,6 @@ public:
             jpov::SsrConfig sc;
             sc.enabled = true;
             sc.resolution_scale = ssr_scale_;
-            sc.thickness_pixels = ssr_thickness_px_;
             sc.max_ray_pixels = ssr_max_ray_px_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
@@ -470,18 +468,31 @@ private:
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 
-        // ── 右列：远景仰角雾 ──
-        ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
-        ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
-        ui_.SliderFloat("满雾距离 m", &deg_.elev_fog_full, row(1, 2), 1.0f, 5000.0f, 1);
-        ui_.SliderFloat("仰角带内 °", &deg_.elev_fog_inner_deg, row(1, 3), 0.0f, 20.0f, 1);
-        ui_.SliderFloat("仰角带外 °", &deg_.elev_fog_outer_deg, row(1, 4), 0.1f, 40.0f, 1);
-        ui_.SliderFloat("雾浓度 σ", &deg_.elev_fog_density, row(1, 5), 0.0f, 8.0f, 2);
-        ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
-        // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
-        ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+        // ── 右列 0..8：远景仰角雾 ──
+        //
+        // **SSR 开启时整列不画**（2026-11-11 Danis 定）：验证 SSR 漏光时，远景雾会往
+        // 倒影里叠一层亮色天空泥，分不清"漏光"与"雾"；而且那一列会把右侧半边全占了。
+        // 关掉 SSR 即恢复 —— 雾的实现一行未动，只决定"面板画不画"。
+        if (!ssr_on_) {
+            ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
+            ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
+            ui_.SliderFloat("满雾距离 m", &deg_.elev_fog_full, row(1, 2), 1.0f, 5000.0f, 1);
+            ui_.SliderFloat("仰角带内 °", &deg_.elev_fog_inner_deg, row(1, 3), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("仰角带外 °", &deg_.elev_fog_outer_deg, row(1, 4), 0.1f, 40.0f, 1);
+            ui_.SliderFloat("雾浓度 σ", &deg_.elev_fog_density, row(1, 5), 0.0f, 8.0f, 2);
+            ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
+            // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色。
+            ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+            // 色块 = 天光推导的地平线天光色 × 增益。
+            const jpov::Color fc = MakeSkyLighting(deg_, tricolor_ambient_)
+                                       .sky.ElevationFogColor();
+            const jpov::Color shown{std::min(fc.r * deg_.elev_fog_gain, 1.0f),
+                                    std::min(fc.g * deg_.elev_fog_gain, 1.0f),
+                                    std::min(fc.b * deg_.elev_fog_gain, 1.0f), 1.0f};
+            ui_.ColorSwatch("雾色推导参考→", shown, row(1, 8));
+        }
 
-        // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
+        // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 预算 / 磨砂 ──
         {
             // 地面材质下拉（2026-11-02）：镜面 / 金属 / 光滑石砖 / 粗糙岩石 / 四段拼接。
             // 材质**逐物体**进属性纹理 ⇒ 四段拼接里每一段各用各的 F0/roughness，
@@ -500,7 +511,6 @@ private:
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
             }
-            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
             if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
                 ssr_max_ray_px_ = static_cast<int>(mrp);
@@ -511,15 +521,6 @@ private:
             // 发射线门槛：超过它的粗糙度直接用 env（省射线，且本来也糊得看不出形状）。
             ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 15),
                             0.2f, 1.0f, 2);
-        }
-        // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
-        {
-            const jpov::Color fc = MakeSkyLighting(deg_, tricolor_ambient_)
-                                       .sky.ElevationFogColor();
-            const jpov::Color shown{std::min(fc.r * deg_.elev_fog_gain, 1.0f),
-                                    std::min(fc.g * deg_.elev_fog_gain, 1.0f),
-                                    std::min(fc.b * deg_.elev_fog_gain, 1.0f), 1.0f};
-            ui_.ColorSwatch("雾色推导参考→", shown, row(1, 8));
         }
     }
 

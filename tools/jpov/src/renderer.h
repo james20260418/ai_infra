@@ -167,6 +167,9 @@ private:
     unsigned int ssr_attr_fbo_ = 0, ssr_attr_tex_ = 0;
     // 属性目标附件 1（RGBA16F）：rgb = F0，a = roughness —— 逐像素材质（2026-11-02）。
     unsigned int ssr_attr_mat_tex_ = 0;
+    // 属性目标附件 2（RG32F）：体素柱 [front, back]（w = 1/z_view，0/0 = 空格）。
+    // 由属性 pass 的 FS 用 gl_FragCoord.w 与其屏幕导数算出（见 ssr_shader.h::kSsrSlabGlsl）。
+    unsigned int ssr_attr_slab_tex_ = 0;
     int ssr_attr_w_ = 0, ssr_attr_h_ = 0;
     unsigned int ssr_attr_depth_tex_ = 0;   // 缓存当时挂的深度纹理句柄（变了要重建 FBO）
     SsrIntegration ssr_integration_;

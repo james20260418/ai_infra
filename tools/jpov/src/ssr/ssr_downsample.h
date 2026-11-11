@@ -95,15 +95,17 @@ public:
     void Finalize();
 
     // 跑一趟。scale = 1/N（用 IsValidScale 校验）。
-    // 返回后 color_tex()/w_tex()/normal_tex()/rough_tex() 为本帧结果，尺寸见 width()/height()。
-    // near/far：窗口深度 → w = 1/z 的换算需要（见 ssr_math.h::WFromWindowDepth）。
+    // 返回后 color_tex()/slab_tex()/normal_tex()/rough_tex() 为本帧结果，尺寸见 width()/height()。    // near/far：窗口深度 → w = 1/z 的换算需要（见 ssr_math.h::WFromWindowDepth）。
+    // full_slab_tex：属性 pass 的全分辨率体素柱（RG32F）。
     void Run(unsigned int full_color_tex, unsigned int full_depth_tex,
              unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-             int full_w, int full_h, int scale, float near_plane, float far_plane);
+             unsigned int full_slab_tex, int full_w, int full_h, int scale,
+             float near_plane, float far_plane);
 
     unsigned int color_tex() const { return color_tex_; }    // RGBA16F，命中源色
-    // R32F，**w = 1/z_view**（0 = 天空/无几何）。SSR 链路内部一律用 w。
-    unsigned int w_tex() const { return w_tex_; }
+    // RG32F：**体素柱 [front, back]**（w = 1/z_view；front ≤ 0 = 天空/无几何）。
+    // front 同时是"该格最近表面的 w"，所以射线反构与融合层的深度判据都读它的 .r。
+    unsigned int slab_tex() const { return slab_tex_; }
     unsigned int normal_tex() const { return normal_tex_; }  // RGBA16F，rgb=视空间法线, a=掩码
     // R16F：反射层**逐像素** roughness（属性纹理附件 1 的 .a）。
     // 只用于 march/resolve 的"太粗糙就不发射线"截止；材质本身（F0）由合成层在全分辨率读。
@@ -119,7 +121,7 @@ private:
     unsigned int prog_ = 0;
     unsigned int fbo_ = 0;
     unsigned int color_tex_ = 0;
-    unsigned int w_tex_ = 0;       // R32F：w = 1/z_view（0 = 空）
+    unsigned int slab_tex_ = 0;    // RG32F：体素柱 [front, back]（w 空间）
     unsigned int normal_tex_ = 0;
     unsigned int rough_tex_ = 0;
     int width_ = 0;

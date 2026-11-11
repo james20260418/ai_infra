@@ -708,10 +708,10 @@ struct SsrConfig {
     // N=3 不是 2 的幂：降采样与升采样都是"整数格 + 双线性/加权"，与 2 的幂无关。
     float resolution_scale = 0.5f;
 
-    // 厚度：T = max(N_px · θ_px · d, min_thickness_m)，单位是 **SSR 像素**（θ_px 按 SSR 分辨率算）。
-    // 半分辨率下同一个 N_px 对应的世界厚度会自动翻倍（见设计文档 §9.3），观感基本一致。
-    float thickness_pixels = 6.0f;
-    float min_thickness_m = 1.0e-4f;
+    // 厚度（2026-11-11 **已删除**）：`thickness_pixels` / `min_thickness_m` / `T = c·z`
+    // 全部移除。每格的柱体现在由属性 pass **量出来**（体素柱 [front, back]，见
+    // src/ssr/ssr_renderer.h 的"体素柱"一节与 docs/jpov_ssr_v2_design.md §19）——
+    // 同一个观感旋钮不再存在，因为它本来就是在补"单点深度信息不足"，而那个不足已经被填了。
 
     // 射线长度上限：米（物理）与 **SSR 像素**（屏幕预算 = 覆盖范围 = 成本）。
     float max_distance_m = 1000.0f;

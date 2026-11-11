@@ -12,7 +12,11 @@
 // 坐标系与单位（与 ssr_renderer.h 的契约一致）：
 //   · 视空间：x 右、y 上、相机看向 −z；视距 d = −z_view > 0，单位米。
 //   · 屏幕 σ：沿屏幕直线的**像素弧长**，起点 σ = 0；像素坐标 (0,0) 在左下（GL 习惯）。
-//   · 厚度 T 单位米；w = 1/d 单位 1/米。
+//   · w = 1/d 单位 1/米（体素柱的两端都用 w 表示）。
+//
+// 2026-11-11 起体素柱两端都是**量出来的**（见 Slab）：经验厚度 `T = c·z` 与
+// `min_thickness_m` 已删除，判据只看「射线在本格内的 w 区间是否与本格柱体相交」。
+// 设计见 `docs/jpov_ssr_v2_design.md` §19。
 
 #ifndef JPOV_SRC_SSR_SSR_MATH_H_
 #define JPOV_SRC_SSR_SSR_MATH_H_
@@ -261,31 +265,122 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────
 
-// 每格三行判据（§5.1）：射线在本格内的**视深区间** [d_lo, d_hi] 与本格柱体
-// [z, z+T] 是否有交集。w_in/w_out 是 1/d 端点，顺序无所谓；w_cell 是本格的 1/z（>0）。
+// 一格体素柱的两端，w 空间。**front > 0，back ≥ 0，且 front ≥ back**（w 大 = 近）。
 //
-// ⚠️ 2026-11-02 改成 **w 空间**：判据里不再出现任何除法（近平面退化分支除外）。
-//    d_hi ≥ z      ⟺  w_min ≤ w_cell
-//    d_lo ≤ z + T  ⟺  w_max ≥ 1/(z+T)；T = c·z ⇒ 1/(z+T) = w_cell/(1+c)
-//                    ⇒ 两边乘 (1+c)：w_max·(1+c) ≥ w_cell
-//    （c·z ≥ min_thickness 恒成立时；极近像素走下面的退化分支）
-// 着色器 SsrCellHit 逐字同一形式 —— 改这里必须同步改那边（对拍会红）。
-inline bool CellHit(float w_in, float w_out, float w_cell,
-                    float thickness_coefficient, float min_thickness_m) {
+//   front = 该格方框内这张面能到达的**最近**深度
+//   back  = 能到达的**最远**深度
+//   front ≤ 0 ⇒ 空格（天空 / 没有几何）
+//
+// 两端都是**量出来的**（属性 pass 用「平面在像素方框内的半幅」给出，降采样对格内子像素
+// 做连通并集），不再是 `T = c·z` 那种猜的厚度。back 允许为 0：物理含义是「这根柱子沿视线
+// 一直延伸到无穷远」（面在方框内穿过了相机平面），此时任何在面后方穿过的射线都算命中。
+//
+// 零厚度仍然存在（正对相机的面 front == back）⇒ 生产方必须加**相对** ε（`1e-5·w`，
+// 与距离、角度都无关），判据侧按闭区间处理。
+struct Slab {
+    float front = 0.0f;
+    float back = 0.0f;
+};
+
+// 生产方（属性 pass）用的抗零测度容差：**相对 w 的量**，不是米。
+//
+// 为什么不能用米：2026-11-11 实测同一帧地面 dz/texel 从 0.011 m（2 m 处）长到
+// 0.87 m（16 m 处）—— 米制容差在掠射处等于白送一米，那正是旧版「树影贴地平线」假命中的机制。
+// 相对量在 50 m 处只有 0.5 mm，且与掠射无关。
+constexpr float kSlabRelativeEpsilon = 1.0e-5f;
+
+// 降采样时「两个子像素的柱体是否相连」的容差（**相对 w**，故意比上面那条宽）。
+//
+// 连续平面下相邻子像素必然相交，理论上不需要 ε；它真正的作用是桥接「同格的另一个面」
+// （桌面与它踫着的地面、共面的两块拼图），让它们不会被拆成两根柱子。故意用相对量，
+// 所以轮廓处（差几个数量级）绝不会因此被并进来。
+constexpr float kSlabMergeEpsilon = 1.0e-3f;
+
+// 一个平面（中心 w + 屏幕梯度）在**一个像素方框**内的极值 ⇒ 该像素的柱体。
+// 与着色器 kSsrSlabGlsl::SsrSlabFromGradient 逐字同一形式。
+//
+// 依据：1/z 对屏幕坐标仿射 ⇒ 方框内的极值在四角上，半幅 = ½(|gx|+|gy|)。
+// 这只是**一个像素**的足迹；不能拿它乘 N 去算整格（那会把梯度放大到失控，
+// 且把降采样倍率泄漏进几何 pass）—— 整格靠 kSlabMergeEpsilon 那套连通并集。
+inline Slab SlabFromGradient(float w_center, float dw_dx, float dw_dy) {
+    const float half_span = 0.5f * (std::fabs(dw_dx) + std::fabs(dw_dy))
+                          + kSlabRelativeEpsilon * w_center;
+    Slab s;
+    s.front = w_center + half_span;
+    s.back = std::max(w_center - half_span, 0.0f);
+    return s;
+}
+
+// 两根柱体是否相接（闭区间相交，加相对 ε）。任一端是空格 ⇒ 不相连。
+inline bool SlabsTouch(const Slab& a, const Slab& b, float epsilon_relative) {
+    if (!(a.front > 0.0f) || !(b.front > 0.0f)) {
+        return false;
+    }
+    const float eps = epsilon_relative * std::max(a.front, b.front);
+    return std::max(a.back, b.back) <= std::min(a.front, b.front) + eps;
+}
+
+inline Slab MergeSlabs(const Slab& a, const Slab& b) {
+    Slab s;
+    s.front = std::max(a.front, b.front);
+    s.back = std::min(a.back, b.back);
+    return s;
+}
+
+// 降采样：格内 count 个子像素 → 一格柱体。
+//
+// 种子 = **最近**的那个子像素（front 最大）；只并入与当前区间**相接**的子像素，
+// 迭代到不变（必需的：A↔B、B↔C 但 A↛C 的链要能合上）。
+//
+// 为什么不直接 min/max：那会把“轮廓处的近物 + 远墙”拼成一根贯通几十米的柱子，
+// 反射里每个轮廓都长出一条黑边（满屏、结构性）。连通判据只排除“确实不相连”的子像素，
+// 连续面在共享边上必然有共同深度 ⇒ 一定合得上。
+//
+// Pre-condition: count ≥ 1，且至少一个子像素 front > 0（调用方负责）
+inline Slab UnionConnectedSlabs(const Slab* sub, int count, float epsilon_relative) {
+    int seed = 0;
+    for (int i = 1; i < count; ++i) {
+        if (sub[i].front > sub[seed].front) {
+            seed = i;
+        }
+    }
+    Slab acc = sub[seed];
+    for (int pass = 0; pass < count; ++pass) {
+        bool changed = false;
+        for (int i = 0; i < count; ++i) {
+            if (i == seed || !(sub[i].front > 0.0f)) {
+                continue;
+            }
+            if (!SlabsTouch(acc, sub[i], epsilon_relative)) {
+                continue;
+            }
+            const Slab merged = MergeSlabs(acc, sub[i]);
+            if (merged.front != acc.front || merged.back != acc.back) {
+                changed = true;
+            }
+            acc = merged;
+        }
+        if (!changed) {
+            break;
+        }
+    }
+    return acc;
+}
+
+// 每格唯一判据（§5.1）：射线在本格内的 w 区间 [w_in, w_out] 与本格柱体 [back, front]
+// 是否**相交**。w_in/w_out 顺序无所谓。
+//
+// 这与旧版的三行式等价于「零厚度」特例（front == back），但厚度是量的、不是设的：
+//   旧：d_hi ≥ z 且 d_lo ≤ z + T          （T = c·z 猜的）
+//   新：w_max ≥ back 且 w_min ≤ front      （back/front 都来自这张面自己）
+// 着色器 SsrCellHitsSlab 逐字同一形式 —— 改这里必须同步改那边（对拍会红）。
+inline bool CellHitsSlab(float w_in, float w_out, const Slab& slab) {
     const float w_min = std::min(w_in, w_out);
     const float w_max = std::max(w_in, w_out);
-    if (!(w_min > 0.0f) || !(w_cell > 0.0f)) {
-        return false;   // 防御：w ≤ 0 表示 d ≤ 0 / 空格（理论上已被前面挡掉）
+    if (!(w_min > 0.0f) || !(slab.front > 0.0f)) {
+        return false;   // 防御：w ≤ 0 表示 d ≤ 0；front ≤ 0 表示空格（前面已挡过）
     }
-    if (w_min > w_cell) {
-        return false;   // 整段在柱子前方（水面最常见）
-    }
-    // 退化分支：厚度下限生效（z 极近，c·z < min_thickness）。正常相机永不进入。
-    if (!(w_cell <= thickness_coefficient / min_thickness_m)) {
-        const float z = 1.0f / w_cell;
-        return w_max >= 1.0f / (z + min_thickness_m);
-    }
-    return w_max * (1.0f + thickness_coefficient) >= w_cell;
+    return (w_max >= slab.back) && (w_min <= slab.front);
 }
 
 // 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
@@ -358,20 +453,18 @@ struct DerivedParams {
     int lanes = 1;
     float slab_pixels = 0.0f;
     int steps_per_lane = 1;
-    float thickness_coefficient = 0.0f;
 };
 
-// Pre-condition: tile_size ∈ {1,2,4,8}、max_ray_pixels > 0、height > 0
+// Pre-condition: tile_size ∈ {1,2,4,8}、max_ray_pixels > 0
 //（校验放在 SsrRenderer::Render —— 这里不重复 CHECK，免得 GL-free 头文件依赖 glog）。
-inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels, float thickness_pixels,
-                                  float tan_half_fov_y, int height) {
+//
+// 2026-11-11：`thickness_pixels` 这个输入随经验厚度一起删除 —— 判据不再需要它
+//（柱体两端来自深度数据本身，见 CellHitsSlab）。
+inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels) {
     DerivedParams d;
     d.lanes = tile_size * tile_size;
     d.slab_pixels = static_cast<float>(max_ray_pixels) / static_cast<float>(d.lanes);
     d.steps_per_lane = static_cast<int>(std::ceil(1.41421356f * d.slab_pixels)) + 3;
-    const float fov_y = 2.0f * std::atan(tan_half_fov_y);
-    const float theta_px = fov_y / static_cast<float>(std::max(1, height));
-    d.thickness_coefficient = thickness_pixels * theta_px;
     return d;
 }
 
@@ -392,17 +485,17 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // 自己的柱子里立刻命中自己。**只对 σ_start == 0 的那一段成立**，其余 lane 的起点不在
 // 反射体上，不该跳。
 //
-// w_at(x, y) → 该格的 **w = 1/z_view**（0/负 = 没有几何）。越界由调用方保证不会发生
-// （这里仍防御性 break）。
+// slab_at(x, y) → 该格的体素柱（两端都是 w = 1/z_view，见 Slab）。越界由调用方保证
+// 不会发生（这里仍防御性 break）。
 //
 // facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
 //   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
 //   而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
+template <typename SlabFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
-                   bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
-                   DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                   int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                   bool skip_first_cell, SlabFn&& slab_at, int width, int height,
+                   int* hit_x = nullptr, int* hit_y = nullptr,
+                   FacingFn facing = FacingFn{}) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
@@ -449,8 +542,8 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
         if (!(sigma_out > sigma)) {
             break;   // 退化（浮点抖动）—— 别在这里死循环
         }
-        const float w_cell = w_at(cx, cy);
-        if (!(w_cell > 0.0f)) {
+        const Slab slab = slab_at(cx, cy);
+        if (!(slab.front > 0.0f)) {
             // 空格子（天空/无深度数据）：这里没有柱子，穿过去（见 kEmptyCell 的注释）。
             // ⚠️ 别在这里 return —— 屏内天空后面还可能有几何。
             if (sigma_out >= sigma_end) {
@@ -466,8 +559,7 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             }
             continue;
         }
-        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
-                    thickness_coefficient, min_thickness_m) &&
+        if (CellHitsSlab(WAt(ray, sigma), WAt(ray, sigma_out), slab) &&
             facing(cx, cy, ray.dir3)) {
             if (hit_x != nullptr) {
                 *hit_x = cx;
@@ -493,23 +585,21 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
 }
 
 // 单线程版：整条射线一条 DDA 走到底（"K=1"的语义，也是等价性测试的对照）。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
-float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
-                    int max_cells, DepthFn&& w_at, int width, int height,
-                    int* hit_x = nullptr, int* hit_y = nullptr,
+template <typename SlabFn, typename FacingFn = AcceptAllFacing>
+float MarchWholeRay(const ScreenRay& ray, int max_cells, SlabFn&& slab_at, int width,
+                    int height, int* hit_x = nullptr, int* hit_y = nullptr,
                     FacingFn facing = FacingFn{}) {
     const bool skip = ray.sigma_enter <= 0.0f;
-    return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
-                        thickness_coefficient, min_thickness_m, w_at, width, height,
-                        hit_x, hit_y, facing);
+    return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip, slab_at,
+                        width, height, hit_x, hit_y, facing);
 }
 
 // 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
 // **必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧"分段 + min"能成立的全部依据。
-template <typename DepthFn, typename FacingFn = AcceptAllFacing>
-float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
-                 DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                 int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+template <typename SlabFn, typename FacingFn = AcceptAllFacing>
+float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, SlabFn&& slab_at, int width,
+                 int height, int* hit_x = nullptr, int* hit_y = nullptr,
+                 FacingFn facing = FacingFn{}) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
@@ -526,8 +616,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cx = -1;
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
-                                     d.thickness_coefficient, min_thickness_m, w_at,
-                                     width, height, &cx, &cy, facing);
+                                     slab_at, width, height, &cx, &cy, facing);
         if (s < best) {
             best = s;
             best_x = cx;

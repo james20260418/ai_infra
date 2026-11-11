@@ -702,6 +702,10 @@ void Renderer::DestroyHDRFBO() {
             glDeleteTextures(1, &ssr_attr_mat_tex_);
             ssr_attr_mat_tex_ = 0;
         }
+        if (ssr_attr_slab_tex_ != 0) {
+            glDeleteTextures(1, &ssr_attr_slab_tex_);
+            ssr_attr_slab_tex_ = 0;
+        }
         ssr_attr_w_ = 0;
         ssr_attr_h_ = 0;
         ssr_attr_depth_tex_ = 0;
@@ -1791,6 +1795,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 ssi.scene_depth_tex = scene_depth_tex_hdr_;
                 ssi.attr_tex = ssr_attr_tex_;
                 ssi.attr_mat_tex = ssr_attr_mat_tex_;
+                ssi.attr_slab_tex = ssr_attr_slab_tex_;
                 ssi.full_w = fbo_3d_w;
                 ssi.full_h = fbo_3d_h;
                 ssi.near_plane = cmds.camera.near;
@@ -2547,6 +2552,10 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
         glDeleteTextures(1, &ssr_attr_mat_tex_);
         ssr_attr_mat_tex_ = 0;
     }
+    if (ssr_attr_slab_tex_ != 0) {
+        glDeleteTextures(1, &ssr_attr_slab_tex_);
+        ssr_attr_slab_tex_ = 0;
+    }
     CHECK_NE(depth_tex_hdr_, 0u) << "SSR 属性 pass 复用 HDR FBO 的深度纹理，它还没建";
 
     auto make_attr_tex = [&](unsigned int* tex) {
@@ -2562,6 +2571,18 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
     make_attr_tex(&ssr_attr_tex_);          // 附件0：视空间法线 + 掩码
     make_attr_tex(&ssr_attr_mat_tex_);      // 附件1：F0 + roughness（逐像素材质）
 
+    // 附件2：体素柱 [front, back]（w = 1/z_view）。**RG32F 是刻意的**：
+    // 掠射/掠射边缘的 w 动态范围跨好几个数量级，R16F 的相对精度（1e-3）会把 slab 半幅
+    // 算错 10% ⇒ 覆盖不足 ⇒ 又回到漏光。
+    glGenTextures(1, &ssr_attr_slab_tex_);
+    glBindTexture(GL_TEXTURE_2D, ssr_attr_slab_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, w, h, 0, GL_RG, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     glGenFramebuffers(1, &ssr_attr_fbo_);
     GLint prev_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
@@ -2569,11 +2590,13 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssr_attr_tex_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            ssr_attr_mat_tex_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+                           ssr_attr_slab_tex_, 0);
     // 深度附件**复用** HDR FBO 的那张深度纹理：只读它做 LEQUAL 测试（glDepthMask(GL_FALSE)），
     // 所以属性 pass 只会写"真正可见的那一层表面"，不会把被挡住的背面也写进去。
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex_hdr_, 0);
-    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
+    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+    glDrawBuffers(3, bufs);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR 属性 FBO 不完整（" << w << "×" << h << "）";
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));

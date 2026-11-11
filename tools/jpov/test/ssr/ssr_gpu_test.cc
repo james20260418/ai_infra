@@ -38,6 +38,29 @@
 
 namespace {
 
+// 把"单点深度"回调包成**零厚度**柱体（front == back）：与旧版单点深度判据逐位等价。
+// 本文件的对拍/取色/等价性断言都与柱体宽度无关，所以统一用它；柱体本身的语义在
+// ssr_math_test 里单独覆盖。
+// 柱体从表面**往远处**延伸 c=6%（= 旧版经验厚度 T = c·z 的同构物，c = N_px·θ_px
+// ≈ 10 × (60°FOV / 180 行) ≈ 0.058）。取同一个数值是为了让本文件的合成场景（"整屏同一
+// 深度"这种真实场景里不存在的东西）保持原来的命中形态，断言阈值一个字都不用改。
+// 本文件测的是 DDA 记账 / 取色 / 分段等价性 / 覆盖率编码 —— 都与柱体**宽度**无关，
+// 但没有一点宽度就一个命中都出不来（零厚度 = 判"射线必须正好穿过那个点"）。
+// 柱体本身的语义、生产公式、降采样连通并集在 ssr_math_test 里单独钉死。
+constexpr float kSlabBackFrac = 6.0e-2f;
+
+template <typename Fn>
+auto RelativeSlab(Fn fn) {
+    return [fn](int x, int y) {
+        const float w = fn(x, y);
+        jpov::ssr::Slab s;
+        s.front = w;
+        s.back = (w > 0.0f) ? (w / (1.0f + kSlabBackFrac)) : 0.0f;
+        return s;
+    };
+}
+
+
 using jpov::ssr::BuildScreenRay;
 using jpov::ssr::ClipRayLength;
 using jpov::ssr::DeriveParams;
@@ -232,7 +255,7 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
         return jpov::ssr::HitFacesRay(d, n);
     };
-    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing);
+    const float s = MarchSlabs(ray, derived, RelativeSlab(depth_at), kWidth, kHeight, &cx, &cy, facing);
     if (s < kNoHit) {
         out.hit = true;
         out.s = s;
@@ -248,7 +271,7 @@ struct Fixture {
     SsrRenderer ssr;
     jpov::ShaderManager shader_mgr;
     Scene scene;
-    unsigned int w_tex = 0;
+    unsigned int slab_tex = 0;
     unsigned int normal_tex = 0;
     unsigned int color_tex = 0;
     unsigned int rough_tex = 0;
@@ -257,13 +280,18 @@ struct Fixture {
     void Setup(const Scene& sc, int tile, int max_ray_pixels) {
         GlEnv::Get().Ensure();
         scene = sc;
-        // 上传 **w = 1/z**（2026-11-02 起 SSR 模块内部的深度形式；0 = 天空）。
+        // 上传**体素柱 [front, back]**（RG32F，w = 1/z_view；0/0 = 天空）。
+        //
+        // 宽度取 RelativeSlab 那一套（表面往远处延伸 1%），与 CPU 参考**同值**。
         {
-            std::vector<float> ws(scene.window_depth.size());
-            for (size_t i = 0; i < ws.size(); ++i) {
-                ws[i] = jpov::ssr::WFromWindowDepth(scene.window_depth[i], kNear, kFar);
+            std::vector<float> slabs(static_cast<size_t>(kWidth) * kHeight * 2, 0.0f);
+            for (size_t i = 0; i < scene.window_depth.size(); ++i) {
+                const float w =
+                    jpov::ssr::WFromWindowDepth(scene.window_depth[i], kNear, kFar);
+                slabs[i * 2 + 0] = w;
+                slabs[i * 2 + 1] = (w > 0.0f) ? (w / (1.0f + kSlabBackFrac)) : 0.0f;
             }
-            w_tex = UploadFloatTexture(ws, kWidth, kHeight, GL_R32F, GL_RED);
+            slab_tex = UploadFloatTexture(slabs, kWidth, kHeight, GL_RG32F, GL_RG);
         }
         // 法线用 RG32F（**不是** RG16F）：fp16 会把 ny=0.95 量化成 0.95019，
         // CPU 参考拿到的却是 0.95 —— 逐像素对拍时这点差异会在柱子边缘把命中格推走一格。
@@ -296,7 +324,7 @@ struct Fixture {
         }
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
-        in.w_tex = w_tex;
+        in.slab_tex = slab_tex;
         in.normal_tex = normal_tex;
         in.rough_tex = rough_tex;
         in.roughness_cutoff = 1.0f;
@@ -306,8 +334,6 @@ struct Fixture {
         in.far_plane = kFar;
         in.tan_half_fov_y = kTanHalf;
         in.aspect = kAspect;
-        in.thickness_pixels = 10.0f;
-        in.min_thickness_m = 1.0e-4f;
         in.max_distance_m = 900.0f;
         in.max_ray_pixels = max_ray_pixels;
         in.tile_size = tile;
@@ -316,8 +342,8 @@ struct Fixture {
 
     ~Fixture() {
         ssr.Finalize();
-        if (w_tex != 0) {
-            glDeleteTextures(1, &w_tex);
+        if (slab_tex != 0) {
+            glDeleteTextures(1, &slab_tex);
         }
         if (normal_tex != 0) {
             glDeleteTextures(1, &normal_tex);
@@ -343,7 +369,7 @@ TEST(SsrGpu, MatchesCpuReference) {
             ASSERT_NE(out.radiance_tex, 0u);
 
             const DerivedParams derived =
-                DeriveParams(tile, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+                DeriveParams(tile, f.in.max_ray_pixels);
             const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
             // A 不再是 radiance.a（那里现在是 ray_ratio）：命中与否由类型图给出。
             const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
@@ -762,7 +788,7 @@ TEST(SsrGpu, BackfaceHitsRejected) {
     ASSERT_NE(out.radiance_tex, 0u);
 
     const DerivedParams derived =
-        DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+        DeriveParams(f.in.tile_size, f.in.max_ray_pixels);
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
     const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
 

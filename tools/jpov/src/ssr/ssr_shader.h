@@ -34,9 +34,10 @@ inline constexpr const char* kSsrGlslVersion = "#version 330 core\n";
 
 // 两份 FS 共用的头部：uniform + 射线反构/裁剪 + 每格判据。**不带 #version**。
 inline constexpr const char* kSsrCommonGlsl = R"glsl(
-// R32F：**w = 1/z_view**（不是窗口深度）。0 = 没有几何（天空/背景）。
-// SSR 内部一律用 w：判据全是"1/d 落在哪个区间"，而 1/d 对屏幕坐标仿射 ⇒ 每格零除法。
-uniform sampler2D uW;
+// **RG32F 的柱体两端**（2026-11-11）：.r = front（近，w 大），.g = back（远，w 小）；
+// front ≤ 0 = 空格（天空/背景）。两端都是属性 pass **量出来的**（ssr_math.h::Slab，
+// 设计见 docs/jpov_ssr_v2_design.md §19），不再是「单点 + 经验厚度 c·z」。
+uniform sampler2D uSlab;
 uniform sampler2D uNormal;    // 反射体视空间法线 .xy（z 由 sqrt 重建）
 // 反射层**逐像素** roughness（R16F，降采样后）。2026-11-02 起材质进属性纹理，
 // 不再有"全场景一套粗糙度"；这里只用于一件事：超过 uRoughnessCutoff 的像素**不发射线**。
@@ -48,8 +49,6 @@ uniform float uFar;
 uniform float uTanHalf;       // tan(垂直 FOV / 2)
 uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
-uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
-uniform float uMinThickness;  // 米，T 的下限
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
 uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
@@ -69,10 +68,15 @@ struct SsrRay {
     float exit;
 };
 
-// 该格有没有几何。**w = 0 是唯一的"空"表示**（降采样时把天空/远平面写成 0），
+// 该格有没有几何。**front > 0 是唯一的"有几何"表示**（降采样时把天空/远平面写成 0），
 // 这样 CPU 参考与着色器不会在"far 处到底是天空还是墙"上分叉。
-bool SsrHasDepth(float w) {
-    return w > 0.0;
+bool SsrHasDepth(float slab_front) {
+    return slab_front > 0.0;
+}
+
+// 该格的体素柱两端：.x = front（近，w 大），.y = back（远，w 小）。
+vec2 SsrSlabAt(ivec2 cell) {
+    return texelFetch(uSlab, cell, 0).rg;
 }
 
 // 法线：属性纹理存**完整三维视空间法线**（rgb），这里只归一化。
@@ -100,25 +104,18 @@ float SsrWAt(SsrRay ray, float sigma) {
     return ray.w0 + (ray.w1 - ray.w0) * t;
 }
 
-// 每格判据（§5.1）。ssr_math.h::CellHit 逐字同一形式。
+// 每格唯一判据（2026-11-11）：**射线在本格内的 w 区间与本格柱体是否相交**。
+// ssr_math.h::CellHitsSlab 逐字同一形式。
 //
-//   d_hi ≥ z      ⟺  w_min ≤ w_cell
-//   d_lo ≤ z + T  ⟺  w_max·(1+c) ≥ w_cell      （T = c·z ⇒ 1/(z+T) = z⁻¹/(1+c)）
-// 两条都是比较/乘法，**没有除法** —— 这是 w 空间重构的全部收益。
-bool SsrCellHit(float w_in, float w_out, float w_cell) {
-    float w_min = min(w_in, w_out);
-    float w_max = max(w_in, w_out);
-    if (!(w_min > 0.0) || !(w_cell > 0.0)) {
-        return false;
+//    w_max ≥ back  且  w_min ≤ front
+//
+// 没有经验厚度、没有 N_px、没有 min_thickness：两端都是这张面在这个格子里的**真实可达深度**。
+// 与旧版的关系：`w_max·(1+c) ≥ w_cell` 是 front == back 的零厚度特例再加一个**猜的** T。
+bool SsrCellHitsSlab(float w_in, float w_out, vec2 slab) {
+    if (!(slab.x > 0.0)) {
+        return false;                 // 空格：这里没有面
     }
-    if (w_min > w_cell) {
-        return false;                    // 整段在柱子前方
-    }
-    // 退化分支：厚度下限生效（z 极近）。正常相机永不进入。
-    if (!(w_cell <= uThicknessC / uMinThickness)) {
-        return w_max >= 1.0 / (1.0 / w_cell + uMinThickness);
-    }
-    return w_max * (1.0 + uThicknessC) >= w_cell;
+    return (max(w_in, w_out) >= slab.y) && (min(w_in, w_out) <= slab.x);
 }
 
 // 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
@@ -145,7 +142,8 @@ bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
 // ⚠️ 采样点用 **tile 中心** uv = (mir + 0.5) / uRes，**不是** gl_FragCoord/uTile/uRes：
 //    后者会把采样点偏 (T−1)/(2T) 个像素，倒影整体平移 + 边缘一圈脏边。
 bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
-    float w_surf = texelFetch(uW, mir, 0).r;
+    vec2 slab = SsrSlabAt(mir);
+    float w_surf = slab.x;         // 起点用 **front**（最近的表面），与融合层的 .r 同一值
     float d_surf = 1.0 / w_surf;   // w = 1/z ⇒ z = 1/w（每像素一次除法）
 
     vec3 N = SsrNormalOf(texelFetch(uNormal, mir, 0));
@@ -250,7 +248,7 @@ void main() {
     FragS = uSentinel;
 
     // 远平面（清空值）：没有深度数据，不发射线。天空占屏的场景里这一步最省。
-    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
+    if (!SsrHasDepth(SsrSlabAt(mir).x)) {
         return;
     }
     // 太粗糙 ⇒ 不发射线（预算省下来）：单条镜面射线表达不了宽反射瓣，交给 env 的 mip。
@@ -319,8 +317,8 @@ void main() {
         }
         // 空格子（天空/无深度数据）没有柱子：穿过去，**不要**当成 far 处的墙。
         // 见 ssr_math.h::kEmptyCell 的反例（掠射时会在近地平线造出一大片假高光）。
-        float w_cell = texelFetch(uW, cell, 0).r;
-        if (!SsrHasDepth(w_cell)) {
+        vec2 slab = SsrSlabAt(cell);
+        if (!SsrHasDepth(slab.x)) {
             if (sigma_out >= end) {
                 return;
             }
@@ -335,7 +333,7 @@ void main() {
             continue;
         }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell) &&
+        if (SsrCellHitsSlab(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), slab) &&
             SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
@@ -391,7 +389,7 @@ void main() {
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
-    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
+    if (!SsrHasDepth(SsrSlabAt(mir).x)) {
         type = 0u;                         // kNone：本像素不是反射候选
     } else if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
         type = 0u;                         // kNone：太粗糙，本像素没有发射线
@@ -421,7 +419,7 @@ void main() {
             } else {
                 ivec2 vpi = clamp(ivec2(vp), ivec2(0), ivec2(uRes) - 1);
                 // 灭点处**没有深度数据** = 反射方向真的指向天空；有几何 = 我们漏检/预算不够。
-                type = SsrHasDepth(texelFetch(uW, vpi, 0).r) ? 4u : 2u;
+                type = SsrHasDepth(SsrSlabAt(vpi).x) ? 4u : 2u;
             }
         }
     }
@@ -468,7 +466,6 @@ void main() {
 // 所以这里把世界法线转到视空间（uWorldToView 由 Renderer 每趟上传一次）。
 // 曲面（人体）的法线逐顶点不同，正是"曲面镜面"这条用例要测的东西。
 inline constexpr const char* kSsrAttrSkinnedFs = R"glsl(
-#version 330 core
 in vec3 vWorldNormal;
 uniform mat3  uWorldToView;
 uniform float uAttrIsReflector;
@@ -477,7 +474,9 @@ uniform float uAttrMetallic;
 uniform float uAttrRoughness;
 out vec4 FragAttr;
 out vec4 FragMat;
+layout(location = 2) out vec2 FragSlab;   // 体素柱 [front, back]（w 空间，见 SsrSlabFromGradient）
 void main() {
+    FragSlab = SsrSlabHere();   // 必须在最前面：导数要一致控制流
     vec3 n_view = normalize(uWorldToView * normalize(vWorldNormal));
     // 双面渲染：背面法线翻转 —— 与主 pass（skeleton_renderer.h 的 gl_FrontFacing 段）同一约定。
     // 不翻的话，背面可见的薄片/双面网格在属性纹理里存的是**背离相机**的法线，
@@ -485,6 +484,35 @@ void main() {
     if (!gl_FrontFacing) n_view = -n_view;
     FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);   // 同 kSsrAttrFs
     FragMat = vec4(mix(vec3(0.04), uAttrBaseColor, uAttrMetallic), uAttrRoughness);
+}
+)glsl";
+
+// ── 体素柱的生产（属性 pass 共用；拼在所有属性 FS 的最前面）──
+//
+// 为什么不需要 varying / near / far：**w = 1/z_view 就是 gl_FragCoord.w**。本项目的透视
+// 矩阵是 `w_clip = −z_view`（primitives3d_renderer.cc::BuildPerspProj 的 out[11] = −1），
+// 而 GL 定义 gl_FragCoord.w ≡ 1/w_clip。
+//
+// ⚠️ 不要去走 `1/ZView(gl_FragCoord.z)`：窗口深度是 24 bit 量化过的，那一份误差正是旧版
+//    接缝漏光的一个来源；gl_FragCoord.w 是插值出来的精确值。
+//
+// 半幅 = ½(|∂w/∂x| + |∂w/∂y|)：1/z 对屏幕坐标仿射 ⇒ 像素方框内的极值在四角上。
+// 再加**相对** ε 抗零测度：正对相机的面半幅为 0，不加就退化成"穿过一个点"。
+//
+// 产物只描述**这一个像素**（不能乘 N 去算整格：那会把梯度放大到失控，还把降采样倍率
+// 泄漏进几何 pass）。整格由降采样的连通并集得到，见 ssr_downsample.cc。
+inline constexpr const char* kSsrSlabGlsl = R"glsl(
+const float kSsrSlabRelEps = 1.0e-5;
+
+vec2 SsrSlabFromGradient(float w, vec2 gw) {
+    float half_span = 0.5 * (abs(gw.x) + abs(gw.y)) + kSsrSlabRelEps * w;
+    return vec2(w + half_span, max(w - half_span, 0.0));
+}
+
+// 本像素自己的柱体。导数必须取在**一致控制流**上 ⇒ 在 main 第一行调用、且在 discard 之前。
+vec2 SsrSlabHere() {
+    float w = gl_FragCoord.w;
+    return SsrSlabFromGradient(w, vec2(dFdx(w), dFdy(w)));
 }
 )glsl";
 
@@ -513,7 +541,6 @@ void main() {
 )glsl";
 
 inline constexpr const char* kSsrAttrCutoutFs = R"glsl(
-#version 330 core
 in vec3 vNormalView;
 in vec2 vTexCoord;
 uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
@@ -525,7 +552,9 @@ uniform int   uHasBaseColorTex;
 uniform float uAlphaCutoff;
 out vec4 FragAttr;
 out vec4 FragMat;
+layout(location = 2) out vec2 FragSlab;   // 体素柱 [front, back]（w 空间，见 SsrSlabFromGradient）
 void main() {
+    FragSlab = SsrSlabHere();   // 必须在 discard 之前：导数要一致控制流
     // 有纹理就连 F0 一起用纹理色 —— 这是本 pass 唯一能拿到逐像素 baseColor 的地方
     //（非镂空变体没有 UV，只能用材质常量）。
     vec3 base = uAttrBaseColor;
@@ -544,7 +573,6 @@ void main() {
 )glsl";
 
 inline constexpr const char* kSsrAttrFs = R"glsl(
-#version 330 core
 in vec3 vNormalView;
 uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
 // 逐像素材质（per-object uniform）：主 pass 用的同一份 PBRMaterial 常量。
@@ -556,6 +584,7 @@ uniform float uAttrRoughness;
 // a   = 掩码编码：1.0 = 反射体，0.5 = 有法线但不反射，0 = 无数据（未绘制/清屏）
 out vec4 FragAttr;
 out vec4 FragMat;    // rgb = F0；a = roughness
+layout(location = 2) out vec2 FragSlab;   // 体素柱 [front, back]（w 空间，见 SsrSlabFromGradient）
 // F0 的唯一出处（与 env_specular.h 的 EnvSpecularTerm 同一式）：
 vec3 SsrF0(vec3 base_color, float metallic) {
     return mix(vec3(0.04), base_color, metallic);
@@ -566,6 +595,7 @@ vec3 SsrF0(vec3 base_color, float metallic) {
 //    属性纹理的是背离相机的法线 ⇒ SsrHitFacing 的 dot(R,N) 与着色结论相反，
 //    这些表面在倒影里会被整块判成"背面命中"而漏掉（或反过来吃掉别的命中）。
 void main() {
+    FragSlab = SsrSlabHere();   // 必须在最前面：导数要一致控制流
     vec3 n_view = vNormalView;
     if (!gl_FrontFacing) n_view = -n_view;
     FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);
