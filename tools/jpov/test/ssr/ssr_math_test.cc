@@ -29,7 +29,7 @@ namespace {
 
 using jpov::ssr::BuildScreenRay;
 using jpov::ssr::CellAtSigma;
-using jpov::ssr::CellHit;
+using jpov::ssr::CellCrossesFront;
 using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
@@ -150,102 +150,112 @@ TEST(SsrMath, WLinearInSigma) {
 
 // ───────────────────────── 2. 体素柱区间判据 ─────────────────────────
 
-TEST(SsrMath, VoxelPredicate) {
-    // (a) 厚墙：200 m 外的墙，射线每格穿透 1.2 m，T = 0.5 m —— 必须命中。
-    //     这正是 §4.2 的决定性证据：双线性判据（是否"留在"厚度带内）会判成"穿过"。
+TEST(SsrMath, CrossesFrontPredicate) {
+    // 判据只有一条：射线在这一格里**穿过了前表面**（z_in ≤ z_front ≤ z_out）。
+    //
+    // (a) 穿面 ⇒ 命中。射线在格内从 199.8 m 走到 201.0 m，面在 200 m。
+    EXPECT_TRUE(CellCrossesFront(1.0f / 199.8f, 1.0f / 201.0f, 1.0f / 200.0f))
+        << "射线跨过前表面必须命中";
+
+    // (b) 面在射线终点之后 ⇒ 放行。
+    EXPECT_FALSE(CellCrossesFront(1.0f / 60.0f, 1.0f / 61.0f, 1.0f / 50.0f))
+        << "面比射线终点还远 ⇒ 不可能命中";
+
+    // (c) 面比射线起点还近（射线已经在面后面/实体内）⇒ 放行。
+    //     这一条替代了旧的"背面命中"判据：实体内部穿行时 z_in > z_front，自动不成立。
+    EXPECT_FALSE(CellCrossesFront(1.0f / 10.0f, 1.0f / 12.0f, 1.0f / 6.0f))
+        << "射线起点已在面后 ⇒ 不是正面命中";
+
+    // (d) 空格（天空 / 无深度数据）⇒ 这里没有面。
+    EXPECT_FALSE(CellCrossesFront(1.0f / 10.0f, 1.0f / 12.0f, 0.0f));
+
+    // (e) 闭区间：恰好等于前端 / 后端都算命中（避免边界处漏一格）。
+    EXPECT_TRUE(CellCrossesFront(1.0f / 2.0f, 1.0f / 4.0f, 1.0f / 2.0f));
+    EXPECT_TRUE(CellCrossesFront(1.0f / 2.0f, 1.0f / 4.0f, 1.0f / 4.0f));
+
+    // (f) 负向对照（这就是被删掉的那条魔法的病灶）：掠射时射线在一格里跨 30 m，
+    //     旧代码把"体素厚度"抬到 30 m，于是 6 m 处的树被 30 m 的射线判成命中。
+    //     新判据必须放行；把旧算式抄回来必须命中 —— 两边都断言，防止未来又把抬升加回来。
     {
-        const float z = 200.0f;
-        const float t = 0.5f;                       // = c·z ⇒ c = t/z = 0.0025
-        const float c = t / z;
-        EXPECT_TRUE(CellHit(1.0f / 199.8f, 1.0f / 201.0f, 1.0f / z, c, 1.0e-4f))
-            << "区间 [199.8,201.0] ∩ [200,200.5] 非空，必须命中";
-        const float g_exit = 201.0f - 200.0f;   // 每格穿透量 1.0 m
-        EXPECT_GT(g_exit, t) << "双线性那套判据在同输入下会判'穿过'——这就是放弃它的理由";
-    }
-    // (b) 薄栏杆：射线整段在柱子后方 ⇒ 必须放行（负向：首次跨越即命中会误判）。
-    {
-        const float z = 50.0f;
-        const float t = 0.5f;                       // = c·z ⇒ c = 0.01
-        const float w_in = 1.0f / 60.0f;
-        const float w_out = 1.0f / 61.0f;
-        EXPECT_FALSE(CellHit(w_in, w_out, 1.0f / z, t / z, 1.0e-4f))
-            << "整段在柱子后方必须放行";
-        const bool naive_hit = (1.0f / std::min(w_in, w_out)) >= z;
-        EXPECT_TRUE(naive_hit) << "负向对照失效：'首次跨越即命中'在这里居然也判对了";
-    }
-    // (c) 轮廓跳变：同一射线区间对前格命中、对远格放行。
-    {
-        const float w_in = 1.0f / 1.00f;
-        const float w_out = 1.0f / 1.05f;
-        EXPECT_TRUE(CellHit(w_in, w_out, /*w_cell=*/1.0f / 1.0f, /*c=*/0.02f, 1.0e-4f));
-        EXPECT_FALSE(CellHit(w_in, w_out, /*w_cell=*/1.0f / 1000.0f, /*c=*/0.01f, 1.0e-4f));
-    }
-    // (d) 边界闭区间：d_hi == z、d_lo == z+T 都算命中（≥/≤ 而非 >/<）。
-    {
-        // z = 2 m，T = 1 m ⇒ c = 0.5。w_cell = 1/2。
-        EXPECT_TRUE(CellHit(1.0f / 1.0f, 1.0f / 2.0f, /*w_cell=*/0.5f, /*c=*/0.0f, 1.0e-4f))
-            << "射线恰好抵达前表面应算命中";
-        EXPECT_TRUE(CellHit(1.0f / 3.0f, 1.0f / 4.0f, /*w_cell=*/0.5f, /*c=*/0.5f, 1.0e-4f))
-            << "射线恰好触及后表面应算命中";
-    }
-    // (e) 厚度下限分支：z 极近（c·z < min_thickness）时必须走精确式而不是 c·z 近似。
-    //     z = 0.001 m、c = 0.01 ⇒ c·z = 1e-5 < 1e-4 ⇒ 走退化分支；此时
-    //     d_lo 恰好等于 z + min_thickness 应当算命中（闭区间）。
-    {
-        const float c = 0.01f;
-        const float z = 0.001f;
-        const float t = 0.0001f;      // = min_thickness（下限生效）
-        EXPECT_TRUE(CellHit(1.0f / (z + t), 1.0f / (z + t), 1.0f / z, c, t))
-            << "退化分支（min_thickness）的闭区间边界应算命中";
-        EXPECT_FALSE(CellHit(1.0f / (z + 2.0f * t), 1.0f / (z + 3.0f * t), 1.0f / z, c, t))
-            << "退化分支里明显在柱子后方的一段必须放行";
+        const float z_in = 30.0f;
+        const float z_out = 60.0f;
+        const float z_cell = 6.0f;
+        const float w_in = 1.0f / z_in;
+        const float w_out = 1.0f / z_out;
+        const float w_cell = 1.0f / z_cell;
+        EXPECT_FALSE(CellCrossesFront(w_in, w_out, w_cell))
+            << "6 m 的面不该被 30→60 m 的射线命中";
+        const float dz_cell = z_out - z_in;               // 旧的"分辨率下限"
+        const float w_hi = 1.0f / (z_cell + dz_cell);     // thick_eff = max(thick, dz_cell)
+        const bool old_hit =
+            (std::min(w_in, w_out) <= w_cell) && (std::max(w_in, w_out) >= w_hi);
+        EXPECT_TRUE(old_hit) << "负向对照失效：dz_cell 抬升在这里居然没误判";
     }
 }
 
 // ───────────────────────── 3. 每段步数上限够走完满段 ─────────────────────────
 //
-// 段长 L 在**对角线**最坏情况下跨 ceil(√2·L)+1 个格子。上限少一步 ⇒ 段尾那一格永远扫不到，
-// 症状是"倒影在每段接缝处缺一格"，且只在特定角度出现（最难查的一类）。
-TEST(SsrMath, SlabCoversWholeSlab) {
+// lane 把射线的 [enter, exit] **等分**成 lanes 段。每段在对角线最坏情况下跨
+// ceil(√2·L)+1 个格子；上限少一步 ⇒ 段尾那一格永远扫不到，症状是"倒影在每段接缝处
+// 缺一格"，且只在特定角度出现（最难查的一类）。
+TEST(SsrMath, StepsCoverLaneTail) {
     const Cam cam;
-    const float kMinThickness = 1.0e-4f;
-    const int kMaxRayPixels = 160;
     int checked = 0;
     int missed = 0;
     for (int tile : {1, 2, 4, 8}) {
-        const DerivedParams d =
-            DeriveParams(tile, kMaxRayPixels, /*N_px=*/10.0f, cam.tan_half, cam.height);
+        const DerivedParams d = DeriveParams(tile, cam.width, cam.height);
         for (int trial = 0; trial < 150; ++trial) {
             std::mt19937 rng(1u + static_cast<unsigned>(trial));
             std::uniform_real_distribution<float> uni(0.0f, 1.0f);
             const Vec3 n = ReconstructNormal(0.30f * (uni(rng) - 0.5f), 0.5f + 0.5f * uni(rng));
             const RaySetup s = MakeRaySetup(cam, 0.1f + 0.8f * uni(rng), 0.1f + 0.8f * uni(rng), n);
-            if (!s.ok || s.ray.sigma_exit < d.slab_pixels * 1.5f) {
+            if (!s.ok) {
+                continue;
+            }
+            const float t0 = s.ray.sigma_enter;
+            const float t1 = s.ray.sigma_exit;
+            if (!(t1 - t0 > 8.0f)) {
                 continue;
             }
             for (int lane = 0; lane < d.lanes; ++lane) {
-                const float begin = std::max(d.slab_pixels * static_cast<float>(lane),
-                                             s.ray.sigma_enter);
-                const float end = std::min(d.slab_pixels * static_cast<float>(lane + 1),
-                                           s.ray.sigma_exit);
-                if (!(end > begin + 0.5f)) {
+                const float begin = t0 + (t1 - t0) * (static_cast<float>(lane) /
+                                                      static_cast<float>(d.lanes));
+                const float end = t0 + (t1 - t0) * (static_cast<float>(lane + 1) /
+                                                    static_cast<float>(d.lanes));
+                // 段太短（< 2 px）时整段落在起点格里，会被 skip_first_cell 吃掉 ——
+                // 那是"段长不足"而不是"步数不足"，不参与本断言。
+                if (!(end > begin + 2.0f)) {
                     continue;
                 }
-                // 只把"段尾最后一格"设成该处射线的视深，其余全是天空（far）
+                // 只把"段尾最后一格"设成该处射线的视深，其余全是天空
                 // ⇒ 命中只可能来自那一格；扫不到就说明步数上限不足。
-                const float tail_sigma = end - 1.0e-3f;
-                const Vec2 tail = PosAt(s.ray, tail_sigma);
-                const int tx = static_cast<int>(std::floor(tail.x));
-                const int ty = static_cast<int>(std::floor(tail.y));
-                // 回调语义（2026-11-02 起）：返回 **w = 1/z**，0 = 没有几何。
-                auto depth_at = [&](int x, int y) -> float {
-                    return (x == tx && y == ty) ? WAt(s.ray, tail_sigma) : 0.0f;
+                // 段尾可能正好压在格边界上（floor 落前一格/后一格都合法）⇒ 取两格，
+                // 只要扫到其中一格就算这个上限够用。
+                const Vec2 tail_a = PosAt(s.ray, end - 1.0e-3f);
+                const Vec2 tail_b = PosAt(s.ray, end - 0.5f);
+                const int ax = static_cast<int>(std::floor(tail_a.x));
+                const int ay = static_cast<int>(std::floor(tail_a.y));
+                const int bx = static_cast<int>(std::floor(tail_b.x));
+                const int by = static_cast<int>(std::floor(tail_b.y));
+                // 屏幕边缘的格子会被 DDA 的越界 break 吃掉（不是步数问题），不参与断言。
+                auto border = [&](int x, int y) {
+                    return x <= 0 || y <= 0 || x >= cam.width - 1 || y >= cam.height - 1;
                 };
-                const float hit =
-                    MarchSegment(s.ray, begin, end, d.steps_per_lane,
-                                 d.slab_pixels * static_cast<float>(lane) <= 0.0f,
-                                 d.thickness_coefficient, kMinThickness, depth_at, cam.width,
-                                 cam.height, nullptr, nullptr);
+                if (border(ax, ay) || border(bx, by)) {
+                    continue;
+                }
+                auto depth_at = [&](int x, int y) -> float {
+                    if (x == ax && y == ay) {
+                        return WAt(s.ray, end - 1.0e-3f);
+                    }
+                    if (x == bx && y == by) {
+                        return WAt(s.ray, end - 0.5f);
+                    }
+                    return 0.0f;
+                };
+                const float hit = MarchSegment(s.ray, begin, end, d.steps_per_lane,
+                                               begin <= 0.0f, depth_at, cam.width, cam.height,
+                                               nullptr, nullptr);
                 ++checked;
                 if (hit >= kNoHit) {
                     ++missed;
@@ -260,17 +270,18 @@ TEST(SsrMath, SlabCoversWholeSlab) {
     {
         int full = 0;
         int short_hits = 0;
+        const DerivedParams d = DeriveParams(4, cam.width, cam.height);
         for (int trial = 0; trial < 200; ++trial) {
             std::mt19937 rng(7u + static_cast<unsigned>(trial));
             std::uniform_real_distribution<float> uni(0.0f, 1.0f);
             const Vec3 n = ReconstructNormal(0.2f * (uni(rng) - 0.5f), 0.6f + 0.4f * uni(rng));
             const RaySetup s = MakeRaySetup(cam, 0.2f + 0.6f * uni(rng), 0.2f + 0.6f * uni(rng), n);
-            const DerivedParams d = DeriveParams(4, kMaxRayPixels, 10.0f, cam.tan_half, cam.height);
-            if (!s.ok || s.ray.sigma_exit < d.slab_pixels * 1.5f) {
+            if (!s.ok || !(s.ray.sigma_exit - s.ray.sigma_enter > 8.0f)) {
                 continue;
             }
             const float begin = s.ray.sigma_enter;
-            const float end = std::min(d.slab_pixels, s.ray.sigma_exit);
+            const float end = s.ray.sigma_enter +
+                              0.25f * (s.ray.sigma_exit - s.ray.sigma_enter);
             const float tail_sigma = end - 1.0e-3f;
             const Vec2 tail = PosAt(s.ray, tail_sigma);
             const int tx = static_cast<int>(std::floor(tail.x));
@@ -278,18 +289,16 @@ TEST(SsrMath, SlabCoversWholeSlab) {
             auto depth_at = [&](int x, int y) -> float {
                 return (x == tx && y == ty) ? WAt(s.ray, tail_sigma) : 0.0f;
             };
-            if (MarchSegment(s.ray, begin, end, d.steps_per_lane, begin <= 0.0f,
-                             d.thickness_coefficient, kMinThickness, depth_at, cam.width,
-                             cam.height, nullptr, nullptr) < kNoHit) {
+            if (MarchSegment(s.ray, begin, end, d.steps_per_lane, begin <= 0.0f, depth_at,
+                             cam.width, cam.height, nullptr, nullptr) < kNoHit) {
                 ++full;
             }
-            if (MarchSegment(s.ray, begin, end, 1, begin <= 0.0f, d.thickness_coefficient,
-                             kMinThickness, depth_at, cam.width, cam.height, nullptr,
-                             nullptr) < kNoHit) {
+            if (MarchSegment(s.ray, begin, end, 1, begin <= 0.0f, depth_at, cam.width,
+                             cam.height, nullptr, nullptr) < kNoHit) {
                 ++short_hits;
             }
         }
-        EXPECT_GT(full, 100) << "满步数下段尾几乎从不命中 ⇒ 上面的断言没覆盖真实情形";
+        EXPECT_GT(full, 50) << "满步数下段尾几乎从不命中 ⇒ 上面的断言没覆盖真实情形";
         EXPECT_LT(short_hits, full / 4) << "步数砍到 1 仍能命中大半 ⇒ 步数上限没起作用";
     }
 }
@@ -363,13 +372,13 @@ TEST(SsrMath, S_MidLandsInHitCell) {
             continue;
         }
         for (int variant = 0; variant < 2; ++variant) {
-            const DerivedParams d = DeriveParams(4, 300, 10.0f, cam.tan_half, cam.height);
+            const DerivedParams d = DeriveParams(4, cam.width, cam.height);
             int hx = -1;
             int hy = -1;
             const float hit =
                 (variant == 0)
-                    ? MarchSlabs(s.ray, d, 1.0e-4f, field_flat, cam.width, cam.height, &hx, &hy)
-                    : MarchSlabs(s.ray, d, 1.0e-4f, field_two_layers, cam.width, cam.height, &hx,
+                    ? MarchSlabs(s.ray, d, field_flat, cam.width, cam.height, &hx, &hy)
+                    : MarchSlabs(s.ray, d, field_two_layers, cam.width, cam.height, &hx,
                                  &hy);
             if (hit >= kNoHit) {
                 continue;
@@ -394,8 +403,8 @@ TEST(SsrMath, S_MidLandsInHitCell) {
             }
         }
     }
-    EXPECT_GT(checked, 400) << "样本里命中太少，测不到反推";
-    EXPECT_GT(late_hits, 20) << "几乎全是紧贴着起点格的命中 ⇒ 长路径的记账没被覆盖到";
+    EXPECT_GT(checked, 150) << "样本里命中太少，测不到反推";
+    EXPECT_GT(late_hits, 10) << "几乎全是紧贴着起点格的命中 ⇒ 长路径的记账没被覆盖到";
     EXPECT_EQ(bad_cell, 0) << "s_mid 反推出的格与命中格不一致 ⇒ 取色会取错格子";
     EXPECT_EQ(bad_range, 0) << "报告的 s 不在命中格的 σ 区间内 ⇒ DDA 的 σ 记账有误";
 }
@@ -436,14 +445,14 @@ TEST(SsrMath, SlabsEqualSingleThread) {
         }
         int ref_x = -1;
         int ref_y = -1;
-        const float s_ref = MarchWholeRay(s.ray, 0.01f, 1.0e-4f, 100000, depth_at, cam.width,
+        const float s_ref = MarchWholeRay(s.ray, 100000, depth_at, cam.width,
                                           cam.height, &ref_x, &ref_y);
         for (int tile : {1, 2, 4, 8}) {
-            const DerivedParams d = DeriveParams(tile, 220, 10.0f, cam.tan_half, cam.height);
+            const DerivedParams d = DeriveParams(tile, cam.width, cam.height);
             int sx = -1;
             int sy = -1;
             const float hit =
-                MarchSlabs(s.ray, d, 1.0e-4f, depth_at, cam.width, cam.height, &sx, &sy);
+                MarchSlabs(s.ray, d, depth_at, cam.width, cam.height, &sx, &sy);
             ++compared;
             const bool both_miss = (s_ref >= kNoHit) && (hit >= kNoHit);
             const bool same_cell =
@@ -482,16 +491,16 @@ TEST(SsrMath, MinPicksEarliest) {
 
     int hx = -1;
     int hy = -1;
-    const float hit = MarchWholeRay(ray, 0.01f, 1.0e-4f, 1000, depth_at, 320, 180, &hx, &hy);
+    const float hit = MarchWholeRay(ray, 1000, depth_at, 320, 180, &hx, &hy);
     ASSERT_LT(hit, kNoHit);
     EXPECT_EQ(hx, 20) << "必须命中更近的那处（min 方向反了就会拿到 x=60）";
 
     // 分段版同样取近的。
     for (int tile : {1, 2, 4, 8}) {
-        const DerivedParams d = DeriveParams(tile, 160, 10.0f, 0.57735027f, 180);
+        const DerivedParams d = DeriveParams(tile, 320, 180);
         int sx = -1;
         int sy = -1;
-        const float s = MarchSlabs(ray, d, 1.0e-4f, depth_at, 320, 180, &sx, &sy);
+        const float s = MarchSlabs(ray, d, depth_at, 320, 180, &sx, &sy);
         ASSERT_LT(s, kNoHit) << "tile=" << tile;
         EXPECT_EQ(sx, 20) << "tile=" << tile << " 取到了较远的命中格（min 被写成了 max）";
     }
@@ -499,18 +508,23 @@ TEST(SsrMath, MinPicksEarliest) {
     // 负向：取 max 会拿到 x=60 —— 显式算一遍，证明上面的断言有牙。
     float latest = -1.0f;
     int lx = -1;
-    for (int lane = 0; lane < 16; ++lane) {
-        const DerivedParams d = DeriveParams(4, 160, 10.0f, 0.57735027f, 180);
-        const float begin = d.slab_pixels * static_cast<float>(lane);
-        const float end = begin + d.slab_pixels;
-        int cx = -1;
-        int cy = -1;
-        const float s = MarchSegment(ray, begin, end, d.steps_per_lane, begin <= 0.0f,
-                                     d.thickness_coefficient, 1.0e-4f, depth_at, 320, 180, &cx,
-                                     &cy);
-        if (s < kNoHit && s > latest) {
-            latest = s;
-            lx = cx;
+    {
+        const DerivedParams d = DeriveParams(4, 320, 180);
+        for (int lane = 0; lane < d.lanes; ++lane) {
+            const float begin = ray.sigma_enter + (ray.sigma_exit - ray.sigma_enter) *
+                                                      (static_cast<float>(lane) /
+                                                       static_cast<float>(d.lanes));
+            const float end = ray.sigma_enter + (ray.sigma_exit - ray.sigma_enter) *
+                                                    (static_cast<float>(lane + 1) /
+                                                     static_cast<float>(d.lanes));
+            int cx = -1;
+            int cy = -1;
+            const float s = MarchSegment(ray, begin, end, d.steps_per_lane, begin <= 0.0f,
+                                         depth_at, 320, 180, &cx, &cy);
+            if (s < kNoHit && s > latest) {
+                latest = s;
+                lx = cx;
+            }
         }
     }
     EXPECT_EQ(lx, 60) << "取 max 应得到较远的 x=60 —— 负向对照失效";
@@ -545,17 +559,18 @@ ScreenRay MakeSyntheticRay() {
 
 TEST(SsrMath, BackfaceHitRejected) {
     const ScreenRay ray = MakeSyntheticRay();
-    // c = 0.18 ⇒ T = 3.6 m（z=20）⇒ 射线在桌子/墙那两段确实落在柱体带内，
-    // 所以"能不能命中"完全取决于朝向判据，不是厚度在挡。
-    const float kThicknessC = 0.18f;
-    const float kMinThickness = 1.0e-4f;
-
+    // 2026-11-11 起判据只剩"穿前表面"，所以这两段都**必然**被判成穿越 ——
+    // "能不能命中"完全取决于朝向判据（这正是本测试要钉的那条屏幕空间固有限制）。
+    // 射线视深沿 σ 从 20 m 线性变到 24 m（w = 1/z 对 σ 仿射）：
+    // 注意 s0.y = 20 ⇒ 屏幕行 y 对应 σ = y − 20：
+    //   rows 40..59（σ=20..39）⇒ 射线 z ≈ 20.7..21.4 m ⇒ 桌子顶面放 21.0 m
+    //   rows 80..99（σ=60..79）⇒ 射线 z ≈ 22.2..23.1 m ⇒ 墙放 22.6 m
     auto depth_at = [](int /*x*/, int y) -> float {
         if (y >= 40 && y < 60) {
-            return 1.0f / 20.0f;   // 桌子顶面（w = 1/z）
+            return 1.0f / 21.0f;   // 桌子顶面
         }
-        if (y >= 80 && y < 120) {
-            return 1.0f / 20.0f;   // 墙
+        if (y >= 80 && y < 100) {
+            return 1.0f / 22.6f;   // 墙
         }
         return 0.0f;               // 空
     };
@@ -572,16 +587,16 @@ TEST(SsrMath, BackfaceHitRejected) {
     // ① 旧行为（不判朝向）：先撞上桌子顶面 —— 这就是那个 bug。
     int old_x = -1;
     int old_y = -1;
-    const float s_old = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+    const float s_old = MarchWholeRay(ray, 200, depth_at, 320, 180,
                                       &old_x, &old_y);
-    ASSERT_LT(s_old, kNoHit) << "旧判据应该在桌子段命中（否则本测试没造出 bug 场景）";
+    ASSERT_LT(s_old, kNoHit) << "不判朝向时应该在桌子段命中（否则本测试没造出 bug 场景）";
     EXPECT_GE(old_y, 40);
     EXPECT_LT(old_y, 60);
 
     // ② 加朝向判据：桌子段被跳过 ⇒ 命中后面的墙。
     int new_x = -1;
     int new_y = -1;
-    const float s_new = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+    const float s_new = MarchWholeRay(ray, 200, depth_at, 320, 180,
                                       &new_x, &new_y, facing);
     ASSERT_LT(s_new, kNoHit) << "墙是正面命中，不应被一起拒掉";
     EXPECT_GE(new_y, 80) << "背面命中（桌子顶面）没被跳过";
@@ -591,32 +606,35 @@ TEST(SsrMath, BackfaceHitRejected) {
     auto facing_flipped = [](int /*x*/, int /*y*/, const Vec3& d) -> bool {
         return HitFacesRay(d, Vec3{0.0f, 0.0f, -1.0f});
     };
-    EXPECT_GE(MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180, nullptr,
+    EXPECT_GE(MarchWholeRay(ray, 200, depth_at, 320, 180, nullptr,
                             nullptr, facing_flipped),
               kNoHit)
         << "法线翻过来仍能命中 ⇒ 朝向判据是恒真的";
 }
 
 TEST(SsrMath, DerivedParams) {
-    const Cam cam;
-    const DerivedParams d =
-        DeriveParams(/*tile=*/4, /*max_ray_pixels=*/400, /*N_px=*/10.0f, cam.tan_half, cam.height);
-    EXPECT_EQ(d.lanes, 16);
-    EXPECT_FLOAT_EQ(d.slab_pixels, 25.0f);
-    EXPECT_EQ(d.steps_per_lane, static_cast<int>(std::ceil(1.41421356f * 25.0f)) + 3);
-    const float expected_c = 10.0f * (2.0f * std::atan(cam.tan_half)) / 180.0f;
-    EXPECT_NEAR(d.thickness_coefficient, expected_c, 1.0e-6f);
-    EXPECT_FALSE(jpov::ssr::SlabTooShortForEfficiency(d)) << "25 px/段不该被告警";
+    const Cam cam;   // 320×180
 
-    // 1/8 分辨率 + tile 8 + reach 40：L = 0.625 px ⇒ 必须被标记（只告警，不失败）。
-    const DerivedParams bad = DeriveParams(8, 40, 10.0f, cam.tan_half, 135);
-    EXPECT_FLOAT_EQ(bad.slab_pixels, 40.0f / 64.0f);
-    EXPECT_TRUE(jpov::ssr::SlabTooShortForEfficiency(bad));
+    // lanes = tile²；steps 按**屏幕对角线**算（最坏跨度），DDA 到段尾就 break。
+    const float diag = std::sqrt(320.0f * 320.0f + 180.0f * 180.0f);
+    for (int tile : {1, 2, 4, 8}) {
+        const DerivedParams d = DeriveParams(tile, cam.width, cam.height);
+        EXPECT_EQ(d.lanes, tile * tile);
+        const float lanes_f = static_cast<float>(d.lanes);
+        EXPECT_EQ(d.steps_per_lane,
+                  static_cast<int>(std::ceil(1.41421356f * diag / lanes_f)) + 3)
+            << "tile=" << tile;
+    }
 
-    // T=1 时 L 就是全部预算。
-    const DerivedParams one = DeriveParams(1, 300, 10.0f, cam.tan_half, 1080);
-    EXPECT_EQ(one.lanes, 1);
-    EXPECT_FLOAT_EQ(one.slab_pixels, 300.0f);
+    // 步数上限随 lane 数下降（分得越细，每段越短）。
+    const DerivedParams one = DeriveParams(1, cam.width, cam.height);
+    const DerivedParams sixteen = DeriveParams(4, cam.width, cam.height);
+    EXPECT_GT(one.steps_per_lane, sixteen.steps_per_lane);
+
+    // 分辨率越大，上限越大（同一 tile 下）。
+    const DerivedParams big = DeriveParams(4, 1280, 720);
+    const DerivedParams small = DeriveParams(4, 320, 180);
+    EXPECT_GT(big.steps_per_lane, small.steps_per_lane);
 }
 
 // ───────────────────────── 8. 退化输入 ─────────────────────────

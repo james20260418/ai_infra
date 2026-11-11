@@ -203,6 +203,44 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.debug_reason = false;
     const SsrOutputs& outs = ssr_.Render(si);
 
+    // TEMP(2026-11-11)：把这一帧 SSR 的中间结果 dump 到磁盘，供离线复算某个像素的碰撞过程。
+    if (std::getenv("SSR_DUMP") != nullptr) {
+        auto dump_tex = [](unsigned int tex, int w, int h, unsigned int fmt,
+                           unsigned int type, const char* path) {
+            std::vector<unsigned char> buf(static_cast<size_t>(w) * h * 16);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glGetTexImage(GL_TEXTURE_2D, 0, fmt, type, buf.data());
+            FILE* f = std::fopen(path, "wb");
+            if (f != nullptr) {
+                std::fwrite(buf.data(), 1, buf.size(), f);
+                std::fclose(f);
+            }
+        };
+        const int sw = downsample_.width();
+        const int sh = downsample_.height();
+        dump_tex(outs.type_tex, sw, sh, GL_RED_INTEGER, GL_UNSIGNED_BYTE, "/tmp/ssr_dump/type.bin");
+        dump_tex(outs.radiance_tex, sw, sh, GL_RGBA, GL_FLOAT, "/tmp/ssr_dump/radiance.bin");
+        dump_tex(downsample_.w_tex(), sw, sh, GL_RED, GL_FLOAT, "/tmp/ssr_dump/w.bin");
+        dump_tex(downsample_.normal_tex(), sw, sh, GL_RGBA, GL_FLOAT, "/tmp/ssr_dump/normal.bin");
+        dump_tex(downsample_.color_tex(), sw, sh, GL_RGBA, GL_FLOAT, "/tmp/ssr_dump/color.bin");
+        dump_tex(downsample_.thick_tex(), sw, sh, GL_RED, GL_FLOAT, "/tmp/ssr_dump/thick.bin");
+        dump_tex(in.scene_depth_tex, in.full_w, in.full_h, GL_RED, GL_FLOAT,
+                 "/tmp/ssr_dump/scenedepth.bin");
+        if (in.backface_depth_tex != 0) {
+            dump_tex(in.backface_depth_tex, in.full_w, in.full_h, GL_RGBA, GL_FLOAT,
+                     "/tmp/ssr_dump/backface.bin");
+        }
+        FILE* m = std::fopen("/tmp/ssr_dump/meta.txt", "w");
+        if (m != nullptr) {
+            std::fprintf(m, "w %d\nh %d\nnear %g\nfar %g\ntan_half %g\naspect %g\ntile %d\nscale %d\nmaxdist %g\n",
+                         sw, sh, in.near_plane, in.far_plane, in.tan_half_fov_y, in.aspect,
+                         in.cfg.tile_size, scale, in.cfg.max_distance_m);
+            std::fclose(m);
+        }
+        LOG(INFO) << "[TEMP dump] " << sw << "x" << sh << " -> /tmp/ssr_dump";
+    }
+
     // ── ④ 粗糙度预滤波：A 预乘 mip 链（决定了"磨砂"的模糊量）──
     filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height());
 

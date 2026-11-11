@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -260,9 +261,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     //     与 uStepsPerLane 这个上限无关。见 test/ssr:ssr_gpu_test 的 HugeBudgetIsHarmless。
     //   · tile 与预算的搭配（tile² ≤ max_ray_pixels/4）写在 ssr_renderer.h 的字段注释里，
     //     要查的人会去查那里，而不是在运行时日志里捞。
-    const ssr::DerivedParams derived =
-        ssr::DeriveParams(in.tile_size, in.max_ray_pixels, in.thickness_pixels,
-                          in.tan_half_fov_y, in.height);
+    const ssr::DerivedParams derived = ssr::DeriveParams(in.tile_size, in.width, in.height);
 
     // 皮肤检查（契约 6）：不许把本模块自己的输出再喂回来。
     CHECK(in.color_tex != outputs_.radiance_tex && in.w_tex != outputs_.radiance_tex &&
@@ -333,13 +332,10 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uTanHalf", in.tan_half_fov_y);
         set1f(prog, "uAspect", in.aspect);
         set1f(prog, "uMaxDistance", in.max_distance_m);
-        set1f(prog, "uThicknessC", derived.thickness_coefficient);
-        set1f(prog, "uMinThickness", in.min_thickness_m);
         set1f(prog, "uSentinel", ssr::kNoHit);
         set1i(prog, "uTile", in.tile_size);
-        set1f(prog, "uSlabPixels", derived.slab_pixels);
+        set1i(prog, "uLanes", derived.lanes);
         set1i(prog, "uStepsPerLane", derived.steps_per_lane);
-        set1f(prog, "uMaxRayPixels", static_cast<float>(in.max_ray_pixels));
         set1f(prog, "uRoughnessCutoff", in.roughness_cutoff);
     };
     upload_common(prog_march_);
@@ -351,11 +347,15 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchThick);
     glBindTexture(GL_TEXTURE_2D, in.thick_tex);
+    set1i(prog_march_, "uThick", kTexUnitMarchThick);
+    if (std::getenv("SSR_NOTHICK") != nullptr) {
+        set1i(prog_march_, "uRealThickness", 0);          // A/B：强制关掉厚度
+    } else {
+        set1i(prog_march_, "uRealThickness", in.use_real_thickness ? 1 : 0);
+    }
     set1i(prog_march_, "uW", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
-    set1i(prog_march_, "uThick", kTexUnitMarchThick);
-    set1i(prog_march_, "uRealThickness", in.use_real_thickness ? 1 : 0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──

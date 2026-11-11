@@ -141,6 +141,25 @@ Scene MakeScene(bool two_layers, float ny = 0.95f, int sky_rows = 0) {
     return sc;
 }
 
+// 竖条场景：左半 20 m、右半 40 m（同一张"地板"法线）。
+//
+// 为什么需要它：均匀深度场景里，反射射线的深度只会**单调增加并离开**那张面，
+// 新判据（穿前表面）下永远不会命中 —— 那是正确行为。要构造"真的穿过去"的情形，
+// 就必须让被反射的几何比反射体更远：射线走到 40 m 那一格时，正好穿过它。
+Scene MakeStripeScene() {
+    Scene sc = MakeScene(/*two_layers=*/false);
+    auto window_depth_of = [](float d) {
+        const float ndc = ((kFar + kNear) - 2.0f * kNear * kFar / d) / (kFar - kNear);
+        return 0.5f * ndc + 0.5f;
+    };
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = kWidth / 2; x < kWidth; ++x) {
+            sc.window_depth[static_cast<size_t>(y) * kWidth + x] = window_depth_of(40.0f);
+        }
+    }
+    return sc;
+}
+
 unsigned int UploadFloatTexture(const std::vector<float>& data, int w, int h, GLint internal,
                                 GLenum format) {
     unsigned int tex = 0;
@@ -232,7 +251,7 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
         return jpov::ssr::HitFacesRay(d, n);
     };
-    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing);
+    const float s = MarchSlabs(ray, derived, depth_at, kWidth, kHeight, &cx, &cy, facing);
     if (s < kNoHit) {
         out.hit = true;
         out.s = s;
@@ -343,7 +362,7 @@ TEST(SsrGpu, MatchesCpuReference) {
             ASSERT_NE(out.radiance_tex, 0u);
 
             const DerivedParams derived =
-                DeriveParams(tile, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+                DeriveParams(tile, kWidth, kHeight);
             const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
             // A 不再是 radiance.a（那里现在是 ray_ratio）：命中与否由类型图给出。
             const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
@@ -416,85 +435,70 @@ TEST(SsrGpu, MatchesCpuReference) {
     }
 }
 
-// ② 手推的定性结论（不依赖 CPU 实现）：均匀深度墙 + 地板法线
+// ② 判据的定性结论（不依赖 CPU 实现）：**命中必须有真正的"穿面"**
 //
-// 几何：镜面在 d=20 m，柱子 [20, 20+T]（T = c·20 ≈ 3.3 m @ 这个 64 px 高的假相机）。
-// 反射射线从 19.994 m（起点沿法线抬高了一个亚像素量）出发、**d 单调增加** ⇒ 它一定会在
-// 出发后极短的距离内穿过 [20, 20+T] ⇒ **几乎每个像素都命中，且 s 只有亚像素~几像素**。
-// 唯一合法的例外是"射线在一个像素之内就飞出屏幕"的贴边像素（出屏，a=0）。
-//
-// 这条测试的杀伤力在方向约定：若把 R 写成 reflect(−I, N)（朝相机），射线会被近平面裁到
-// 极短、屏幕足迹朝外飞 ⇒ 命中率立刻塌到接近 0，下面的 hit_rate 断言直接红。
-TEST(SsrGpu, HitPatternFollowsReflectedDirection) {
-    Fixture f;
-    f.Setup(MakeScene(/*two_layers=*/false), /*tile=*/4, /*max_ray_pixels=*/160);
-    f.in.debug_reason = true;
-    const SsrOutputs& out = f.ssr.Render(f.in);
-
-    const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
-    const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
-    const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
-
-    constexpr int kMargin = 3;
-    int hits = 0;
-    int interior = 0;
-    int bad_reason = 0;
-    int far_hits = 0;
-    int far_cell = 0;
-    int up_dir = 0;
-    int down_dir = 0;
-    for (int y = 0; y < kHeight; ++y) {
-        for (int x = 0; x < kWidth; ++x) {
-            const size_t i = static_cast<size_t>(y) * kWidth + x;
-            const bool hit = reason[i] == static_cast<unsigned char>(SsrResult::kHit);
-            const bool is_interior = x >= kMargin && x < kWidth - kMargin && y >= kMargin &&
-                                     y < kHeight - kMargin;
-            if (is_interior) {
-                ++interior;
-            }
-            if (hit) {
+// 2026-11-11 起判据是 `z_in ≤ z_front ≤ z_out`（穿前表面），所以：
+//   · 整屏同一深度（20 m）+ 反射射线从 19.994 m 出发且深度单调增加 ⇒ 射线**离开**这张面，
+//     再也不会与它相交 ⇒ **一个命中都不该有**。旧的"厚度带 [20, 20+T]"判据会凭空造出
+//     命中（这就是被删掉的那条魔法），所以这条断言直接钉住"魔法没有被悄悄加回来"。
+//   · 下层 200 m 的合成场景里，射线会**真的**穿过 200 m 那张面 ⇒ 有命中，且命中格在上层
+//     区域（方向谱系覆盖到"命中在起点上方/下方"两种）。
+TEST(SsrGpu, HitRequiresASurfaceCrossing) {
+    // (a) 单层均匀深度：0 命中。
+    {
+        Fixture f;
+        f.Setup(MakeScene(/*two_layers=*/false), /*tile=*/4, /*max_ray_pixels=*/160);
+        f.in.debug_reason = true;
+        const SsrOutputs& out = f.ssr.Render(f.in);
+        const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+        int hits = 0;
+        for (unsigned char r : reason) {
+            if (r == static_cast<unsigned char>(SsrResult::kHit)) {
                 ++hits;
-                EXPECT_EQ(reason[i], static_cast<unsigned char>(SsrResult::kHit));
-                // 命中格紧贴起点：s 只有亚像素~几像素（柱子 T≈3.3 m，走 0.006 m 就进柱体）。
-                if (hit_s[i] > 6.0f) {
-                    ++far_hits;
+            }
+        }
+        EXPECT_EQ(hits, 0)
+            << "射线只是在离开它起点所在的那张面，不该有任何命中（有命中 = 又引入了厚度带）";
+    }
+
+    // (b) 两层场景：射线穿过 200 m 那张面 ⇒ 命中存在，且方向两种都有。
+    {
+        Fixture f;
+        f.Setup(MakeStripeScene(), /*tile=*/2, /*max_ray_pixels=*/160);
+        f.in.debug_reason = true;
+        const SsrOutputs& out = f.ssr.Render(f.in);
+        const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+        const std::vector<unsigned char> reason = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+        int hits = 0;
+        int bad_cell = 0;
+        int up_dir = 0;
+        int down_dir = 0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x < kWidth; ++x) {
+                const size_t i = static_cast<size_t>(y) * kWidth + x;
+                if (reason[i] != static_cast<unsigned char>(SsrResult::kHit)) {
+                    continue;
                 }
+                ++hits;
                 const int cell_x =
                     static_cast<int>(std::lround(rad[i * 4 + 0] * (kWidth + 1))) - 1;
                 const int cell_y =
                     static_cast<int>(std::lround(rad[i * 4 + 1] * (kHeight + 1))) - 1;
-                // 命中必须发生在**紧挨起点**的格里：柱子只有 0.006 m 远（起点抬高量），
-                // 射线在亚像素距离内就穿进 [20,20+T] ⇒ 差超过 2 格就说明 1/d 或 T 错了。
-                if (std::abs(cell_x - x) > 2 || std::abs(cell_y - y) > 2) {
-                    ++far_cell;
+                if (cell_x < 0 || cell_x >= kWidth || cell_y < 0 || cell_y >= kHeight) {
+                    ++bad_cell;
                 }
-                // 屏幕方向的两个符号都必须出现：地板法线的反射射线朝**消失点**收敛，
-                // 消失点在屏幕中间偏上 ⇒ 上面的像素命中在下、下面的命中在上。
                 if (cell_y > y) {
                     ++up_dir;
                 } else if (cell_y < y) {
                     ++down_dir;
                 }
-            } else if (reason[i] == static_cast<unsigned char>(SsrResult::kHit)) {
-                ++bad_reason;
             }
         }
+        EXPECT_GT(hits, kWidth * kHeight / 100) << "两层场景应有命中（穿 200 m 那张面）";
+        EXPECT_EQ(bad_cell, 0) << "命中格坐标越界 ⇒ 取色 uv 有误";
+        EXPECT_GT(up_dir, 0) << "没有'命中格在起点上方'的像素";
+        EXPECT_GT(down_dir, 0) << "没有'命中格在起点下方'的像素（射线应朝消失点收敛）";
     }
-    const int total = kWidth * kHeight;
-    EXPECT_GT(hits, total * 6 / 10) << "命中率过低（" << hits << "/" << total
-                                    << "）⇒ 反射方向约定或 1/d 反算有误";
-    // 注：肯定有一部分像素合法地"不命中"——反射射线恰好**平行于深度带**（R.z≈0）时，
-    // 它会一直贴在柱子前面 0.006 m 处飞，永远进不去 [20, 20+T]。这是均匀深度墙这种
-    // 合成场景的性质，不是 bug（真实场景里墙和地板不在同一深度）。
-    EXPECT_EQ(far_hits, 0) << "有 " << far_hits << " 个命中的 s > 6 px —— 均匀深度墙下"
-                              "命中必须紧贴起点格（1/d 或厚度算式有误）";
-    EXPECT_EQ(far_cell, 0) << "有 " << far_cell << " 个像素的命中格离起点 > 2 格"
-                              "（均匀深度墙下命中必须紧贴起点格）";
-    EXPECT_GT(up_dir, total / 20) << "几乎没有'命中在起点格上方'的像素";
-    EXPECT_GT(down_dir, total / 20) << "几乎没有'命中在起点格下方'的像素"
-                                       "（射线应朝消失点收敛，两种情况都该有）";
-    EXPECT_EQ(bad_reason, 0) << "未命中的像素却写了 kHit";
-    EXPECT_GT(interior, total / 2);
 }
 
 // ③ tile 只是性能旋钮：1/2/4/8 输出逐字节相同
@@ -568,10 +572,10 @@ TEST(SsrGpu, CoverageStates) {
         EXPECT_EQ(nonzero_a, 0) << "无深度数据时 ray_ratio 必须全 0";
         EXPECT_EQ(wrong_reason, 0) << "无深度数据时 type 必须是 kNone";
     }
-    // 全命中：均匀深度墙的下半屏 ⇒ a=1 且颜色是某一格的颜色（不是全黑）。
+    // 有命中：两层场景（射线真的穿过 200 m 那张面）⇒ 颜色是某一格的颜色（不是全黑）。
     {
         Fixture f;
-        f.Setup(MakeScene(/*two_layers=*/false), /*tile=*/2, /*max_ray_pixels=*/160);
+        f.Setup(MakeStripeScene(), /*tile=*/2, /*max_ray_pixels=*/160);
         const SsrOutputs& out = f.ssr.Render(f.in);
         const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
         const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
@@ -588,7 +592,7 @@ TEST(SsrGpu, CoverageStates) {
                 }
             }
         }
-        EXPECT_GT(lit, kWidth * (kHeight / 4) * 8 / 10);
+        EXPECT_GT(lit, kWidth * (kHeight / 4) / 20) << "两层场景里应有命中";
         EXPECT_EQ(black_but_hit, 0) << "命中却取到全黑 ⇒ 命中格 uv 或颜色取样有误";
     }
 }
@@ -762,7 +766,7 @@ TEST(SsrGpu, BackfaceHitsRejected) {
     ASSERT_NE(out.radiance_tex, 0u);
 
     const DerivedParams derived =
-        DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+        DeriveParams(f.in.tile_size, kWidth, kHeight);
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
     const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
 

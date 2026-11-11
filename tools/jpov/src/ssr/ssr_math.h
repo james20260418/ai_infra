@@ -12,7 +12,7 @@
 // 坐标系与单位（与 ssr_renderer.h 的契约一致）：
 //   · 视空间：x 右、y 上、相机看向 −z；视距 d = −z_view > 0，单位米。
 //   · 屏幕 σ：沿屏幕直线的**像素弧长**，起点 σ = 0；像素坐标 (0,0) 在左下（GL 习惯）。
-//   · 厚度 T 单位米；w = 1/d 单位 1/米。
+//   · w = 1/d 单位 1/米。2026-11-11 起判据只用前表面深度，没有厚度参数。
 
 #ifndef JPOV_SRC_SSR_SSR_MATH_H_
 #define JPOV_SRC_SSR_SSR_MATH_H_
@@ -92,7 +92,7 @@ inline float DepthFromWindowDepth(float depth, float near_plane, float far_plane
 //
 // 为什么 SSR 链路内部改用 w 而不是窗口深度：
 //   判据全部是"1/d 落在哪个区间"，而 1/d 对屏幕坐标是**仿射**的 —— 用 w 表达时
-//   每格的判据只剩两次比较（见 CellHit），不再每格做 3 次除法。窗口深度的
+//   每格的判据只剩两次比较（见 CellCrossesFront），不再每格做除法。窗口深度的
 //   ndc→z 映射每格都要做一次除法，纯属白花。
 //   降采样时把窗口深度换成 w 的代价是每 SSR 像素 1 次除法（而不是每格一次）。
 //
@@ -131,7 +131,7 @@ inline Vec3 ReflectDir(const Vec3& p_view, const Vec3& normal) {
 }
 
 // 起点卫生：沿法线抬高一个**相对量**（0.1% 的视距），把起点移出反射体表面。
-// 与厚度 T 是两件事，别合成一个常数（§5.3）。着色器里同一行。
+// 与任何厚度参数无关（§5.3）。着色器里同一行。
 inline Vec3 OffsetRayOrigin(const Vec3& p, const Vec3& normal, float d_surf) {
     return p + normal * (d_surf * 1.0e-3f);
 }
@@ -167,7 +167,7 @@ inline float ClipRayLength(const Vec3& p, const Vec3& r, float near_plane, float
 struct ScreenRay {
     Vec2 s0;              // 起点像素坐标（未裁剪）
     Vec2 dir;             // 单位方向（像素空间）
-    Vec3 dir3;            // **视空间**单位方向（朝向判据用；与 dir 是同一条光线的两种表达）
+    Vec3 dir3;            // **视空间**单位方向（debug/灭点用；与 dir 是同一条光线的两种表达）
     float span = 0.0f;    // 未裁剪线段长度 S（像素）
     float w0 = 0.0f;      // σ = 0 处的 1/d
     float w1 = 0.0f;      // σ = span 处的 1/d
@@ -216,7 +216,7 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     }
     out->dir = delta * (1.0f / out->span);
     // r 已经是单位向量（ReflectDir 的两个入参都归一过）⇒ 不再 Normalize。
-    out->dir3 = r;   // 朝向判据用（着色器里同一行）
+    out->dir3 = r;   // debug/灭点用（着色器里同一行）
 
     // 矩形裁剪（Liang–Barsky），结果用 σ 表示（像素弧长）。
     float t0 = 0.0f;
@@ -261,31 +261,28 @@ inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────
 
-// 每格三行判据（§5.1）：射线在本格内的**视深区间** [d_lo, d_hi] 与本格柱体
-// [z, z+T] 是否有交集。w_in/w_out 是 1/d 端点，顺序无所谓；w_cell 是本格的 1/z（>0）。
+// 每格唯一判据（2026-11-11 起）：**射线在这一格里穿过了前表面**。
 //
-// ⚠️ 2026-11-02 改成 **w 空间**：判据里不再出现任何除法（近平面退化分支除外）。
-//    d_hi ≥ z      ⟺  w_min ≤ w_cell
-//    d_lo ≤ z + T  ⟺  w_max ≥ 1/(z+T)；T = c·z ⇒ 1/(z+T) = w_cell/(1+c)
-//                    ⇒ 两边乘 (1+c)：w_max·(1+c) ≥ w_cell
-//    （c·z ≥ min_thickness 恒成立时；极近像素走下面的退化分支）
-// 着色器 SsrCellHit 逐字同一形式 —— 改这里必须同步改那边（对拍会红）。
-inline bool CellHit(float w_in, float w_out, float w_cell,
-                    float thickness_coefficient, float min_thickness_m) {
-    const float w_min = std::min(w_in, w_out);
-    const float w_max = std::max(w_in, w_out);
-    if (!(w_min > 0.0f) || !(w_cell > 0.0f)) {
-        return false;   // 防御：w ≤ 0 表示 d ≤ 0 / 空格（理论上已被前面挡掉）
+//   z_in ≤ z_front ≤ z_out     ⟺     w_min ≤ w_cell ≤ w_max        （w = 1/z，反序）
+//
+// 为什么不再有厚度：`z_front` 就是那张面，射线穿面即命中。旧版把格子当成一根
+// [z, z+T] 的柱子去和射线的深度区间求交，于是不得不凭空造一个 T（经验厚度 c·z、
+// min_thickness、以及"分辨率下限" dz_cell）—— 三个魔数都是"没有背面数据"时代的产物。
+// 有了 z_front（和 z_back）之后：
+//   · 薄片（叶卡/单面 quad）：就是零厚度面，穿面即命中 ⇒ 不需要假厚度；
+//   · 实体：射线若从内部穿过，则进格时已经 `z_in > z_front` ⇒ 自动不满足上式，
+//     不会被误判成命中（旧的 fac9ing / 背面判据在这里是多余的）。
+// 掠射时"一格跨几十米"也不再是问题：判的是穿没穿过这张面，不是比厚度大小，
+// 因此不存在"逐行抛硬币"的梳齿。
+//
+// 着色器 SsrCellCrossesFront 逐字同一形式 —— 改这里必须同步改那边（对拍会红）。
+inline bool CellCrossesFront(float w_in, float w_out, float w_cell) {
+    if (!(w_cell > 0.0f)) {
+        return false;   // 空格（天空/背景）：这里没有面
     }
-    if (w_min > w_cell) {
-        return false;   // 整段在柱子前方（水面最常见）
-    }
-    // 退化分支：厚度下限生效（z 极近，c·z < min_thickness）。正常相机永不进入。
-    if (!(w_cell <= thickness_coefficient / min_thickness_m)) {
-        const float z = 1.0f / w_cell;
-        return w_max >= 1.0f / (z + min_thickness_m);
-    }
-    return w_max * (1.0f + thickness_coefficient) >= w_cell;
+    const float w_lo = std::min(w_in, w_out);
+    const float w_hi = std::max(w_in, w_out);
+    return (w_lo <= w_cell) && (w_cell <= w_hi);
 }
 
 // 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
@@ -293,13 +290,23 @@ inline bool CellHit(float w_in, float w_out, float w_cell,
 //   R·N < 0 ⇒ 射线**扎进**这个面 = 合法的正面命中；
 //   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中。
 //
-// 为什么必须有它：深度缓冲里只有"相机看得见的那一面"的颜色与法线。镜子往上看桌子
-// 底面/柱体背面时，屏幕空间里没有那些面的像素，以前的判据会拿**正面**的颜色当结果
-// ⇒ 倒影里桌子底下也在发光（2026-10-30 Danis 实拍发现）。
+// 为什么 z_front 判据替代不了它（2026-11-11 复核）：深度图只存"相机看得见的那一面"。
+// 镜子往上看桌子底面时，射线的**屏幕位置**上存的是桌面顶面（相机看得见的那面），
+// 而射线实际打的是底面 —— 射线确实"穿过"了顶面那格的深度（区间包含成立），
+// 但那是屏幕空间的巧合，不是真的打到了顶面。唯一能分开这两者的信息是**法线朝向**：
+// 射线向上、顶面法线朝上 ⇒ R·N > 0 ⇒ 拒。所以这条判据不是旧时代的残留，而是
+// 屏幕空间反射的固有限制（看不见的面没有深度，只能靠朝向近似）。
 // Pre-condition：ray_dir 与 hit_normal 在同一空间（视空间），且 hit_normal 朝相机。
 inline bool HitFacesRay(const Vec3& ray_dir, const Vec3& hit_normal) {
     return Dot(ray_dir, hit_normal) < 0.0f;
 }
+
+// 默认朝向判据：恒真。语义 = "这一格没有法线数据，不判方向"。
+struct AcceptAllFacing {
+    bool operator()(int /*cell_x*/, int /*cell_y*/, const Vec3& /*ray_dir*/) const {
+        return true;
+    }
+};
 
 // ─────────── ⑥ 升采样的深度值域判据（composite；ssr_integration.cc 里同一份算式）───────────
 //
@@ -335,50 +342,33 @@ inline bool UpsampleDepthAccept(float w_hi, float gw_x, float gw_y, float dpx, f
     return std::fabs(w_lo - pred) <= tol * std::max(std::fabs(pred), 1.0e-6f);
 }
 
-// 默认朝向判据：恒真。语义 = "这一格没有法线数据，不判方向" —— 保持引入朝向判据
-// 之前的行为（老调用点/老测试因此逐字不变）。
-struct AcceptAllFacing {
-    bool operator()(int /*cell_x*/, int /*cell_y*/, const Vec3& /*ray_dir*/) const {
-        return true;
-    }
-};
-
 // ─────────────────────────── ④ 派生参数 ───────────────────────────
 
-// tile 与预算 → 每段长度 / 每段步数 / 厚度系数。**唯一一份算式**（Renderer 与测试共用）。
+// tile → lane 数与每段步数上限。**唯一一份算式**（Renderer 与测试共用）。
 //
-//   c        = N_px · θ_px，θ_px = 垂直 FOV(弧度) / 屏幕高
-//   lanes    = T²
-//   L        = max_ray_pixels / lanes
-//   steps    = ceil(1.4142·L) + 3
-//              （对角线最坏情况：跨格数 ≤ 3 + L·(|dx|+|dy|) ≤ 3 + 1.4142·L。
-//                +3 不是保险丝：DDA 在 σ ≥ 段尾时就 break，**超额的上限一次都不会执行**，
-//                所以宁可给足 —— 少了就是"段尾那一格永远扫不到"，只在特定角度缺一格。）
+// 2026-11-11：lane 不再是"每段固定像素长度 L"，而是把射线的 [enter, exit] 等分成
+// lanes 段。于是：
+//   · 没有 uSlabPixels / uMaxRayPixels 这两个屏幕空间预算 —— 射线的长度已经由
+//     世界空间的 max_distance_m / 远平面 / 近平面裁剪决定；
+//   · 步数上限按**最坏可能的屏幕跨度**（屏幕对角线）算，DDA 到段尾就 break，
+//     所以超额的上限一次都不会执行（见 MarchSegment 的 `sigma_out >= sigma_end`）。
+//   · +3 不是保险丝：对角线最坏情况跨 ceil(√2·L)+1 格；少给就是"段尾那一格永远
+//     扫不到"，只在特定角度缺一格（最难查的一类）。
 struct DerivedParams {
     int lanes = 1;
-    float slab_pixels = 0.0f;
     int steps_per_lane = 1;
-    float thickness_coefficient = 0.0f;
 };
 
-// Pre-condition: tile_size ∈ {1,2,4,8}、max_ray_pixels > 0、height > 0
+// Pre-condition: tile_size ∈ {1,2,4,8}、width/height > 0
 //（校验放在 SsrRenderer::Render —— 这里不重复 CHECK，免得 GL-free 头文件依赖 glog）。
-inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels, float thickness_pixels,
-                                  float tan_half_fov_y, int height) {
+inline DerivedParams DeriveParams(int tile_size, int width, int height) {
     DerivedParams d;
     d.lanes = tile_size * tile_size;
-    d.slab_pixels = static_cast<float>(max_ray_pixels) / static_cast<float>(d.lanes);
-    d.steps_per_lane = static_cast<int>(std::ceil(1.41421356f * d.slab_pixels)) + 3;
-    const float fov_y = 2.0f * std::atan(tan_half_fov_y);
-    const float theta_px = fov_y / static_cast<float>(std::max(1, height));
-    d.thickness_coefficient = thickness_pixels * theta_px;
+    const float diag = std::sqrt(static_cast<float>(width) * static_cast<float>(width) +
+                                 static_cast<float>(height) * static_cast<float>(height));
+    d.steps_per_lane =
+        static_cast<int>(std::ceil(1.41421356f * diag / static_cast<float>(d.lanes))) + 3;
     return d;
-}
-
-// 段长不足 4 px 时判据次数会按 ≈ 1 + 1/L 放大（相邻 lane 重复判同一格）。
-// **只用于文档/单测**：渲染器不据此告警（画面完全相同，不值得占一行日志）。
-inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
-    return d.slab_pixels < 4.0f;
 }
 
 // ─────────────────────────── ⑤ CPU 参考实现 ───────────────────────────
@@ -386,23 +376,21 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // 在段 [sigma_start, sigma_end] 上走 DDA，返回**最早命中格内**的中点 s_mid（无命中 = kNoHit）。
 //
 // 命中格内的中点（而不是出格点）是刻意的：从 s 反推 uv 时必须保证落在那一个格子里，
-// 而柱内颜色处处相同 ⇒ s 的截断误差不影响取色（ssr_renderer.h 文件头的并行化一节）。
+// 而一格之内的差异只来自网格对齐 ⇒ s 的截断误差不影响取色。
 //
 // skip_first_cell：起点就落在反射体表面上时（σ_start == 0）跳过起点格，否则射线会在
-// 自己的柱子里立刻命中自己。**只对 σ_start == 0 的那一段成立**，其余 lane 的起点不在
+// 自己的身体上立刻命中自己。**只对 σ_start == 0 的那一段成立**，其余 lane 的起点不在
 // 反射体上，不该跳。
 //
 // w_at(x, y) → 该格的 **w = 1/z_view**（0/负 = 没有几何）。越界由调用方保证不会发生
 // （这里仍防御性 break）。
 //
-// facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
-//   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
-//   而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
+// 2026-11-11：判据退化成 CellCrossesFront（穿前表面），因此不再有厚度/朝向参数。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
-                   bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
-                   DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                   int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                   bool skip_first_cell, DepthFn&& w_at, int width, int height,
+                   int* hit_x = nullptr, int* hit_y = nullptr,
+                   FacingFn facing = FacingFn{}) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
@@ -466,8 +454,7 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             }
             continue;
         }
-        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
-                    thickness_coefficient, min_thickness_m) &&
+        if (CellCrossesFront(WAt(ray, sigma), WAt(ray, sigma_out), w_cell) &&
             facing(cx, cy, ray.dir3)) {
             if (hit_x != nullptr) {
                 *hit_x = cx;
@@ -494,39 +481,51 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
 
 // 单线程版：整条射线一条 DDA 走到底（"K=1"的语义，也是等价性测试的对照）。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
-float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
-                    int max_cells, DepthFn&& w_at, int width, int height,
+float MarchWholeRay(const ScreenRay& ray, int max_cells, DepthFn&& w_at, int width, int height,
                     int* hit_x = nullptr, int* hit_y = nullptr,
                     FacingFn facing = FacingFn{}) {
     const bool skip = ray.sigma_enter <= 0.0f;
-    return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
-                        thickness_coefficient, min_thickness_m, w_at, width, height,
-                        hit_x, hit_y, facing);
+    return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip, w_at, width,
+                        height, hit_x, hit_y, facing);
 }
 
-// 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
-// **必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧"分段 + min"能成立的全部依据。
+// 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：把 [enter, exit] **等分**成 lanes 段，
+// 各自报本段最早命中，取 min。**必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧
+// "分段 + min" 能成立的全部依据。等分（而不是固定像素长度）的理由：射线的长度已经由
+// 世界空间裁剪决定，屏幕预算这个概念被删掉了（2026-11-11）。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
-float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
-                 DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                 int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, DepthFn&& w_at, int width,
+                 int height, int* hit_x = nullptr, int* hit_y = nullptr,
+                 FacingFn facing = FacingFn{}) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
-    for (int lane = 0; lane < d.lanes; ++lane) {
-        const float lane_begin = d.slab_pixels * static_cast<float>(lane);
-        if (lane_begin >= ray.sigma_exit) {
-            break;   // 短射线：后面的段整段空转
-        }
-        const float start = std::max(lane_begin, ray.sigma_enter);
-        const float end = std::min(lane_begin + d.slab_pixels, ray.sigma_exit);
+    const float t0 = ray.sigma_enter;
+    const float t1 = ray.sigma_exit;
+    if (!(t1 > t0)) {
+        if (hit_x != nullptr) *hit_x = -1;
+        if (hit_y != nullptr) *hit_y = -1;
+        return kNoHit;
+    }
+    const float span = t1 - t0;
+    // 段数上限 = 射线在屏幕上的像素弧长（向上取整）：避免出现"亚像素段"——
+    // 亚像素段会把一格的判定区间切碎（同一个格被两个段各看一半），
+    // 结果随 tile 变化（tile 本应只是性能旋钮）。见 ssr_gpu_test 的 TileIsOnlyPerformance。
+    int lanes_used = d.lanes;
+    const int span_px = static_cast<int>(std::ceil(span));
+    if (span_px > 0 && span_px < lanes_used) {
+        lanes_used = span_px;
+    }
+    const float lanes = static_cast<float>(lanes_used);
+    for (int lane = 0; lane < lanes_used; ++lane) {
+        const float start = t0 + span * (static_cast<float>(lane) / lanes);
+        const float end = t0 + span * (static_cast<float>(lane + 1) / lanes);
         if (!(end > start)) {
             continue;
         }
         int cx = -1;
         int cy = -1;
-        const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
-                                     d.thickness_coefficient, min_thickness_m, w_at,
+        const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f, w_at,
                                      width, height, &cx, &cy, facing);
         if (s < best) {
             best = s;
@@ -534,12 +533,8 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
             best_y = cy;
         }
     }
-    if (hit_x != nullptr) {
-        *hit_x = best_x;
-    }
-    if (hit_y != nullptr) {
-        *hit_y = best_y;
-    }
+    if (hit_x != nullptr) *hit_x = best_x;
+    if (hit_y != nullptr) *hit_y = best_y;
     return best;
 }
 

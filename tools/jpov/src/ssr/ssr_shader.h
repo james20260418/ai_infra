@@ -47,19 +47,14 @@ uniform float uNear;
 uniform float uFar;
 uniform float uTanHalf;       // tan(垂直 FOV / 2)
 uniform float uAspect;
-uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
-uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
-uniform float uMinThickness;  // 米，T 的下限
-// 真实厚度（背面深度 pass，2026-11-08）：R32F 米制厚度，0 = 该格没有背面数据。
-// uRealThickness != 0 时 c/T/深度假设都不参与判据，只剩 uMinThickness 当 epsilon。
-uniform sampler2D uThick;
-uniform int   uRealThickness;
+uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）。**唯一的长度预算**
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
-uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
-uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段尾就 break）
-// 屏幕预算（SSR 像素弧长）。**ray_ratio 的分母**：常量分母 ⇒ 提前结束的射线不会被误淡出。
-uniform float uMaxRayPixels;
+uniform int   uLanes;         // T²：射线按 [enter, exit] 等分成这么多段（ssr_math.h::DerivedParams）
+// 真实厚度（背面深度 pass）：R32F 米；0 = 该格没有背面数据（天空/未覆盖）⇒ 退回"穿前表面"判据。
+uniform sampler2D uThick;
+uniform int   uRealThickness;
+uniform int   uStepsPerLane;  // 每段步数上限（按屏幕对角线算，DDA 到段尾就 break）
 
 // 屏幕射线：σ = 未裁剪线段上的像素弧长，w = 1/d 对 σ 仿射（ssr_math.h::ScreenRay）。
 struct SsrRay {
@@ -104,42 +99,38 @@ float SsrWAt(SsrRay ray, float sigma) {
     return ray.w0 + (ray.w1 - ray.w0) * t;
 }
 
-// 每格判据（§5.1）。ssr_math.h::CellHit 逐字同一形式。
+// 每格唯一判据（2026-11-11）：**射线在这一格里穿过了前表面**。
+// ssr_math.h::CellCrossesFront 逐字同一形式。
 //
-//   d_hi ≥ z      ⟺  w_min ≤ w_cell
-//   d_lo ≤ z + T  ⟺  w_max·(1+c) ≥ w_cell      （T = c·z ⇒ 1/(z+T) = z⁻¹/(1+c)）
-// 两条都是比较/乘法，**没有除法** —— 这是 w 空间重构的全部收益。
-bool SsrCellHit(float w_in, float w_out, float w_cell) {
-    float w_min = min(w_in, w_out);
-    float w_max = max(w_in, w_out);
-    if (!(w_min > 0.0) || !(w_cell > 0.0)) {
-        return false;
+//   z_in ≤ z_front ≤ z_out   ⟺   w_min ≤ w_cell ≤ w_max      （w = 1/z，反序）
+//
+// 没有厚度、没有 epsilon、没有"分辨率下限"：`z_front` 就是那张面，穿面即命中。
+// 薄片（叶卡）天然成立；实体若被射线从内部穿过，进格时已是 z_in > z_front ⇒ 自动不满足，
+// 所以也不需要额外的背面/朝向判据。掠射时"一格跨几十米"不再是问题（判的是穿面，不是比厚度）
+// ⇒ 不会有逐行抛硬币的梳齿。
+bool SsrCellCrossesFront(float w_in, float w_out, float w_cell) {
+    if (!(w_cell > 0.0)) {
+        return false;                 // 空格：这里没有面
     }
-    if (w_min > w_cell) {
-        return false;                    // 整段在柱子前方
-    }
-    // 退化分支：厚度下限生效（z 极近）。正常相机永不进入。
-    if (!(w_cell <= uThicknessC / uMinThickness)) {
-        return w_max >= 1.0 / (1.0 / w_cell + uMinThickness);
-    }
-    return w_max * (1.0 + uThicknessC) >= w_cell;
+    return (min(w_in, w_out) <= w_cell) && (w_cell <= max(w_in, w_out));
 }
 
 // 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
 //
-//   R·N < 0 ⇒ 射线**扎进**命中面 = 合法的正面命中；
-//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中，继续 march。
+//   R·N < 0 ⇒ 射线**扎进**这个面 = 合法的正面命中；
+//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中。
 //
-// 为什么必须有它：深度缓冲里只有"相机看得见的那一面"的颜色与法线。镜子往上看桌子
-// 底面 / 柱体背面时，屏幕空间里没有那些面的像素，旧判据会把**桌面顶面的高光**当结果
-// ⇒ 倒影里桌子底下也在发光。
+// 为什么"穿前表面"判据替代不了它（2026-11-11 复核）：深度图只存相机看得见的那一面。
+// 镜子往上看桌子底面时，射线所在**屏幕位置**存的却是桌面顶面 —— 射线确实穿过了那一格的
+// 深度（区间包含成立），但那是屏幕空间的巧合。唯一能分开的信息是法线朝向：射线向上、
+// 顶面法线朝上 ⇒ R·N > 0 ⇒ 拒。所以它不是旧时代的残留，而是屏幕空间反射的固有限制。
 //
 // attr.a ≥ 0.25 ⇒ 这一格有视空间法线（属性 pass 画过几何）。没有数据（天空 / 未纳入
 // 属性 pass 的几何）时不判、维持旧行为（见 ssr_renderer.h "已知边界"）。
 bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
     vec4 attr = texelFetch(uNormal, cell, 0);
     if (attr.a < 0.25) {          // .a = 掩码编码：1 反射体 / 0.5 有法线非反射体 / 0 无数据
-        return true;              // 没有法线数据 ⇒ 不判方向（维持引入判据之前的行为）
+        return true;              // 没有法线数据 ⇒ 不判方向
     }
     return dot(ray_dir, SsrNormalOf(attr)) < 0.0;
 }
@@ -266,13 +257,20 @@ void main() {
         return;
     }
 
-    // lane 覆盖 [k·L, (k+1)·L)（切段见 ssr_math.h::MarchSlabs）
-    float lane_begin = float(lane) * uSlabPixels;
-    if (lane_begin >= ray.exit) {
-        return;                       // 短射线：后面的段整段空转
+    // lane = [enter, exit] 的等分段（ssr_math.h::MarchSlabs 同一算式）：
+    // 没有屏幕预算 —— 射线长度已经由 uMaxDistance / 远平面 / 近平面在世界空间裁剪。
+    float t0 = ray.enter;
+    float t1 = ray.exit;
+    if (!(t1 > t0)) {
+        return;
     }
-    float start = max(lane_begin, ray.enter);
-    float end = min(lane_begin + uSlabPixels, ray.exit);
+    // 段数上限 = 像素弧长（向上取整）：不允许出现亚像素段（会把一格的判定区间切碎，
+    // 让结果随 tile 变化）。与 ssr_math.h::MarchSlabs 同一算式。
+    int lanes_used = min(uLanes, max(1, int(ceil(t1 - t0))));
+    float lanes_f = float(lanes_used);
+    float lane_begin = t0 + (t1 - t0) * (float(lane) / lanes_f);
+    float start = lane_begin;
+    float end = t0 + (t1 - t0) * (float(lane + 1) / lanes_f);
     if (!(end > start)) {
         return;
     }
@@ -338,29 +336,20 @@ void main() {
             }
             continue;
         }
-        // 每格判据：默认用经验厚度（c·z）；开了背面 pass 就用**真实厚度** z_back − z_front，
-        // 此时 c / T / 所有深度假设都不参与判据，只保留 min_thickness 当 epsilon。
+        // 每格判据（2026-11-11 晚，恢复厚度）：**射线区间与本格 [z_front, z_back] 是否重叠**。
+        // 有背面数据时厚度就是容差（物体自身的厚度），不再是零测度；
+        // 没有背面数据（thick = 0）时退回"穿前表面"，保持原行为。
         float w_in_now = SsrWAt(ray, sigma);
         float w_out_now = SsrWAt(ray, sigma_out);
         bool cell_hit;
-        if (uRealThickness != 0) {
-            float thick = texelFetch(uThick, cell, 0).r;
-            if (thick > 0.0) {
-                // 分辨率下限：物体比"射线在自己这一格里跨过的深度"还薄时，命中与否逐行抛硬币。
-                // 因此把厚度抬到至少等于这一格的射线深度跨度（data-driven，无常数）。
-                float dz_cell = abs(1.0 / max(w_in_now, 1.0e-9) - 1.0 / max(w_out_now, 1.0e-9));
-                float thick_eff = max(thick, dz_cell);
-                float z = 1.0 / w_cell;
-                float w_hi = 1.0 / (z + max(thick_eff, uMinThickness));
-                cell_hit = (min(w_in_now, w_out_now) <= w_cell) &&
-                           (max(w_in_now, w_out_now) >= w_hi);
-            } else {
-                cell_hit = SsrCellHit(w_in_now, w_out_now, w_cell);   // 没有背面数据 ⇒ 退回经验厚度
-            }
+        float thick = (uRealThickness != 0) ? texelFetch(uThick, cell, 0).r : 0.0;
+        if (thick > 0.0) {
+            float w_back = 1.0 / (1.0 / w_cell + thick);   // z_back = z_front + thick
+            cell_hit = (min(w_in_now, w_out_now) <= w_cell) &&
+                       (max(w_in_now, w_out_now) >= w_back);
         } else {
-            cell_hit = SsrCellHit(w_in_now, w_out_now, w_cell);
+            cell_hit = SsrCellCrossesFront(w_in_now, w_out_now, w_cell);
         }
-        // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
         if (cell_hit && SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
@@ -433,8 +422,9 @@ void main() {
             // 正好落在正确的双线性位置。最近邻会让倒影边缘逐像素跳一格 —— 这正是"反射
             // 锯齿"的主要内容（斜面/球面上尤其明显），改成线性后免费好一大截。
             rgb = texture(uColor, pos / uRes).rgb;
-            // 预算占用率：分母是**常量**预算（不是 span）。提前结束的射线比值天然小 ⇒ 不误淡出。
-            ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
+            // 命中沿射线的相对进度（0 = 起点，1 = 裁剪后的远端）。旧的"屏幕预算占用率"
+            // 随 uMaxRayPixels 一起删掉了（那个预算是屏幕像素，与物理无关）。
+            ray_ratio = clamp((s - ray.enter) / max(ray.exit - ray.enter, 1.0), 0.0, 1.0);
             hit_s = s;
             type = 1u;                     // kHit
         } else {
@@ -588,8 +578,9 @@ vec3 SsrF0(vec3 base_color, float metallic) {
 // ⚠️ 双面材质（`double_sided` 会关背面剔除）**必须**在这里翻转法线，与主 pass
 //    object3d_renderer.h 的 `if (!gl_FrontFacing) N = -N;` 保持同一约定。
 //    2026-11-01 修：此前属性 pass 不翻 ⇒ 背面可见的薄片（叶卡/布片/条带）写进
-//    属性纹理的是背离相机的法线 ⇒ SsrHitFacing 的 dot(R,N) 与着色结论相反，
-//    这些表面在倒影里会被整块判成"背面命中"而漏掉（或反过来吃掉别的命中）。
+//    属性纹理的是背离相机的法线 ⇒ 命中判据会把它们判成"背面命中"而整块漏掉
+//    （2026-11-11 起判据只看前表面深度，与法线无关，这条翻转仍然要写 —— 反射体自身的
+//    法线要用它来反构射线）。
 void main() {
     vec3 n_view = vNormalView;
     if (!gl_FrontFacing) n_view = -n_view;

@@ -182,6 +182,9 @@ public:
         float scale = 1.0f;
     };
     std::vector<Clutter> clutter_;
+    // TEMP(2026-11-11)：把某个 clutter 方块高亮成红色 + 在世界点画一个小绿块（漏光排查）。
+    int debug_hl_clutter_ = -1;
+    jpov::Vec3f debug_marker_ = {0.0f, -1000.0f, 0.0f};
 
     // 固定种子生成 N 个"散布在镜子上方"的方块：极坐标 r∈[5,30]、随机朝向/大小。
     // 用固定种子是刻意的：SSR 的验收图要能重拍对比，场景不能每帧变。
@@ -216,9 +219,10 @@ public:
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
-    bool  ssr_backface_ = false;    // 真实厚度：背面深度 pass（替换 c·z）
+    bool  ssr_backface_ = true;     // 真实厚度：背面深度 pass（替换 c·z）
     float ssr_min_thickness_ = 1.0e-4f;  // 真实厚度时的 epsilon（诊断可调）
-    int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
+    int   ssr_max_ray_px_ = 220;    // 旧的屏幕空间预算：2026-11-11 起**不再参与判据/裁剪**
+    float ssr_max_dist_m_ = 60.0f;  // 射线长度预算（米，世界空间）—— 唯一影响追踪距离的量
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
     int   ssr_debug_ = 0;
@@ -327,9 +331,22 @@ public:
                                    /*scale*/ 5.0f, /*highlight*/ false, /*picking_id*/ 0,
                                    /*wind*/ std::nullopt, /*ssr_reflector*/ true);
             }
-            for (const Clutter& c : clutter_) {
+            for (int ci = 0; ci < static_cast<int>(clutter_.size()); ++ci) {
+                const Clutter& c = clutter_[ci];
                 cmds->DrawObject3D(box_mesh_, mat_clutter_, c.center,
                                    {0.0f, 1.0f, 0.0f}, c.front, c.scale);
+                if (ci == debug_hl_clutter_) {
+                    const jpov::PBRMaterial red = jpov::PBRMaterial::SolidColorMR(
+                        /*color*/ {1.0f, 0.05f, 0.05f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 0.7f);
+                    cmds->DrawObject3D(box_mesh_, red, c.center,
+                                       {0.0f, 1.0f, 0.0f}, c.front, c.scale * 1.04f);
+                }
+            }
+            if (debug_marker_.y() > -500.0f) {
+                const jpov::PBRMaterial green = jpov::PBRMaterial::SolidColorMR(
+                    /*color*/ {0.1f, 1.0f, 0.2f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 0.7f);
+                cmds->DrawObject3D(box_mesh_, green, debug_marker_,
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, 0.12f);
             }
             // 镜面皮肤的蓝人（**曲面**反射体）：单独一条命令（材质不同），带 ssr_reflector。
             // 4 个随机站位，固定种子；属性 pass 会为它们写逐顶点（曲面）视空间法线。
@@ -374,7 +391,8 @@ public:
             sc.thickness_pixels = ssr_thickness_px_;
             sc.backface_depth = ssr_backface_;
             sc.min_thickness_m = ssr_min_thickness_;
-            sc.max_ray_pixels = ssr_max_ray_px_;
+            sc.max_ray_pixels = ssr_max_ray_px_;   // 已废弃（保留字段只为兼容）
+            sc.max_distance_m = ssr_max_dist_m_;
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.debug_coverage = ssr_debug_;
@@ -497,10 +515,7 @@ private:
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
-            float mrp = static_cast<float>(ssr_max_ray_px_);
-            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
-                ssr_max_ray_px_ = static_cast<int>(mrp);
-            }
+            ui_.SliderFloat("SSR 射线距离 m", &ssr_max_dist_m_, row(1, 13), 4.0f, 200.0f, 1);
             // 磨砂强度：roughness² × 该值 = 采样的 mip 级。0 = 永远锐利（旧行为）。
             ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 14),
                             0.0f, 8.0f, 2);

@@ -226,7 +226,11 @@ void main() {
     vec3 ssr_L = (den > 1.0e-6) ? (num / den) : vec3(0.0);
 
     if (uCoverageDebug == 1) {
-        FragColor = vec4(vec3(A), 1.0);
+        // TEMP(2026-11-11)：调试档 1 输出**未经升采样混合**的原始 alpha（最近 texel、lod 0），
+        // 用来确认 A 在 SSR 输出处到底是不是 0/1。
+        vec2 uv0 = (vec2(q0) + 0.5) / uSsrRes;
+        float a_raw = textureLod(uSsrMip, uv0, 0.0).a;
+        FragColor = vec4(vec3(a_raw), 1.0);
         return;
     }
     // 3 = 直出 SSR 辐亮度（**不经材质/环境项**）：用来判断一个可疑颜色是"SSR 采到的内容"

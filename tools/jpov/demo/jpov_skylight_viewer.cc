@@ -630,6 +630,158 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 临时排查（2026-11-10，**不进 main**）：按 Danis 截图的机位复现「树倒影贴地平线」。
+//   pos (6.62146282, 0.524727762, 4.37745857) -> 原点，fov 60，1280×720
+// 出图：repro_on.png / repro_off.png（只切「真实厚度」），可用环境变量覆盖：
+//   SSR_BACKFACE=0/1  SSR_SCALE  MINTHICK  SSR_DEBUG
+int RunCaptureRepro(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 树倒影贴地平线 repro（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.floor_preset_ = 0;
+    app.view_ = jpov_viewer::DefaultView();
+    // 用户截图机位（已由 pos 反解：R=|pos|，phi=asin(y/R)，theta=atan2(x,z)）
+    app.view_.phi   = 0.06601033715344137;
+    app.view_.theta = 0.9866564787491736;
+    app.view_.R     = 7.95495145383819;
+    app.SetSsr(true);
+    app.ssr_scale_ = 0.5f;
+    app.ssr_thickness_px_ = 60.0f;
+    app.ssr_max_ray_px_ = static_cast<int>(std::getenv("SSR_MAXRAY") ? std::atoi(std::getenv("SSR_MAXRAY")) : 220);
+    app.ssr_rough_to_lod_ = 8.0f;
+    app.ssr_rough_cutoff_ = 0.60f;
+    app.ssr_debug_ = 0;
+
+    auto env_f = [](const char* n, float d) {
+        const char* v = std::getenv(n);
+        return (v != nullptr) ? std::strtof(v, nullptr) : d;
+    };
+    app.ssr_min_thickness_ = env_f("MINTHICK", 1.0e-4f);
+    app.ssr_max_dist_m_ = env_f("SSR_MAXDIST", 60.0f);
+    app.ssr_scale_ = env_f("SSR_SCALE", 0.5f);
+    app.ssr_debug_ = static_cast<int>(env_f("SSR_DEBUG", 0.0f));
+
+    app.ssr_backface_ = true;
+    app.RunOnce(input, winfo, (out_dir + "/repro_on.png").c_str());
+    app.ssr_backface_ = false;
+    app.RunOnce(input, winfo, (out_dir + "/repro_off.png").c_str());
+
+    app.ssr_backface_ = true;
+    app.SetSsr(false);
+    app.RunOnce(input, winfo, (out_dir + "/repro_nossr.png").c_str());
+    app.SetSsr(true);
+    app.ssr_backface_ = false;
+
+    LOG(INFO) << "repro captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// 临时排查（2026-11-11，**不进 main**）：按 Danis 截图机位复现「漏光」。
+int RunCaptureLeak(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV - leak repro (headless)";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 45.0f;
+    app.floor_preset_ = 0;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.07036040611512474;
+    app.view_.theta = 1.605151002503736;
+    app.view_.R     = 15.91289382405062;
+    if (std::getenv("SSR_CAM") != nullptr) {   // "px,py,pz" -> phi/theta/R
+        float px = 0, py = 0, pz = 0;
+        std::sscanf(std::getenv("SSR_CAM"), "%f,%f,%f", &px, &py, &pz);
+        const double R = std::sqrt(double(px) * px + double(py) * py + double(pz) * pz);
+        app.view_.R = R;
+        app.view_.phi = std::asin(py / R);
+        app.view_.theta = std::atan2(px, pz);
+    }
+    if (std::getenv("SSR_GT") != nullptr) {
+        // 镜像相机：y → −y（镜面倒影的真值 = 从地板下方看同一场景，再上下翻转）
+        app.view_.phi = -app.view_.phi;
+    }
+    app.SetSsr(true);
+
+    auto env_f = [](const char* n, float d) {
+        const char* v = std::getenv(n);
+        return (v != nullptr) ? std::strtof(v, nullptr) : d;
+    };
+    const float n_scale = env_f("SSR_N", 2.0f);
+    const std::string tag = (std::getenv("SSR_TAG") != nullptr) ? std::getenv("SSR_TAG") : "on";
+    app.ssr_scale_      = 1.0f / n_scale;
+    app.ssr_max_dist_m_ = env_f("SSR_MAXDIST", 60.0f);
+    app.ssr_thickness_px_ = 3.0f;
+    app.ssr_rough_to_lod_ = 8.0f;
+    app.ssr_rough_cutoff_ = 0.60f;
+    app.ssr_debug_      = static_cast<int>(env_f("SSR_DEBUG", 0.0f));
+    app.ssr_backface_ = true;   // 打开背面深度 pass（thick_tex 才有值）
+    app.debug_hl_clutter_ = static_cast<int>(env_f("HL_BOX", -1.0f));
+    if (std::getenv("MARK_XYZ") != nullptr) {
+        float mx = 0, my = 0, mz = 0;
+        std::sscanf(std::getenv("MARK_XYZ"), "%f,%f,%f", &mx, &my, &mz);
+        app.debug_marker_ = {mx, my, mz};
+    }
+
+    app.RunOnce(input, winfo, (out_dir + "/leak_" + tag + ".png").c_str());
+    if (env_f("SSR_DEBUG", 0.0f) == 0.0f && !std::getenv("SSR_SKIP_NOSSR")) {
+        app.SetSsr(false);
+        app.RunOnce(input, winfo, (out_dir + "/leak_" + tag + "_nossr.png").c_str());
+        app.SetSsr(true);
+    }
+    LOG(INFO) << "leak repro captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 // 背面深度（z_back）A/B：同一机位只切「真实厚度」开关。
 //   backface_off.png      经验厚度 c·z（现状）
 //   backface_on.png       真实厚度 z_back − z_front
@@ -672,7 +824,7 @@ int RunCaptureBackface(const std::string& out_dir) {
     app.SetSsr(true);
     app.ssr_scale_ = 0.5f;
     app.ssr_thickness_px_ = 6.0f;
-    app.ssr_max_ray_px_ = 220;
+    app.ssr_max_ray_px_ = static_cast<int>(std::getenv("SSR_MAXRAY") ? std::atoi(std::getenv("SSR_MAXRAY")) : 220);
     app.ssr_rough_to_lod_ = 8.0f;
     app.ssr_rough_cutoff_ = 0.60f;
     app.ssr_debug_ = 0;
@@ -682,6 +834,7 @@ int RunCaptureBackface(const std::string& out_dir) {
         return (v != nullptr) ? std::strtof(v, nullptr) : d;
     };
     app.ssr_min_thickness_ = env_f("MINTHICK", 1.0e-4f);
+    app.ssr_max_dist_m_ = env_f("SSR_MAXDIST", 60.0f);
     const float scale = env_f("SSR_SCALE", 0.5f);
 
     app.ssr_scale_ = scale;
@@ -722,6 +875,8 @@ int main(int argc, char** argv) {
     std::string ssr_out_dir;
     std::string mat_out_dir;
     std::string backface_out_dir;
+    std::string repro_out_dir;
+    std::string leak_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -736,12 +891,22 @@ int main(int argc, char** argv) {
             mat_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-backface") == 0 && i + 1 < argc) {
             backface_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-repro") == 0 && i + 1 < argc) {
+            repro_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-leak") == 0 && i + 1 < argc) {
+            leak_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!leak_out_dir.empty()) {
+        return RunCaptureLeak(leak_out_dir);
+    }
+    if (!repro_out_dir.empty()) {
+        return RunCaptureRepro(repro_out_dir);
     }
     if (!backface_out_dir.empty()) {
         return RunCaptureBackface(backface_out_dir);
