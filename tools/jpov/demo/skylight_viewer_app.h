@@ -481,16 +481,18 @@ private:
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 
-        // ── 右列：远景仰角雾 ──
-        ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
-        ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
-        ui_.SliderFloat("满雾距离 m", &deg_.elev_fog_full, row(1, 2), 1.0f, 5000.0f, 1);
-        ui_.SliderFloat("仰角带内 °", &deg_.elev_fog_inner_deg, row(1, 3), 0.0f, 20.0f, 1);
-        ui_.SliderFloat("仰角带外 °", &deg_.elev_fog_outer_deg, row(1, 4), 0.1f, 40.0f, 1);
-        ui_.SliderFloat("雾浓度 σ", &deg_.elev_fog_density, row(1, 5), 0.0f, 8.0f, 2);
-        ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
-        // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
-        ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+        // 远景仰角雾的 UI 已按 Danis 要求整段删除（2026-11-13）：
+        // 场景里 elev_fog_on 默认 false，SSR 对比时它只会干扰判断。数据/命令仍在
+        // （skylight_scene.h 的 deg_ 字段 + render_command 的 elevation_fog），需要时
+        // 由代码设置，不再暴露面板。
+
+        // ── 右列 0..2：掠射淡出（2026-11-13）──
+        // 放在列首：不受 SSR 总闸影响也能看见（关掉 SSR 时它不生效，但不会"找不到"）。
+        ui_.Checkbox("SSR 掠射淡出 (A 插值)", &ssr_grazing_fade_, row(1, 0));
+        if (ssr_grazing_fade_) {
+            ui_.SliderFloat("淡出起点 kappa", &ssr_grazing_start_, row(1, 1), 1.0f, 30.0f, 1);
+            ui_.SliderFloat("淡出终点 kappa", &ssr_grazing_end_, row(1, 2), 1.0f, 60.0f, 1);
+        }
 
         // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
         {
@@ -518,12 +520,6 @@ private:
             if (ui_.Combo("SSR 柱体来源", &smode, slabs, row(1, 11))) {
                 ssr_slab_mode_ = smode;
             }
-            // 掠射淡出（2026-11-13）：勾上才生效，两个阈值可调。
-            ui_.Checkbox("SSR 掠射淡出 (A 插值)", &ssr_grazing_fade_, row(1, 1));
-            if (ssr_grazing_fade_) {
-                ui_.SliderFloat("淡出起点 kappa", &ssr_grazing_start_, row(1, 2), 1.0f, 30.0f, 1);
-                ui_.SliderFloat("淡出终点 kappa", &ssr_grazing_end_, row(1, 3), 1.0f, 60.0f, 1);
-            }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
             if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
@@ -535,15 +531,6 @@ private:
             // 发射线门槛：超过它的粗糙度直接用 env（省射线，且本来也糊得看不出形状）。
             ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 15),
                             0.2f, 1.0f, 2);
-        }
-        // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
-        {
-            const jpov::Color fc = MakeSkyLighting(deg_, tricolor_ambient_)
-                                       .sky.ElevationFogColor();
-            const jpov::Color shown{std::min(fc.r * deg_.elev_fog_gain, 1.0f),
-                                    std::min(fc.g * deg_.elev_fog_gain, 1.0f),
-                                    std::min(fc.b * deg_.elev_fog_gain, 1.0f), 1.0f};
-            ui_.ColorSwatch("雾色推导参考→", shown, row(1, 8));
         }
     }
 
