@@ -39,8 +39,11 @@ void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     ivec2 hi = uRes - 1;
     bool hit = (texelFetch(uType, p, 0).r == 1u);   // 只有 kHit 算"有答案"
-    vec3 c = texelFetch(uRadiance, p, 0).rgb;
-    float a = hit ? 1.0 : 0.0;
+    vec4 rt = texelFetch(uRadiance, p, 0);
+    vec3 c = rt.rgb;
+    // A 不再恒为 1：resolve 把"掠射淡出后的置信度"写在 .a 里（2026-11-13）。
+    // 老行为（a=1）等价于 .a 恒 1，所以关掉淡出时逐字节不变。
+    float a = hit ? clamp(rt.a, 0.0, 1.0) : 0.0;
     if (!hit) {
         // **5×5** 里最近的命中（不是 3×3）：填充半径必须 ≥ 2，否则下一级 mip 的
         // "整块无覆盖"分支平均到的仍是"半亮"的填充色 —— 覆盖率边界上会留下一圈

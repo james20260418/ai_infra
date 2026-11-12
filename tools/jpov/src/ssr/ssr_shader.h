@@ -378,6 +378,9 @@ void main() {
 inline constexpr const char* kSsrResolveFs = R"glsl(
 uniform sampler2D uSlice;
 uniform sampler2D uColor;
+uniform int   uGrazingFade;        // 1 = 开（2026-11-13）
+uniform float uGrazingFadeStart;   // kappa 起淡
+uniform float uGrazingFadeEnd;     // kappa 全淡
 
 layout(location = 0) out vec4 FragRadiance;
 layout(location = 1) out uint FragType;
@@ -400,6 +403,9 @@ void main() {
     uint type = 0u;            // kNone
     vec3 rgb = vec3(0.0);
     float ray_ratio = 0.0;
+    // 输出给滤波层的 **A**（覆盖率/置信度）：命中=1，掠射淡出时 <1。
+    // 注意：A ≠ ray_ratio（后者是预算占用率，只用于调试）。
+    float a_out = 1.0;
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
@@ -424,6 +430,39 @@ void main() {
             ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
             hit_s = s;
             type = 1u;                     // kHit
+
+            // ── 掠射淡出（2026-11-13）──
+            // kappa = cos(θ_p)/cos(θ_m)：主视图看 Q 有多掠射 vs 镜像视图看 Q 有多正。
+            // kappa 大 ⇒ 需要的源信息在屏幕空间里根本不存在（缝/极掠射）⇒ A 淡出、交回 env。
+            // **只动 A**：颜色/命中/距离都不变，所以下游（滤波/融合）逻辑不受影响。
+            if (uGrazingFade != 0) {
+                ivec2 hcell = clamp(ivec2(pos), ivec2(0), ivec2(uRes) - 1);
+                float w_hit = SsrWAt(ray, s);
+                vec3 nq = SsrNormalOf(texelFetch(uNormal, hcell, 0));
+                if (w_hit > 0.0 && dot(nq, nq) > 0.5) {
+                    float d_hit = 1.0 / w_hit;
+                    vec2 ndc_h = pos / uRes * 2.0 - 1.0;
+                    vec3 Qv = vec3(ndc_h.x * uAspect * uTanHalf, ndc_h.y * uTanHalf, -1.0) * d_hit;
+                    // 反射体像素的视空间位置与法线（P 就是本像素）
+                    float w_p = texelFetch(uW, mir, 0).r;
+                    if (w_p > 0.0) {
+                        vec3 np = SsrNormalOf(texelFetch(uNormal, mir, 0));
+                        vec2 uv_p = (vec2(mir) + 0.5) / uRes;
+                        vec2 ndc_p = uv_p * 2.0 - 1.0;
+                        vec3 Pv = vec3(ndc_p.x * uAspect * uTanHalf, ndc_p.y * uTanHalf, -1.0) / w_p;
+                        // 眼睛对反射平面的镜像位置（相机在原点）
+                        vec3 eye_m = 2.0 * dot(np, Pv) * np;
+                        vec3 Vp = normalize(Qv);
+                        vec3 Vm = normalize(Qv - eye_m);
+                        float cp = abs(dot(nq, Vp));
+                        float cm = abs(dot(nq, Vm));
+                        // kappa = 镜像视图的前缩 / 主视图的前缩。>1 表示"镜像里看得更大，
+                        // 但屏幕里只存了一条缝" ⇒ 需要凭空放大。（cp→0 时发散，正是最坏情形。）
+                        float kappa = cm / max(cp, 1.0e-3);
+                        a_out = 1.0 - smoothstep(uGrazingFadeStart, uGrazingFadeEnd, kappa);
+                    }
+                }
+            }
         } else {
             // 没命中：按**灭点**分类（旧版按 ray.exits 分，语义是反的）。
             vec2 vp;
@@ -437,7 +476,7 @@ void main() {
             }
         }
     }
-    FragRadiance = vec4(rgb, ray_ratio);
+    FragRadiance = vec4(rgb, a_out);
     FragType = type;
 #ifdef SSR_DEBUG
     FragHitS = hit_s;

@@ -359,6 +359,9 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.rough_tex = downsample_.rough_tex();       // 逐像素 roughness（发射线截止用）
     si.roughness_cutoff = in.cfg.roughness_cutoff;
     si.debug_reason = false;
+    si.grazing_fade = in.cfg.grazing_fade;
+    si.grazing_fade_start = in.cfg.grazing_fade_start;
+    si.grazing_fade_end = in.cfg.grazing_fade_end;
     if (use_slab) {
         si.slab_back_tex = slab_tex_;
         si.use_slab = true;

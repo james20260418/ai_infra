@@ -596,6 +596,20 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.ssr_debug_ = 0;
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_1x.png").c_str());
 
+    // (b3) 掠射淡出 A/B（2026-11-13）
+    if (std::getenv("SSR_GRAZING") != nullptr) {
+        app.ssr_grazing_fade_ = true;
+        if (const char* v = std::getenv("SSR_GRAZING_START")) {
+            app.ssr_grazing_start_ = std::strtof(v, nullptr);
+        }
+        if (const char* v = std::getenv("SSR_GRAZING_END")) {
+            app.ssr_grazing_end_ = std::strtof(v, nullptr);
+        }
+        app.RunOnce(input, winfo, (out_dir + "/ssr_grazing_on_1x.png").c_str());
+        app.ssr_grazing_fade_ = false;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_grazing_off_1x.png").c_str());
+    }
+
     // (b2) 柱体来源 A/B：0 = c·T 厚度（旧），1 = 同面并集（2026-11-12）
     app.ssr_slab_mode_ = 0;
     app.RunOnce(input, winfo, (out_dir + "/ssr_slab0_1x.png").c_str());

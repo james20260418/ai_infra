@@ -727,6 +727,16 @@ struct SsrConfig {
     float slab_gate_rel = 0.02f;        // 同面判定的深度残差门槛（相对）
     float slab_gate_cos = 0.94f;        // 同面判定的法线夹角门槛（cos ≈ 20°）
 
+    // 掠射淡出（2026-11-13）：镜像视图与主视图对被反射面（Q）的前缩比差太多时，
+    // 屏幕空间里根本没有足够信息（典型：桌面底面在主视图只剩一条缝，镜像视图却近乎正对）。
+    //   kappa = cos(θ_primary) / cos(θ_mirror)   （θ = Q 法线 × 视方向）
+    //   1 = 两个视角一样（不淡出）；越大 = 越需要"凭空放大"
+    // A 用 smoothstep 从 fade_start 淡到 fade_end（kappa 越大 A 越接近 0，交回 env 兜底）。
+    // 关掉时逐字节等于旧行为。
+    bool  grazing_fade = false;
+    float grazing_fade_start = 4.0f;   // kappa ≥ 它开始淡出
+    float grazing_fade_end = 10.0f;    // kappa ≥ 它完全交给兜底
+
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;

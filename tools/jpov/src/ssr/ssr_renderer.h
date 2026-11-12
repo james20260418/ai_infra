@@ -186,6 +186,11 @@ struct SsrInputs {
     unsigned int slab_back_tex = 0;
     bool use_slab = false;
 
+    // 掠射淡出（2026-11-13）：只改 A（覆盖率），颜色/命中不变。
+    bool  grazing_fade = false;
+    float grazing_fade_start = 4.0f;
+    float grazing_fade_end = 10.0f;
+
     // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。
     // 业界同口径：FidelityFX SSSR 的 tile classification 对高粗糙像素直接不发射线，
     // 交回预滤波的 environment probe。

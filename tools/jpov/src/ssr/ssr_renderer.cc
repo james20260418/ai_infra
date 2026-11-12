@@ -380,6 +380,10 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
     set1i(prog_resolve, "uRough", kTexUnitResolveRough);
+    // 掠射淡出（2026-11-13）：只改 resolve 输出的 A，march 不受影响。
+    set1i(prog_resolve, "uGrazingFade", in.grazing_fade ? 1 : 0);
+    set1f(prog_resolve, "uGrazingFadeStart", in.grazing_fade_start);
+    set1f(prog_resolve, "uGrazingFadeEnd", in.grazing_fade_end);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── 恢复调用方的状态 ──

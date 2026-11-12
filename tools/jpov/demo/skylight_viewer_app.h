@@ -222,6 +222,10 @@ public:
     int   ssr_debug_ = 0;
     // 柱体来源（2026-11-12）：0 = c·T 厚度（旧），1 = 同面并集柱体。
     int   ssr_slab_mode_ = 0;
+    // 掠射淡出（2026-11-13）：kappa = cos(θ主视图)/cos(θ镜像视图)，越大越该淡出。
+    bool  ssr_grazing_fade_ = false;
+    float ssr_grazing_start_ = 4.0f;
+    float ssr_grazing_end_ = 10.0f;
     void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -377,6 +381,9 @@ public:
             sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.debug_coverage = ssr_debug_;
             sc.slab_mode = ssr_slab_mode_;
+            sc.grazing_fade = ssr_grazing_fade_;
+            sc.grazing_fade_start = ssr_grazing_start_;
+            sc.grazing_fade_end = ssr_grazing_end_;
             cmds->ssr = sc;
         }
 
@@ -445,7 +452,7 @@ private:
                                                   "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）",
                                                   "SSR 调试：SSR 辐亮度",
-                                                  "SSR 调试：ray_ratio（预算占用）"};
+                                                  "SSR 调试：A 置信度（含掠射淡出）"};
             int dsel = ssr_debug_;
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
@@ -510,6 +517,12 @@ private:
             int smode = ssr_slab_mode_;
             if (ui_.Combo("SSR 柱体来源", &smode, slabs, row(1, 11))) {
                 ssr_slab_mode_ = smode;
+            }
+            // 掠射淡出（2026-11-13）：勾上才生效，两个阈值可调。
+            ui_.Checkbox("SSR 掠射淡出 (A 插值)", &ssr_grazing_fade_, row(1, 1));
+            if (ssr_grazing_fade_) {
+                ui_.SliderFloat("淡出起点 kappa", &ssr_grazing_start_, row(1, 2), 1.0f, 30.0f, 1);
+                ui_.SliderFloat("淡出终点 kappa", &ssr_grazing_end_, row(1, 3), 1.0f, 60.0f, 1);
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
