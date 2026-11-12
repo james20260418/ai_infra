@@ -173,7 +173,7 @@ bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
     // 三源取最厚：同面并集（若该格有）、c·T、全局最小厚度。
     // 没有 slab 数据时（例如不开柱体 pass 的旧路径 / CPU 对拍测试）退化为 c·T + t_min，
     // 与 2026-11-02 的两分支版本**逐字等价**。
-    float back_ct = w_cell / (1.0 + uThicknessC);
+    float back_ct = w_cell / max(1.0 + uThicknessC, 1.0e-3);   // 防御：c 理论上恒 > 0
     float back_tmin = 1.0 / (1.0 / w_cell + uMinThickness);
     float back_all = min(back_ct, back_tmin);
     if (back > 0.0) {
