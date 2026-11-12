@@ -90,12 +90,21 @@ public:
 
 private:
     void EnsureCopyTarget(int w, int h);
+    // 同面并集柱体（slab_mode = 1）：从 SSR 分辨率的 w + 法线建 back 纹理。
+    void EnsureSlabTarget(int w, int h);
+    void BuildSlabBack(const SsrPassInputs& in, int w, int h);
 
     ShaderManager* shader_mgr_ = nullptr;
 
     unsigned int prog_attr_ = 0;          // 属性 pass（Renderer 用；这里只管编译）
     unsigned int prog_attr_cutout_ = 0;   // 属性 pass 的镂空变体
     unsigned int prog_attr_skinned_ = 0;  // 蒙皮变体（VS 复用 kSkinnedVs）
+
+    unsigned int prog_slab_ = 0;  // 同面并集柱体 pass
+    unsigned int slab_tex_ = 0;   // R32F：每格 back（w 空间），SSR 分辨率
+    unsigned int slab_fbo_ = 0;
+    int slab_w_ = 0;
+    int slab_h_ = 0;
 
     unsigned int copy_tex_ = 0;   // 全分辨率 HDR 副本（避免反馈环）
     unsigned int copy_fbo_ = 0;

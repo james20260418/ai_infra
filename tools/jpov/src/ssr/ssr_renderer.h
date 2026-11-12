@@ -180,6 +180,12 @@ struct SsrInputs {
     // 粗糙表面的正确结果是宽积分，单条镜面射线表达不了）。
     unsigned int rough_tex = 0;
 
+    // 可选的**同面并集柱体**（2026-11-12 实验）：SSR 分辨率的 R32F，存每格的 back（w 空间）。
+    // use_slab = true 时判据改成"射线区间 [w_min,w_max] 与柱体 [back, w_cell] 相交"，
+    // 不再用 c·T 厚度。0 / false = 旧行为（逐字不变）。
+    unsigned int slab_back_tex = 0;
+    bool use_slab = false;
+
     // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。
     // 业界同口径：FidelityFX SSSR 的 tile classification 对高粗糙像素直接不发射线，
     // 交回预滤波的 environment probe。

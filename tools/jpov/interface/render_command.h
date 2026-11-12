@@ -717,6 +717,16 @@ struct SsrConfig {
     float max_distance_m = 1000.0f;
     int max_ray_pixels = 220;
 
+    // 柱体来源（2026-11-12 实验开关）：
+    //   0 = 老的 c·T 厚度模型（T = c·z，单层，逐字不变）
+    //   1 = 同面并集柱体：front = 该格真实 w，back 从「同面邻居」的 front 取 min 并进来。
+    //       同面判定照抄融合层那套：用本格 (P, 法线) 造切平面预测邻居位置的 w，残差 < 门槛，
+    //       且法线夹角 < 门槛。**单侧**（只往远处扩），永远不向近处扩 ⇒ 不会造假近面。
+    int slab_mode = 0;
+    float slab_min_thickness = 0.01f;   // 基线相对厚度（back = front·(1−t)），1% ≈ 6 px @ N=1
+    float slab_gate_rel = 0.02f;        // 同面判定的深度残差门槛（相对）
+    float slab_gate_cos = 0.94f;        // 同面判定的法线夹角门槛（cos ≈ 20°）
+
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;

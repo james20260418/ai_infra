@@ -220,6 +220,8 @@ public:
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
     int   ssr_debug_ = 0;
+    // 柱体来源（2026-11-12）：0 = c·T 厚度（旧），1 = 同面并集柱体。
+    int   ssr_slab_mode_ = 0;
     void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -374,6 +376,7 @@ public:
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.debug_coverage = ssr_debug_;
+            sc.slab_mode = ssr_slab_mode_;
             cmds->ssr = sc;
         }
 
@@ -447,6 +450,7 @@ private:
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
             }
+
         }
 
         // ── 左列 3..13：天光自由度 ──
@@ -499,6 +503,13 @@ private:
                 ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
+            }
+            // 柱体来源 A/B（2026-11-12）：老的单层 c·T vs 同面并集柱体。
+            const std::vector<const char*> slabs = {"柱体：c·T 厚度（旧）",
+                                                     "柱体：同面并集（front+邻居）"};
+            int smode = ssr_slab_mode_;
+            if (ui_.Combo("SSR 柱体来源", &smode, slabs, row(1, 11))) {
+                ssr_slab_mode_ = smode;
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);

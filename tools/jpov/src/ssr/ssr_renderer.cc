@@ -42,12 +42,13 @@ namespace {
 constexpr int kTexUnitMarchDepth = 0;
 constexpr int kTexUnitMarchNormal = 1;
 constexpr int kTexUnitMarchRough = 2;
+constexpr int kTexUnitMarchSlab = 3;
 constexpr int kTexUnitResolveSlice = 0;
 constexpr int kTexUnitResolveDepth = 1;
 constexpr int kTexUnitResolveNormal = 2;
 constexpr int kTexUnitResolveColor = 3;
 constexpr int kTexUnitResolveRough = 4;
-constexpr int kTexUnitSize = 5;
+constexpr int kTexUnitSize = 6;
 
 bool IsValidTile(int tile) {
     return tile == 1 || tile == 2 || tile == 4 || tile == 8;
@@ -288,7 +289,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
     prev_cull = glIsEnabled(GL_CULL_FACE);
     prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0, 0};
+    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0, 0, 0};
     for (int u = 0; u < kTexUnitSize; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind[u]);
@@ -348,9 +349,14 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
+    // 可选的同面并集柱体 back（2026-11-12）：off 时绑 0，着色器走老的 c·T 判据。
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchSlab);
+    glBindTexture(GL_TEXTURE_2D, in.slab_back_tex);
     set1i(prog_march_, "uW", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
+    set1i(prog_march_, "uSlabBack", kTexUnitMarchSlab);
+    set1i(prog_march_, "uUseSlab", in.use_slab ? 1 : 0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──

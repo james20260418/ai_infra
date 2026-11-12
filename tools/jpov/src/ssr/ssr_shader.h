@@ -49,6 +49,8 @@ uniform float uTanHalf;       // tan(垂直 FOV / 2)
 uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
 uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
+uniform sampler2D uSlabBack;  // 可选：同面并集后的柱体 back（w 空间，R32F，SSR 分辨率）
+uniform int   uUseSlab;       // 1 = 用 uSlabBack 的柱体判据；0 = 老的 c·T 厚度
 uniform float uMinThickness;  // 米，T 的下限
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
@@ -105,7 +107,8 @@ float SsrWAt(SsrRay ray, float sigma) {
 //   d_hi ≥ z      ⟺  w_min ≤ w_cell
 //   d_lo ≤ z + T  ⟺  w_max·(1+c) ≥ w_cell      （T = c·z ⇒ 1/(z+T) = z⁻¹/(1+c)）
 // 两条都是比较/乘法，**没有除法** —— 这是 w 空间重构的全部收益。
-bool SsrCellHit(float w_in, float w_out, float w_cell) {
+// cell 是本格坐标：uUseSlab 时要取那一格的 back。
+bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
     float w_min = min(w_in, w_out);
     float w_max = max(w_in, w_out);
     if (!(w_min > 0.0) || !(w_cell > 0.0)) {
@@ -113,6 +116,15 @@ bool SsrCellHit(float w_in, float w_out, float w_cell) {
     }
     if (w_min > w_cell) {
         return false;                    // 整段在柱子前方
+    }
+    // ── 体素柱（2026-11-12）：front = w_cell（真实最近深度），back 来自同面并集 ──
+    // 判据与 CPU 端 ssr_math.h::CellHitSlab 同一形式：区间 [w_min, w_max] 与 [back, w_cell] 相交。
+    if (uUseSlab != 0) {
+        float back = texelFetch(uSlabBack, cell, 0).r;
+        if (!(back > 0.0)) {
+            return false;
+        }
+        return w_max >= back;
     }
     // 退化分支：厚度下限生效（z 极近）。正常相机永不进入。
     if (!(w_cell <= uThicknessC / uMinThickness)) {
@@ -335,7 +347,7 @@ void main() {
             continue;
         }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell) &&
+        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell, cell) &&
             SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
