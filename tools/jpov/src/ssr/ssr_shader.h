@@ -33,6 +33,53 @@ void main() {
 inline constexpr const char* kSsrGlslVersion = "#version 330 core\n";
 
 // 两份 FS 共用的头部：uniform + 射线反构/裁剪 + 每格判据。**不带 #version**。
+// ── 共享的「同面判定」数学（2026-11-13）──
+//
+// 这个模型有三处用到（以前各写一份，阈值/形式容易漂）：
+//   ① 体素柱的同面并集（ssr_integration.cc 的 ssr_slab_back pass）
+//   ② 融合层双边升采样的值域项（ssr_fusion.cc）
+//   ③ 掠射淡出里对 Q 的两个视角比较（同一套"预测—残差"思路）
+// 只放与分辨率/取纹理无关的纯函数；调用方自己算好角射线与预测值再传进来。
+inline constexpr const char* kSsrSameSurfaceGlsl = R"glsl(
+float SsrRelResidual(float w_pred, float w_actual) {
+    return abs(w_actual - w_pred) / max(abs(w_pred), 1.0e-9);
+}
+
+float SsrRangeWeight(float rel, float tol) {
+    return 1.0 / (rel + tol);
+}
+
+float SsrNormalWeight(vec3 n0, vec3 n1) {
+    return clamp(dot(n0, n1), 0.0, 1.0);
+}
+
+bool SsrSameSurface(float w_pred, float w_actual, vec3 n0, vec3 n1,
+                    float rel_max, float cos_min) {
+    if (!(w_pred > 0.0) || !(w_actual > 0.0)) {
+        return false;
+    }
+    if (dot(n0, n1) < cos_min) {
+        return false;
+    }
+    return SsrRelResidual(w_pred, w_actual) < rel_max;
+}
+
+vec3 SsrCellRay(ivec2 p, vec2 res, float aspect_tan, float tan_half) {
+    vec2 ndc = (vec2(p) + 0.5) / res * 2.0 - 1.0;
+    return vec3(ndc.x * aspect_tan, ndc.y * tan_half, -1.0);
+}
+
+// 平面 (n, P) 与角射线 c 的交点视距；<= 0 = 退化。
+float SsrPlaneViewDist(vec3 n, vec3 P, vec3 c) {
+    float den = dot(n, c);
+    if (abs(den) < 1.0e-7) {
+        return 0.0;
+    }
+    float t = dot(n, P) / den;
+    return (t > 1.0e-4) ? t : 0.0;
+}
+)glsl";
+
 inline constexpr const char* kSsrCommonGlsl = R"glsl(
 // R32F：**w = 1/z_view**（不是窗口深度）。0 = 没有几何（天空/背景）。
 // SSR 内部一律用 w：判据全是"1/d 落在哪个区间"，而 1/d 对屏幕坐标仿射 ⇒ 每格零除法。
@@ -50,7 +97,6 @@ uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
 uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
 uniform sampler2D uSlabBack;  // 可选：同面并集后的柱体 back（w 空间，R32F，SSR 分辨率）
-uniform int   uUseSlab;       // 1 = 用 uSlabBack 的柱体判据；0 = 老的 c·T 厚度
 uniform float uMinThickness;  // 米，T 的下限
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
@@ -107,7 +153,7 @@ float SsrWAt(SsrRay ray, float sigma) {
 //   d_hi ≥ z      ⟺  w_min ≤ w_cell
 //   d_lo ≤ z + T  ⟺  w_max·(1+c) ≥ w_cell      （T = c·z ⇒ 1/(z+T) = z⁻¹/(1+c)）
 // 两条都是比较/乘法，**没有除法** —— 这是 w 空间重构的全部收益。
-// cell 是本格坐标：uUseSlab 时要取那一格的 back。
+// cell 是本格坐标：要取那一格的柱体 back。
 bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
     float w_min = min(w_in, w_out);
     float w_max = max(w_in, w_out);
@@ -119,18 +165,21 @@ bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
     }
     // ── 体素柱（2026-11-12）：front = w_cell（真实最近深度），back 来自同面并集 ──
     // 判据与 CPU 端 ssr_math.h::CellHitSlab 同一形式：区间 [w_min, w_max] 与 [back, w_cell] 相交。
-    if (uUseSlab != 0) {
-        float back = texelFetch(uSlabBack, cell, 0).r;
-        if (!(back > 0.0)) {
-            return false;
-        }
-        return w_max >= back;
+    // ── 体素柱（2026-11-13 定稿）：front = w_cell（真实最近深度），back 取三者最厚 ──
+    //   ① 同面并集（uSlabBack）      ② c·T：back = w/(1+c)
+    //   ③ 全局最小厚度 t_min：back = 1/(1/w + t_min)
+    // 三者都只往远处扩 ⇒ 取 min（w 越小越远）。区间 [w_min,w_max] ∩ [back,w_cell] 即命中。
+    float back = texelFetch(uSlabBack, cell, 0).r;
+    // 三源取最厚：同面并集（若该格有）、c·T、全局最小厚度。
+    // 没有 slab 数据时（例如不开柱体 pass 的旧路径 / CPU 对拍测试）退化为 c·T + t_min，
+    // 与 2026-11-02 的两分支版本**逐字等价**。
+    float back_ct = w_cell / (1.0 + uThicknessC);
+    float back_tmin = 1.0 / (1.0 / w_cell + uMinThickness);
+    float back_all = min(back_ct, back_tmin);
+    if (back > 0.0) {
+        back_all = min(back_all, back);
     }
-    // 退化分支：厚度下限生效（z 极近）。正常相机永不进入。
-    if (!(w_cell <= uThicknessC / uMinThickness)) {
-        return w_max >= 1.0 / (1.0 / w_cell + uMinThickness);
-    }
-    return w_max * (1.0 + uThicknessC) >= w_cell;
+    return w_max >= back_all;
 }
 
 // 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
@@ -378,7 +427,6 @@ void main() {
 inline constexpr const char* kSsrResolveFs = R"glsl(
 uniform sampler2D uSlice;
 uniform sampler2D uColor;
-uniform int   uGrazingFade;        // 1 = 开（2026-11-13）
 uniform float uGrazingFadeStart;   // kappa 起淡
 uniform float uGrazingFadeEnd;     // kappa 全淡
 
@@ -403,9 +451,9 @@ void main() {
     uint type = 0u;            // kNone
     vec3 rgb = vec3(0.0);
     float ray_ratio = 0.0;
-    // 输出给滤波层的 **A**（覆盖率/置信度）：命中=1，掠射淡出时 <1。
+    // 输出给滤波层的 **A**（覆盖率/置信度）：命中=1，掠射淡出时 <1，非命中=0。
     // 注意：A ≠ ray_ratio（后者是预算占用率，只用于调试）。
-    float a_out = 1.0;
+    float a_out = 0.0;
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
@@ -430,12 +478,13 @@ void main() {
             ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
             hit_s = s;
             type = 1u;                     // kHit
+            a_out = 1.0;
 
             // ── 掠射淡出（2026-11-13）──
             // kappa = cos(θ_p)/cos(θ_m)：主视图看 Q 有多掠射 vs 镜像视图看 Q 有多正。
             // kappa 大 ⇒ 需要的源信息在屏幕空间里根本不存在（缝/极掠射）⇒ A 淡出、交回 env。
             // **只动 A**：颜色/命中/距离都不变，所以下游（滤波/融合）逻辑不受影响。
-            if (uGrazingFade != 0) {
+            if (uGrazingFadeEnd > uGrazingFadeStart) {
                 ivec2 hcell = clamp(ivec2(pos), ivec2(0), ivec2(uRes) - 1);
                 float w_hit = SsrWAt(ray, s);
                 vec3 nq = SsrNormalOf(texelFetch(uNormal, hcell, 0));

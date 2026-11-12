@@ -356,7 +356,6 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
     set1i(prog_march_, "uSlabBack", kTexUnitMarchSlab);
-    set1i(prog_march_, "uUseSlab", in.use_slab ? 1 : 0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──
@@ -381,9 +380,11 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
     set1i(prog_resolve, "uRough", kTexUnitResolveRough);
     // 掠射淡出（2026-11-13）：只改 resolve 输出的 A，march 不受影响。
-    set1i(prog_resolve, "uGrazingFade", in.grazing_fade ? 1 : 0);
-    set1f(prog_resolve, "uGrazingFadeStart", in.grazing_fade_start);
-    set1f(prog_resolve, "uGrazingFadeEnd", in.grazing_fade_end);
+    // 钳位到 [0, 64]：end <= start 由着色器解释为"关闭"（面板把它拖到很大即可）。
+    const float gf0 = std::min(std::max(in.grazing_fade_start, 0.0f), 64.0f);
+    const float gf1 = std::min(std::max(in.grazing_fade_end, 0.0f), 64.0f);
+    set1f(prog_resolve, "uGrazingFadeStart", gf0);
+    set1f(prog_resolve, "uGrazingFadeEnd", gf1);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── 恢复调用方的状态 ──

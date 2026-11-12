@@ -54,7 +54,7 @@ void SsrIntegration::Init(ShaderManager* shader_mgr) {
     // 同面判定照抄融合层：用本格 (P, 法线) 造切平面，预测邻居格中心处的 w，看残差。
     // 必须**双向判**（我判它 + 它判我）：单侧判会让"较近那一格"漏并，缝隙照样留着。
     // 合并**单侧**：back = min(back, 邻居 front)，永远不动 front ⇒ 不会造假近面。
-    const std::string slab_fs = std::string(kSsrGlslVersion) + R"glsl(
+    const std::string slab_fs = std::string(kSsrGlslVersion) + kSsrSameSurfaceGlsl + R"glsl(
 uniform sampler2D uW;
 uniform sampler2D uNormal;
 uniform ivec2 uRes;
@@ -63,33 +63,24 @@ uniform float uGateRel;
 uniform float uGateCos;
 uniform float uAspect;
 uniform float uTanHalf;
+uniform float uAspectTan;   // = uAspect * uTanHalf（预算好，省一次乘法）
 out vec4 FragColor;
 
-vec3 CellRay(ivec2 p) {
-    vec2 ndc = (vec2(p) + 0.5) / vec2(uRes) * 2.0 - 1.0;
-    return vec3(ndc.x * uAspect * uTanHalf, ndc.y * uTanHalf, -1.0);
-}
-
-bool SameSurface(float w_self, vec3 n_self, ivec2 p_self, float w_nb, vec3 n_nb, ivec2 p_nb) {
-    if (!(w_self > 0.0) || !(w_nb > 0.0)) {
+// 同面判定（2026-11-13 去重）：调用方预算好角射线，这里只做平面预测 + 判据。
+// 复用 c_self/P_self 是本 pass 的主要优化点：原来每次比较都重算两条角射线（4 邻居 × 2 向）。
+bool SameSurfacePre(vec3 n_self, vec3 P_self, vec3 c_self,
+                    float w_nb, vec3 n_nb, vec3 c_nb) {
+    if (!(w_nb > 0.0)) {
         return false;
     }
     if (dot(n_self, n_nb) < uGateCos) {
         return false;
     }
-    vec3 c_self = CellRay(p_self);
-    vec3 P = c_self / w_self;               // 视空间点（z = -1/w）
-    vec3 c_nb = CellRay(p_nb);
-    float den = dot(n_self, c_nb);
-    if (abs(den) < 1.0e-7) {
+    float t = SsrPlaneViewDist(n_self, P_self, c_nb);
+    if (!(t > 0.0)) {
         return false;
     }
-    float t = dot(n_self, P) / den;         // 沿视轴的视距
-    if (!(t > 1.0e-4)) {
-        return false;
-    }
-    float w_pred = 1.0 / t;
-    return abs(w_nb - w_pred) / max(w_pred, 1.0e-9) < uGateRel;
+    return SsrSameSurface(1.0 / t, w_nb, n_self, n_nb, uGateRel, uGateCos);
 }
 
 void main() {
@@ -106,14 +97,25 @@ void main() {
         return;
     }
     float back = base;
+    // self 的角射线与平面点只算一次（原来每次比较都重算，4 邻居 × 2 向 = 8 次）
+    vec3 c_self = SsrCellRay(p, vec2(uRes), uAspectTan, uTanHalf);
+    vec3 P_self = c_self / w;
     ivec2 off[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
     for (int i = 0; i < 4; ++i) {
         ivec2 q = clamp(p + off[i], ivec2(0), uRes - 1);
         float w_nb = texelFetch(uW, q, 0).r;
+        if (!(w_nb > 0.0)) {
+            continue;
+        }
         vec3 n_nb = normalize(texelFetch(uNormal, q, 0).xyz);
-        bool fwd = SameSurface(w, n, p, w_nb, n_nb, q);
-        bool rev = SameSurface(w_nb, n_nb, q, w, n, p);
-        if ((fwd || rev) && w_nb > 0.0 && w_nb < back) {
+        vec3 c_nb = SsrCellRay(q, vec2(uRes), uAspectTan, uTanHalf);
+        bool fwd = SameSurfacePre(n, P_self, c_self, w_nb, n_nb, c_nb);
+        // 反向：用邻居的平面预测"我"的位置（单侧判会让较近那格漏并）
+        bool rev = false;
+        if (!fwd) {
+            rev = SameSurfacePre(n_nb, c_nb / w_nb, c_nb, w, n, c_self);
+        }
+        if ((fwd || rev) && w_nb < back) {
             back = w_nb;
         }
     }
@@ -259,11 +261,13 @@ void SsrIntegration::BuildSlabBack(const SsrPassInputs& in, int w, int h) {
     glBindTexture(GL_TEXTURE_2D, downsample_.normal_tex());
     glUniform1i(shader_mgr_->GetUniform(prog_slab_, "uNormal"), 1);
     glUniform2i(shader_mgr_->GetUniform(prog_slab_, "uRes"), w, h);
-    set1f("uMinThicknessRel", in.cfg.slab_min_thickness);
-    set1f("uGateRel", in.cfg.slab_gate_rel);
-    set1f("uGateCos", in.cfg.slab_gate_cos);
+    // 防御式钳位：配置来自面板/调用方，越界值会让柱体退化成 0 厚（全不命中）或误判。
+    set1f("uMinThicknessRel", std::min(std::max(in.cfg.slab_min_thickness, 0.0f), 0.5f));
+    set1f("uGateRel", std::min(std::max(in.cfg.slab_gate_rel, 1.0e-4f), 1.0f));
+    set1f("uGateCos", std::min(std::max(in.cfg.slab_gate_cos, 0.0f), 1.0f));
     set1f("uAspect", in.aspect);
     set1f("uTanHalf", in.tan_half_fov_y);
+    set1f("uAspectTan", in.aspect * in.tan_half_fov_y);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
@@ -334,11 +338,8 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     downsample_.Run(in.hdr_color_tex, in.scene_depth_tex, in.attr_tex, in.attr_mat_tex,
                     in.full_w, in.full_h, scale, in.near_plane, in.far_plane);
 
-    // ── ②b 同面并集柱体（slab_mode = 1）：SSR 分辨率一次全屏 pass ──
-    const bool use_slab = (in.cfg.slab_mode == 1);
-    if (use_slab) {
-        BuildSlabBack(in, downsample_.width(), downsample_.height());
-    }
+    // ── ②b 同面并集柱体（2026-11-13 起无条件执行：柱体是命中判据的一部分）──
+    BuildSlabBack(in, downsample_.width(), downsample_.height());
 
     // ── ③ 算法（模块）：SSR 分辨率 → radiance + ray_ratio + 类型 ──
     SsrInputs si;
@@ -359,13 +360,9 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.rough_tex = downsample_.rough_tex();       // 逐像素 roughness（发射线截止用）
     si.roughness_cutoff = in.cfg.roughness_cutoff;
     si.debug_reason = false;
-    si.grazing_fade = in.cfg.grazing_fade;
     si.grazing_fade_start = in.cfg.grazing_fade_start;
     si.grazing_fade_end = in.cfg.grazing_fade_end;
-    if (use_slab) {
-        si.slab_back_tex = slab_tex_;
-        si.use_slab = true;
-    }
+    si.slab_back_tex = slab_tex_;
     const SsrOutputs& outs = ssr_.Render(si);
 
     // ── ④ 粗糙度预滤波：A 预乘 mip 链（决定了"磨砂"的模糊量）──

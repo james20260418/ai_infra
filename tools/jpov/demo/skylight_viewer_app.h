@@ -220,11 +220,9 @@ public:
     float ssr_rough_to_lod_ = 8.0f;   // roughness → mip LOD 的斜率（"磨砂"强度）
     float ssr_rough_cutoff_ = 0.60f;  // 超过它就不发射线（直接走 env）
     int   ssr_debug_ = 0;
-    // 柱体来源（2026-11-12）：0 = c·T 厚度（旧），1 = 同面并集柱体。
-    int   ssr_slab_mode_ = 0;
-    // 掠射淡出（2026-11-13）：kappa = cos(θ主视图)/cos(θ镜像视图)，越大越该淡出。
-    bool  ssr_grazing_fade_ = false;
-    float ssr_grazing_start_ = 4.0f;
+    // 掠射淡出（2026-11-13）：kappa = cos(θ镜像)/cos(θ主视)，越大越该淡出。
+    // 只有两个阈值；把 end 调到 <= start 即等于关闭。
+    float ssr_grazing_start_ = 2.0f;
     float ssr_grazing_end_ = 10.0f;
     void SetSsr(bool on) { ssr_on_ = on; }
 
@@ -380,8 +378,6 @@ public:
             sc.roughness_to_lod = ssr_rough_to_lod_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
             sc.debug_coverage = ssr_debug_;
-            sc.slab_mode = ssr_slab_mode_;
-            sc.grazing_fade = ssr_grazing_fade_;
             sc.grazing_fade_start = ssr_grazing_start_;
             sc.grazing_fade_end = ssr_grazing_end_;
             cmds->ssr = sc;
@@ -488,11 +484,9 @@ private:
 
         // ── 右列 0..2：掠射淡出（2026-11-13）──
         // 放在列首：不受 SSR 总闸影响也能看见（关掉 SSR 时它不生效，但不会"找不到"）。
-        ui_.Checkbox("SSR 掠射淡出 (A 插值)", &ssr_grazing_fade_, row(1, 0));
-        if (ssr_grazing_fade_) {
-            ui_.SliderFloat("淡出起点 kappa", &ssr_grazing_start_, row(1, 1), 1.0f, 30.0f, 1);
-            ui_.SliderFloat("淡出终点 kappa", &ssr_grazing_end_, row(1, 2), 1.0f, 60.0f, 1);
-        }
+        // 掠射淡出：只有两个阈值（end <= start 即关闭）。
+        ui_.SliderFloat("掠射淡出起点 kappa", &ssr_grazing_start_, row(1, 0), 1.0f, 60.0f, 1);
+        ui_.SliderFloat("掠射淡出终点 kappa", &ssr_grazing_end_, row(1, 1), 1.0f, 60.0f, 1);
 
         // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
         {
@@ -512,13 +506,6 @@ private:
                 ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
-            }
-            // 柱体来源 A/B（2026-11-12）：老的单层 c·T vs 同面并集柱体。
-            const std::vector<const char*> slabs = {"柱体：c·T 厚度（旧）",
-                                                     "柱体：同面并集（front+邻居）"};
-            int smode = ssr_slab_mode_;
-            if (ui_.Combo("SSR 柱体来源", &smode, slabs, row(1, 11))) {
-                ssr_slab_mode_ = smode;
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);

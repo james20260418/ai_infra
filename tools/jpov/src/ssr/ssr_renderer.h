@@ -184,11 +184,10 @@ struct SsrInputs {
     // use_slab = true 时判据改成"射线区间 [w_min,w_max] 与柱体 [back, w_cell] 相交"，
     // 不再用 c·T 厚度。0 / false = 旧行为（逐字不变）。
     unsigned int slab_back_tex = 0;
-    bool use_slab = false;
 
     // 掠射淡出（2026-11-13）：只改 A（覆盖率），颜色/命中不变。
-    bool  grazing_fade = false;
-    float grazing_fade_start = 4.0f;
+    // 只有两个阈值；end <= start 即关闭。
+    float grazing_fade_start = 2.0f;
     float grazing_fade_end = 10.0f;
 
     // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。

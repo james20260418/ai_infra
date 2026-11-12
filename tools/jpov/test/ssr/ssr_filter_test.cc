@@ -100,7 +100,10 @@ struct Fixture {
     SsrFilter filter;
     jpov::ShaderManager shader_mgr;
 
-    void Setup() {
+    void Setup() { SetupWithAlpha(1.0f); }
+
+    // hit_alpha：命中格的 A（1 = 完整命中；<1 = 掠射淡出后的置信度）。
+    void SetupWithAlpha(float hit_alpha) {
         GlEnv::Get().Ensure();
         std::vector<float> rgba(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
         std::vector<unsigned char> type(static_cast<size_t>(kSize) * kSize, 0);
@@ -111,7 +114,9 @@ struct Fixture {
                     rgba[i * 4 + 0] = kHitRadiance;
                     rgba[i * 4 + 1] = kHitRadiance;
                     rgba[i * 4 + 2] = kHitRadiance;
-                    rgba[i * 4 + 3] = 0.5f;   // ray_ratio（与覆盖率无关，不应被当成 A）
+                    // 2026-11-13 起的契约：radiance.a = **置信度 A**（1 = 完整命中；
+                    // 掠射淡出时 < 1）。滤波层直接用它，不再恒为 1。
+                    rgba[i * 4 + 3] = hit_alpha;
                     type[i] = 1;              // kHit
                 }
             }
@@ -142,7 +147,7 @@ TEST(SsrFilter, LevelZeroCoverageAndFill) {
 
     const std::vector<float> l0 = ReadMipLevel(f.filter.mip_tex(), 0, kSize, kSize);
 
-    // 命中格：覆盖率 1、颜色 = 命中色（ray_ratio 0.5 不得污染 alpha）。
+    // 命中格：覆盖率 1、颜色 = 命中色（A 由 radiance.a 带下来）。
     EXPECT_FLOAT_EQ(At(l0, kSize, 0, 0, 3), 1.0f);
     EXPECT_NEAR(At(l0, kSize, 0, 0, 0), kHitRadiance, 1.0e-3f);
 
@@ -163,6 +168,18 @@ TEST(SsrFilter, LevelZeroCoverageAndFill) {
 
 // ③：level 1 —— 一个 2×2 块里 2 个命中 ⇒ 覆盖率 0.5，颜色**仍是命中色**。
 //     若颜色按普通 box 平均，这里会是 0.5×kHitRadiance ⇒ 断言红（"磨砂 = 变暗"）。
+// ③ 追加（2026-11-13）：A 的淡出系数必须沿 mip 链按覆盖率加权下降（a' = Σa/4）。
+// 这是掠射淡出的落点：A=0.25 的命中格，level0 alpha=0.25，level1 = 0.25（全命中块）。
+TEST(SsrFilter, FadeCoefficientPropagates) {
+    Fixture f;
+    f.SetupWithAlpha(0.25f);
+    ASSERT_EQ(f.filter.level_count(), 4);
+    const std::vector<float> l0 = ReadMipLevel(f.filter.mip_tex(), 0, kSize, kSize);
+    EXPECT_NEAR(At(l0, kSize, 0, 0, 3), 0.25f, 1.0e-3f);
+    const std::vector<float> l1 = ReadMipLevel(f.filter.mip_tex(), 1, kSize / 2, kSize / 2);
+    EXPECT_NEAR(At(l1, kSize / 2, 0, 0, 3), 0.25f, 1.0e-3f);   // 整块都是 0.25 的命中格
+}
+
 TEST(SsrFilter, MipIsCoverageWeighted) {
     Fixture f;
     f.Setup();
