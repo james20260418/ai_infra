@@ -90,35 +90,39 @@ inline constexpr SsrGoldCase kCases[11] = {
     // 每个组合只打开一个开关，其余保持默认；相机/预算都是为「让这一项真的起作用」挑的。
     // 括号里是当时实测的「相对全关」变化像素数（1280×720，>4/255），生成时核对过。
 
-    // ① 预算淡出：把预算压到 90 SSR 像素 ⇒ 大量命中落在淡出带里（σ > 30）。
-    {"fade_budget", /*phi*/ 0.21f, /*theta*/ 0.15f, /*R*/ 45.0f,
+    // ① 预算淡出：R=10 掠射（2.9°）+ 预算 90 SSR 像素 ⇒ 倒影在屏幕上拉得很长，
+    //    大量命中落在淡出带里（σ > 30）。实测 2.16% 像素变化。
+    {"fade_budget", /*phi*/ 0.05f, /*theta*/ 0.5f, /*R*/ 10.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
-     /*max_ray*/ 90, /*thick*/ 6.0f, /*budget*/ 60.0f, 0.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.006f},
+     /*max_ray*/ 90, /*thick*/ 6.0f, /*budget*/ 60.0f, 0.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.010f},
 
-    // ② 反射体贴边（P）：地板铺满下半屏 + 160 px 缓冲带 ⇒ 画面底/左边缘一圈变淡。
-    {"fade_edge_p", /*phi*/ 0.21f, /*theta*/ 0.15f, /*R*/ 45.0f,
+    // ② 反射体贴边（P）：R=9、2.3° 几乎贴地 ⇒ 地板铺满整屏、四条边都是反射体，160 px 带。实测 1.58%。
+    {"fade_edge_p", /*phi*/ 0.04f, /*theta*/ 0.9f, /*R*/ 9.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
-     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, /*edge*/ 160.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.006f},
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, /*edge*/ 160.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.008f},
 
-    // ③ 命中点贴边（Q）：宽 300 px ⇒ 映到画面左右外沿的倒影变淡（和 ② 落点不同）。
-    {"fade_hit_edge_q", /*phi*/ 0.21f, /*theta*/ 1.2f, /*R*/ 45.0f,
+    // ③ 命中点贴边（Q）：R=10、17° 俯视 + 300 px 宽带 ⇒ 命中点大量落在画面外沿。实测 3.07%
+    //    （比 ② 更狠，因为近处物体把 Q 甩到屏幕边上）。
+    {"fade_hit_edge_q", /*phi*/ 0.30f, /*theta*/ 0.9f, /*R*/ 10.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
-     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, /*hit edge*/ 300.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.002f},
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, /*hit edge*/ 300.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.015f},
 
-    // ④ 补洞：1:4 降采样 + 树/桌的稀疏反射 ⇒ 梳齿缝最多。
-    {"filter_hole", /*phi*/ 0.10f, /*theta*/ 0.9f, /*R*/ 30.0f,
+    // ④ 补洞：1:4 + 贴地 4.6° + 厚度压到 3 px ⇒ 树/长椅/人的稀疏倒影被压成梳齿。实测 0.86%
+    //    （换这个机位前只有 0.078%，正好压在 gold 闸门上）。
+    {"filter_hole", /*phi*/ 0.08f, /*theta*/ 0.9f, /*R*/ 8.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.25f, 8.0f, 0.6f,
-     /*max_ray*/ 220, /*thick*/ 3.0f, 0.0f, 0.0f, 0.0f, /*hole*/ true, false, false, 2.0f, 1, /*minAB*/ 0.0004f},
+     /*max_ray*/ 220, /*thick*/ 3.0f, 0.0f, 0.0f, 0.0f, /*hole*/ true, false, false, 2.0f, 1, /*minAB*/ 0.004f},
 
-    // ⑤ 离群抑制：同样 1:4（噪点最多），k=1 让「只夹离群点」也看得出来。
-    {"filter_clamp", /*phi*/ 0.21f, /*theta*/ 0.6f, /*R*/ 45.0f,
+    // ⑤ 离群抑制：1:4 + R=8 近景（噪点最密），k=0.5。实测 1.12%。
+    {"filter_clamp", /*phi*/ 0.12f, /*theta*/ 0.9f, /*R*/ 8.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.25f, 8.0f, 0.6f,
-     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, /*clamp*/ true, false, /*k*/ 0.5f, 1, /*minAB*/ 0.0006f},
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, /*clamp*/ true, false, /*k*/ 0.5f, 1, /*minAB*/ 0.005f},
 
-    // ⑥ 边缘保持小波：1:2 + 1 趟（默认档）—— 就是这个 PR 交付的默认观感。
-    {"filter_atrous", /*phi*/ 0.21f, /*theta*/ 0.6f, /*R*/ 45.0f,
+    // ⑥ 边缘保持小波：R=12、54° 俯视 + 1:2 + 1 趟（默认档）—— 俯视下每个方块四周都是
+    //    倒影边，最能看出小波有没有把边界糊掉/渗色。实测 3.30%。
+    {"filter_atrous", /*phi*/ 0.95f, /*theta*/ 0.3f, /*R*/ 12.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f,
-     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, false, /*atrous*/ true, 2.0f, 1, /*minAB*/ 0.006f},
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, false, /*atrous*/ true, 2.0f, 1, /*minAB*/ 0.016f},
 };
 
 inline std::string AssetPath(const std::string& rel) {

@@ -35,8 +35,15 @@ int main() {
         std::system(("mkdir -p " + ab_dir).c_str());
     }
 
+    // 调机位用：SSR_GOLD_ONLY=<子串> 时只重出名字包含它的组合（避免把老 5 张基线一起重写）。
+    const char* only_env = std::getenv("SSR_GOLD_ONLY");
+    const std::string only = (only_env != nullptr) ? only_env : "";
+
     const std::string dir = jpov::GetTestDataDir() + "/ssr/";
     for (const jpov_ssr_gold::SsrGoldCase& c : jpov_ssr_gold::kCases) {
+        if (!only.empty() && std::string(c.name).find(only) == std::string::npos) {
+            continue;
+        }
         jpov_ssr_gold::ApplyCase(app, c);
         const std::string path = dir + jpov_ssr_gold::GoldFileName(c);
         app.RunOnce(input, winfo, path.c_str());
