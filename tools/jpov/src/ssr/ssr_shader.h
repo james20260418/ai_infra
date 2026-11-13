@@ -571,7 +571,8 @@ void main() {
             a_out = SsrHitConfidence(ray, s);
 
             // ── 掠射淡出（2026-11-13）──
-            // kappa = cos(θ_p)/cos(θ_m)：主视图看 Q 有多掠射 vs 镜像视图看 Q 有多正。
+            // kappa = cos(θ_m)/cos(θ_p)：镜像视图看 Q 有多正 vs 主视图看 Q 有多掠射
+            // （代码是 cm/max(cp)，与上一行同序；此前注释写反了，2026-11-13 修正）。
             // kappa 大 ⇒ 需要的源信息在屏幕空间里根本不存在（缝/极掠射）⇒ A 淡出、交回 env。
             // **只动 A**：颜色/命中/距离都不变，所以下游（滤波/融合）逻辑不受影响。
             if (uGrazingFadeEnd > uGrazingFadeStart) {
