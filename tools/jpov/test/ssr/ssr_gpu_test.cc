@@ -189,6 +189,7 @@ std::vector<unsigned char> ReadTexUInt8(unsigned int tex, int w, int h) {
 
 struct CpuResult {
     bool hit = false;
+    bool backface = false;   // 该命中是"背面命中"（射线从面背后穿出）
     float s = kNoHit;
     int cell_x = -1;
     int cell_y = -1;
@@ -232,10 +233,13 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
         return jpov::ssr::HitFacesRay(d, n);
     };
-    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing);
+    // 与着色器一致：正面命中优先，没有正面命中时才报最早的背面命中（带偏移）。
+    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing,
+                               /*collect_backface=*/true);
     if (s < kNoHit) {
         out.hit = true;
-        out.s = s;
+        out.backface = s >= jpov::ssr::kBackfaceBias;
+        out.s = out.backface ? (s - jpov::ssr::kBackfaceBias) : s;
         out.cell_x = cx;
         out.cell_y = cy;
     }
@@ -762,7 +766,7 @@ Scene MakeFacingScene() {
     return sc;
 }
 
-TEST(SsrGpu, BackfaceHitsRejected) {
+TEST(SsrGpu, BackfaceHitsFlaggedNotRejected) {
     Fixture f;
     f.Setup(MakeFacingScene(), /*tile=*/4, /*max_ray_pixels=*/160);
     f.in.debug_reason = true;
@@ -773,11 +777,16 @@ TEST(SsrGpu, BackfaceHitsRejected) {
         DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
     const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
     const std::vector<unsigned char> type = ReadTexUInt8(out.type_tex, kWidth, kHeight);
+    // R8UI：bit0 = 背面命中。模块**照常输出颜色**，是否采用交给融合层的两个正交 flag。
+    const std::vector<unsigned char> bf = ReadTexUInt8(out.backface_tex, kWidth, kHeight);
+    const std::vector<float> hs = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
 
     int hit_mismatch = 0;
     int cell_mismatch = 0;
+    int flag_mismatch = 0;
     int old_hits_in_table = 0;      // 负向：不判朝向时从地板撞在桌子带的像素
-    int facing_hits_in_table = 0;   // 正向：判朝向后仍撞在桌子带的像素（应为 0）
+    int front_hits_in_table = 0;    // 正面命中撞在桌子带（应为 0）
+    int backface_hits_in_table = 0; // 背面命中撞在桌子带（应当 > 0：桌面顶面那条 bug 的现场）
     int facing_hits_in_wall = 0;    // 防过严：判朝向后仍命中墙的像素
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
@@ -799,7 +808,11 @@ TEST(SsrGpu, BackfaceHitsRejected) {
                     const int hit_kind =
                         f.scene.kind[static_cast<size_t>(cpu.cell_y) * kWidth + cpu.cell_x];
                     if (hit_kind == 2) {
-                        ++facing_hits_in_table;
+                        if (cpu.backface) {
+                            ++backface_hits_in_table;
+                        } else {
+                            ++front_hits_in_table;
+                        }
                     } else if (hit_kind == 3) {
                         ++facing_hits_in_wall;
                     }
@@ -813,6 +826,16 @@ TEST(SsrGpu, BackfaceHitsRejected) {
                                   << " GPU type=" << static_cast<int>(type[i]);
                 }
                 continue;
+            }
+            // 背面 flag 必须与 CPU 参考逐像素一致（type 之外的第二条事实）。
+            const bool gpu_bf = (bf[i] & 1u) != 0u;
+            if (gpu_bf != cpu.backface) {
+                ++flag_mismatch;
+                if (flag_mismatch < 4) {
+                    ADD_FAILURE() << "像素(" << x << "," << y << ") CPU backface=" << cpu.backface
+                                  << " GPU flag=" << gpu_bf << " kind=" << f.scene.kind[i]
+                                  << " cpu_s=" << cpu.s << " gpu_s=" << hs[i];
+                }
             }
             if (!gpu_hit) {
                 continue;
@@ -832,9 +855,12 @@ TEST(SsrGpu, BackfaceHitsRejected) {
     }
     EXPECT_EQ(hit_mismatch, 0) << "CPU（带朝向判据）与 GPU 命中不一致";
     EXPECT_EQ(cell_mismatch, 0) << "CPU（带朝向判据）与 GPU 命中格不一致";
+    EXPECT_EQ(flag_mismatch, 0) << "背面 flag 与 CPU 参考不一致";
     EXPECT_GT(old_hits_in_table, 20)
         << "不判朝向时没在桌子带命中 ⇒ 这个场景造不出那个 bug，测试没意义";
-    EXPECT_EQ(facing_hits_in_table, 0) << "背面命中（射线从桌面下方穿出）竟然还算命中";
+    EXPECT_EQ(front_hits_in_table, 0) << "背面命中（射线从桌面下方穿出）被当成了正面命中";
+    EXPECT_GT(backface_hits_in_table, 0)
+        << "这个场景没造出「背面命中」⇒ flag 通路没被覆盖";
     EXPECT_GT(facing_hits_in_wall, 0) << "朝向判据把墙的正面命中一起拒掉了（判太严）";
 }
 

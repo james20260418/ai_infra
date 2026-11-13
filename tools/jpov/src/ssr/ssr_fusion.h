@@ -5,6 +5,14 @@
 //
 //   out = hdr + mask · A · ao · (ssr_L · weight − env_term)
 //
+// 背面命中（2026-11-13）：模块把"射线从面背后穿出"也当命中**照常输出颜色**（几何对、
+// 颜色是那一格的正面色）。本层用两个**正交** flag 决定怎么处置这些像素 ——
+//   ① cfg.backface_use_ssr：false = 交回 env（等价于"不当命中"，与旧行为逐字节相同）；
+//                           true  = 用 SSR 给的这份颜色。
+//   ② cfg.backface_dim    ：该像素最终采用的那份颜色的亮度因子（1 = 不压暗）。
+// 二者都不改 A：背面命中一样受"信息压缩比"（掠射）导致的 A 淡出约束，那条 fallback
+// 无法避免，也不该为背面单独放宽（见 ssr_shader.h 的 kappa 注释）。
+//
 //   mask     = 反射体（属性纹理附件0的 .a > 0.75）
 //   A        = 预滤波 mip 链里**该 roughness 对应的那一级**的覆盖率（0 ⇒ 整项抵消，
 //              与"没开 SSR"逐字节相同）
@@ -47,6 +55,9 @@ struct SsrFusionInputs {
 
     // SSR 分辨率（模块输出 + 降采样输入）
     unsigned int ssr_radiance_tex = 0;  // RGBA16F：rgb = 命中颜色，a = ray_ratio
+    // R8UI：bit0 = 该 SSR 像素是背面命中（模块总是输出）。融合层按**权重最大的那个 tap**
+    // 的 flag 做硬判定 ⇒ 关着两个 flag 时与旧行为逐字节相同（flag 只在开启后才有影响）。
+    unsigned int backface_tex = 0;
     unsigned int down_w_tex = 0;        // R32F：w = 1/z_view（0 = 空）
     unsigned int down_normal_tex = 0;   // RGBA16F
     // 粗糙度预滤波结果（SsrFilter::mip_tex()）：RGBA16F + 完整 mip 链。

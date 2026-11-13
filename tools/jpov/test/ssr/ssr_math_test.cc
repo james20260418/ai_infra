@@ -543,7 +543,8 @@ ScreenRay MakeSyntheticRay() {
     return ray;
 }
 
-TEST(SsrMath, BackfaceHitRejected) {
+// 不收集背面命中时的旧语义：背面命中"不算命中"，射线继续往前找。
+TEST(SsrMath, BackfaceHitSkippedWithoutCollection) {
     const ScreenRay ray = MakeSyntheticRay();
     // c = 0.18 ⇒ T = 3.6 m（z=20）⇒ 射线在桌子/墙那两段确实落在柱体带内，
     // 所以"能不能命中"完全取决于朝向判据，不是厚度在挡。
@@ -595,6 +596,65 @@ TEST(SsrMath, BackfaceHitRejected) {
                             nullptr, facing_flipped),
               kNoHit)
         << "法线翻过来仍能命中 ⇒ 朝向判据是恒真的";
+}
+
+TEST(SsrMath, BackfaceHitReportedWithBias) {
+    // 场景：桌子顶面（法线朝上 = 对这条射线是背面）在前，墙（正面）在后。
+    // 契约：正面命中优先；没有正面命中时才报**最早的背面命中**，且带 kBackfaceBias 偏移。
+    const ScreenRay ray = MakeSyntheticRay();
+    const float kThicknessC = 0.18f;
+    const float kMinThickness = 1.0e-4f;
+    auto depth_at = [](int /*x*/, int y) -> float {
+        if ((y >= 40 && y < 60) || (y >= 80 && y < 120)) {
+            return 1.0f / 20.0f;
+        }
+        return 0.0f;
+    };
+    auto facing = [](int /*x*/, int y, const Vec3& d) -> bool {
+        if (y >= 40 && y < 60) {
+            return HitFacesRay(d, Vec3{0.0f, 1.0f, 0.0f});   // 桌面：背面命中
+        }
+        if (y >= 80) {
+            return HitFacesRay(d, Vec3{0.0f, 0.0f, 1.0f});   // 墙：正面命中
+        }
+        return true;
+    };
+    // 全场法线翻转 ⇒ 桌子与墙都只有背面命中。
+    auto facing_all_back = [](int /*x*/, int /*y*/, const Vec3& d) -> bool {
+        return HitFacesRay(d, Vec3{0.0f, 0.0f, -1.0f});
+    };
+
+    // ① 不收集：与旧行为一致 —— 全是背面 ⇒ 无命中。
+    EXPECT_GE(MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180, nullptr,
+                            nullptr, facing_all_back, /*collect_backface=*/false),
+              kNoHit)
+        << "collect_backface=false 却报了命中 ⇒ 开关没生效";
+
+    // ② 收集：报最早的背面命中 + 偏移，out 参数给原值，命中格也要报（融合要取色）。
+    float raw_s = -1.0f;
+    int bx = -1;
+    int by = -1;
+    const float s_back = MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, 200,
+                                      ray.sigma_enter <= 0.0f, kThicknessC, kMinThickness,
+                                      depth_at, 320, 180, &bx, &by, facing_all_back,
+                                      /*collect_backface=*/true, &raw_s);
+    ASSERT_LT(s_back, kNoHit) << "开了收集仍无命中 ⇒ 背面候选没被记下来";
+    ASSERT_GE(s_back, jpov::ssr::kBackfaceBias) << "背面命中必须带偏移（否则会被当成正面命中）";
+    EXPECT_NEAR(s_back - jpov::ssr::kBackfaceBias, raw_s, 1.0e-3f)
+        << "带偏移的返回值与 out_backface_s 不一致";
+    EXPECT_GE(by, 40) << "背面命中的格应落在桌子带";
+    EXPECT_LT(by, 60);
+    EXPECT_GE(bx, 0) << "背面命中必须报命中格（融合层要按格取色）";
+
+    // ③ 优先级：桌子（背面）在前、墙（正面）在后 ⇒ 必须报**墙**（不带偏移）。
+    //    负向对照：若实现"先看背面候选"，这里会拿到带偏移的桌子 s。
+    const float s_front = MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, 200,
+                                       ray.sigma_enter <= 0.0f, kThicknessC, kMinThickness,
+                                       depth_at, 320, 180, nullptr, nullptr, facing,
+                                       /*collect_backface=*/true, nullptr);
+    ASSERT_LT(s_front, kNoHit) << "墙是正面命中，应该报命中";
+    EXPECT_LT(s_front, jpov::ssr::kBackfaceBias) << "正面命中被当成了背面命中";
+    EXPECT_GT(s_front, raw_s) << "应该跳过更近的背面命中，取更远的正面命中";
 }
 
 TEST(SsrMath, DerivedParams) {

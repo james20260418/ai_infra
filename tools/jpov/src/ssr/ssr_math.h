@@ -27,6 +27,11 @@ namespace ssr {
 // 且远大于任何合理 s（像素）。**不要用 inf** —— 某些驱动把它规整掉。
 constexpr float kNoHit = 1.0e30f;
 
+// 背面命中的编码偏移（与 ssr_shader.h 里的 GLSL 常量 `kSsrBackfaceBias` **必须一致**）。
+// march 返回值：s ∈ [0, kBackfaceBias) = 正面命中；s + kBackfaceBias = 只有背面命中；
+// kNoHit = 什么都没撞到。"取 min"的归约因此天然让正面命中优先。
+constexpr float kBackfaceBias = 1.0e5f;
+
 // `w_at(x,y)` 返回 ≤ 0 = 该格**没有几何**（天空/背景；降采样时天空写成 0）。
 // 语义是"这里没有柱子"，march 直接穿过去 —— **不是**"far 处有一堵墙"。
 // 反例（2026-10-30 实拍踩到）：把天空格当成 z=far、T=c·far 的柱子 ⇒ 掠射射线在 near-horizon
@@ -291,7 +296,9 @@ inline bool CellHit(float w_in, float w_out, float w_cell,
 // 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
 //
 //   R·N < 0 ⇒ 射线**扎进**这个面 = 合法的正面命中；
-//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中。
+//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不是正面命中（不阻断 march；整段
+//             没有正面命中时，模块会把它当"背面命中"报出来，见 MarchSegment 的
+//             collect_backface）。
 //
 // 为什么必须有它：深度缓冲里只有"相机看得见的那一面"的颜色与法线。镜子往上看桌子
 // 底面/柱体背面时，屏幕空间里没有那些面的像素，以前的判据会拿**正面**的颜色当结果
@@ -396,17 +403,25 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // （这里仍防御性 break）。
 //
 // facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
-//   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
-//   而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
+//   **命中但朝向不对（背面命中）优先让位给后面的正面命中** —— 射线应该穿过那个物体继续
+//   找，而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
+//
+// collect_backface：为 true 时，若整段**没有**正面命中、但过程中撞到过背面命中，
+//   返回 **最早那个背面命中的 s + kBackfaceBias**（并通过 out_backface_s 报回原值）。
+//   与着色器一致：模块把背面命中"当命中输出"，是否采用交给融合层。
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
                    bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
                    DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                   int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                   int* hit_y = nullptr, FacingFn facing = FacingFn{},
+                   bool collect_backface = false, float* out_backface_s = nullptr) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
     float sigma = sigma_start;
+    float backface = -1.0f;   // 最早的背面命中候选（<0 = 没有）
+    int backface_x = -1;
+    int backface_y = -1;
 
     // 下一个 x/y 网格线的 σ 与跨一格的 σ 步长。
     float tmax_x = 1.0e30f;
@@ -467,15 +482,22 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             continue;
         }
         if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), w_cell,
-                    thickness_coefficient, min_thickness_m) &&
-            facing(cx, cy, ray.dir3)) {
-            if (hit_x != nullptr) {
-                *hit_x = cx;
+                    thickness_coefficient, min_thickness_m)) {
+            const float s_mid = 0.5f * (sigma + sigma_out);
+            if (facing(cx, cy, ray.dir3)) {
+                if (hit_x != nullptr) {
+                    *hit_x = cx;
+                }
+                if (hit_y != nullptr) {
+                    *hit_y = cy;
+                }
+                return s_mid;
             }
-            if (hit_y != nullptr) {
-                *hit_y = cy;
+            if (collect_backface && backface < 0.0f) {
+                backface = s_mid;   // 记下最早的，继续找正面命中
+                backface_x = cx;
+                backface_y = cy;
             }
-            return 0.5f * (sigma + sigma_out);
         }
         if (sigma_out >= sigma_end) {
             break;
@@ -489,6 +511,19 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             tmax_y += tdelta_y;
         }
     }
+    if (backface >= 0.0f) {
+        // 背面命中也要报回命中格（融合/对拍都要知道"这个颜色取自哪一格"）。
+        if (hit_x != nullptr) {
+            *hit_x = backface_x;
+        }
+        if (hit_y != nullptr) {
+            *hit_y = backface_y;
+        }
+        if (out_backface_s != nullptr) {
+            *out_backface_s = backface;
+        }
+        return backface + kBackfaceBias;
+    }
     return kNoHit;
 }
 
@@ -497,11 +532,11 @@ template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
                     int max_cells, DepthFn&& w_at, int width, int height,
                     int* hit_x = nullptr, int* hit_y = nullptr,
-                    FacingFn facing = FacingFn{}) {
+                    FacingFn facing = FacingFn{}, bool collect_backface = false) {
     const bool skip = ray.sigma_enter <= 0.0f;
     return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
                         thickness_coefficient, min_thickness_m, w_at, width, height,
-                        hit_x, hit_y, facing);
+                        hit_x, hit_y, facing, collect_backface);
 }
 
 // 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
@@ -509,7 +544,8 @@ float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min
 template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
                  DepthFn&& w_at, int width, int height, int* hit_x = nullptr,
-                 int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
+                 int* hit_y = nullptr, FacingFn facing = FacingFn{},
+                 bool collect_backface = false) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
@@ -527,7 +563,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
                                      d.thickness_coefficient, min_thickness_m, w_at,
-                                     width, height, &cx, &cy, facing);
+                                     width, height, &cx, &cy, facing, collect_backface);
         if (s < best) {
             best = s;
             best_x = cx;

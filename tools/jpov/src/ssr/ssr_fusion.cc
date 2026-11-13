@@ -34,7 +34,8 @@ constexpr int kTexUnitIn4 = 4;
 constexpr int kTexUnitIn5 = 5;      // 低分法线
 constexpr int kTexUnitAttrMat = 6;  // 全分辨率材质附件（F0, roughness）
 constexpr int kTexUnitSsrMip = 7;   // SSR 结果的预滤波 mip 链
-constexpr int kTexUnitCount = 8;
+constexpr int kTexUnitBackface = 8; // SSR 分辨率的背面命中 flag（R8UI）
+constexpr int kTexUnitCount = 9;
 
 // 合成：全分辨率。A 预乘的双边升采样 + 用 SSR 替换环境镜面项。
 constexpr const char* kSsrCompositeFs = R"glsl(
@@ -61,7 +62,13 @@ uniform float uAo;              // 全局（本管线没有 SSAO；逐物体 ao 
 uniform float uRangeDepthRatio;    // **软权尺度**：rel 等于它时权重约减半（旧版这里是硬阈值）
 uniform float uHardCut;            // rel 超过它 ⇒ 硬拒（数量级不同 = 真跨表面/剪影）
 uniform float uWeightFloor;        // 权重下限（相对空间权）⇒ Σw 永不为 0，不出孔洞
-uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = ray_ratio
+uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = ray_ratio；5 = 背面命中掩码
+// 背面命中的**两个正交 flag**（2026-11-13）：模块照常给颜色，处置权在这里。
+//   uBackfaceUseSsr = 0 ⇒ 交回 env（+ uBackfaceDim 决定 env 保留多少）—— 默认 = 旧行为
+//   uBackfaceUseSsr = 1 ⇒ 用 SSR 的这份颜色（× uBackfaceDim）
+uniform int   uBackfaceUseSsr;
+uniform float uBackfaceDim;      // [0,1]，1 = 不压暗
+uniform usampler2D uBackface;    // R8UI：bit0 = 背面命中（SSR 分辨率）
 
 layout(location = 0) out vec4 FragColor;
 
@@ -175,6 +182,13 @@ void main() {
     vec3 num = vec3(0.0);
     float den = 0.0;
     float wsum = 0.0;
+    // 背面 flag 的判定：取**实际贡献颜色最多**的那个 tap（w × a_lo 最大）的硬 flag。
+    // 用 w·a_lo 而不是 w：A=0 的相邻 tap 虽然权重大，但对颜色零贡献，让它的 flag 说话
+    // 等于用一格"没有答案"的分类去决定整块像素的处置。
+    // 为什么是硬判定而不是按权平均：flag 是"这块像素属于哪一类"的语义，平均出来的分数
+    // 会让"关着两个 flag 时应当逐字节等于旧行为"这条不变量破掉（0.5 的分数会部分替换 env）。
+    float wbest_bf = -1.0;
+    bool is_backface = false;
     for (int j = 0; j < 2; ++j) {
         for (int i = 0; i < 2; ++i) {
             ivec2 q = clamp(q0 + ivec2(i, j), ivec2(0), ivec2(uSsrRes) - 1);
@@ -221,6 +235,11 @@ void main() {
             num += w * a_lo * s.rgb;
             den += w * a_lo;
             wsum += w;
+            float w_color = w * a_lo;
+            if (w_color > wbest_bf) {
+                wbest_bf = w_color;
+                is_backface = ((texelFetch(uBackface, q, 0).r & 1u) != 0u);
+            }
         }
     }
     float A = (wsum > 0.0) ? (den / wsum) : 0.0;
@@ -236,8 +255,14 @@ void main() {
         FragColor = vec4(ssr_L * A, 1.0);
         return;
     }
-    // 调试档 4：ray_ratio（预算占用率）灰度图。命中越接近预算上限越亮 ——
-    // 用来目视确认"提前结束的射线不会被误判成快到极限"。
+    // 调试档 5：背面命中掩码（白 = 该像素的 SSR 结果是背面命中）。
+    // 配合两个 flag 用：先把两个 flag 都关掉看掩码范围，再逐个别开看画面变化。
+    if (uCoverageDebug == 5) {
+        FragColor = vec4(vec3(is_backface ? 1.0 : 0.0), 1.0);
+        return;
+    }
+    // 调试档 4：**A（置信度，含掠射淡出）** 的灰度图。读的是 radiance.a —— 2026-11-13 起
+    // 那里存的是 A，不再是 ray_ratio（预算占用率已不输出，面板标签也已改为"A 置信度"）。
     if (uCoverageDebug == 4) {
         ivec2 q0c = clamp(q0, ivec2(0), ivec2(uSsrRes) - 1);
         FragColor = vec4(vec3(texelFetch(uSsr, q0c, 0).a), 1.0);
@@ -274,9 +299,28 @@ void main() {
     //   ⇒ 出现负辐亮度 ⇒ tone map 把负通道压成 0、正通道顶到 1 ⇒ **纯红描边**。
     //   辐亮度不可能为负，所以"减掉的不超过现有的"是物理硬约束，不是调参：
     //   正常情况下 removed ≤ hdr，本式与原来的 `hdr + (add − removed)` **逐位相同**。
-    vec3 removed = mask * A * uAo * env_term;
+    //
+    // ── 背面命中的处置（2026-11-13）：两个正交 flag ──
+    // A 不动（背面命中同样受压缩比淡出约束）。只有"被减掉的 env 权重"和
+    // "加上的 ssr 权重"这两个系数按 flag 改：
+    //   use_ssr=false, dim=1 ⇒ A_rm = 0, A_ad = 0 ⇒ out = hdr（**逐字节等于旧行为**）
+    //   use_ssr=false, dim<1 ⇒ 只保留 dim 那份 env（旧版 backface_env_scale 的语义）
+    //   use_ssr=true        ⇒ 用 SSR 颜色，整体乘 dim
+    float bf_dim = clamp(uBackfaceDim, 0.0, 1.0);
+    float A_rm = A;
+    float A_ad = A;
+    if (is_backface) {
+        if (uBackfaceUseSsr != 0) {
+            A_rm = A;
+            A_ad = A * bf_dim;
+        } else {
+            A_rm = A * (1.0 - bf_dim);   // 只保住 bf_dim 那份 env
+            A_ad = 0.0;
+        }
+    }
+    vec3 removed = mask * A_rm * uAo * env_term;
     removed = min(removed, max(hdr, vec3(0.0)));
-    vec3 out_rgb = hdr - removed + mask * A * uAo * ssr_L * weight;
+    vec3 out_rgb = hdr - removed + mask * A_ad * uAo * ssr_L * weight;
     FragColor = vec4(out_rgb, 1.0);
 }
 )glsl";
@@ -313,6 +357,9 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     CHECK_GE(in.ssr_mip_levels, 1);
     CHECK_NE(in.down_w_tex, 0u);
     CHECK_NE(in.down_normal_tex, 0u);
+    CHECK_NE(in.backface_tex, 0u) << "缺背面命中 flag 纹理（SsrRenderer::backface_tex）";
+    CHECK(in.cfg.backface_dim >= 0.0f && in.cfg.backface_dim <= 1.0f)
+        << "SsrConfig::backface_dim 必须在 [0,1]，得到 " << in.cfg.backface_dim;
     CHECK_NE(in.dst_fbo, 0u);
     CHECK_GT(in.full_w, 0);
     CHECK_GT(in.full_h, 0);
@@ -331,7 +378,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     GLint prev_depth = 0;
     GLint prev_cull = 0;
     GLint prev_scissor = 0;
-    GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0, 0, 0, 0, 0};
+    GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
@@ -376,6 +423,9 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.attr_mat_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitSsrMip);
     glBindTexture(GL_TEXTURE_2D, in.ssr_mip_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitBackface);
+    glBindTexture(GL_TEXTURE_2D, in.backface_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uBackface"), kTexUnitBackface);
 
     glUniform1i(shader_mgr_->GetUniform(prog_, "uHdrCopy"), kTexUnitIn0);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uAttr"), kTexUnitIn1);
@@ -403,6 +453,9 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glUniform1f(shader_mgr_->GetUniform(prog_, "uHardCut"), in.cfg.upsample_hard_cut);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uWeightFloor"), in.cfg.upsample_weight_floor);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uCoverageDebug"), in.cfg.debug_coverage);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uBackfaceUseSsr"),
+                in.cfg.backface_use_ssr ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_, "uBackfaceDim"), in.cfg.backface_dim);
     // 环境镜面：**每帧必须重传**（uniform 是 program 状态，上一帧开着本帧不传就还用旧的）。
     UploadEnvSpecular(*shader_mgr_, prog_, in.env_cube_tex, in.env_max_lod,
                       in.env_sky_scale, in.env_enabled);

@@ -153,6 +153,10 @@ void SsrRenderer::DestroyTargets() {
         glDeleteTextures(1, &outputs_.hit_s_tex);
         outputs_.hit_s_tex = 0;
     }
+    if (outputs_.backface_tex != 0) {
+        glDeleteTextures(1, &outputs_.backface_tex);
+        outputs_.backface_tex = 0;
+    }
     width_ = 0;
     height_ = 0;
     tile_ = 0;
@@ -195,13 +199,22 @@ void SsrRenderer::EnsureTargets(int w, int h, int tile, bool debug) {
     MakeTexture(&outputs_.type_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            outputs_.type_tex, 0);
+    // R8UI：bit0 = 本次命中是背面命中（2026-11-13）。**总是**输出 —— 融合层用它决定
+    // 背面像素该用 env 还是用这个颜色、要不要压暗（两个正交 flag，全在融合层）。
+    // 放在 location 3：location 2 是 SSR_DEBUG 的 hit_s（调试档专用，可能不存在）。
+    MakeTexture(&outputs_.backface_tex, w, h, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D,
+                           outputs_.backface_tex, 0);
     std::vector<GLenum> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     if (debug) {
         MakeTexture(&outputs_.hit_s_tex, w, h, GL_R32F, GL_RED, GL_FLOAT);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
                                outputs_.hit_s_tex, 0);
         bufs.push_back(GL_COLOR_ATTACHMENT2);
+    } else {
+        bufs.push_back(GL_NONE);   // 占位：attachment 2 在非调试档不存在
     }
+    bufs.push_back(GL_COLOR_ATTACHMENT3);
     glDrawBuffers(static_cast<GLsizei>(bufs.size()), bufs.data());
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR 输出 FBO 不完整（" << w << "×" << h << "，debug=" << debug << "）";

@@ -224,6 +224,10 @@ public:
     // 只有两个阈值；把 end 调到 <= start 即等于关闭。
     float ssr_grazing_start_ = 2.0f;
     float ssr_grazing_end_ = 10.0f;
+    // 背面命中的两个正交 flag（2026-11-13）：模块照常给颜色，处置在这里。
+    // 默认 (false, 1.0) = 交回 env = 与旧行为逐字节相同（gold 不动）；交互时再打开。
+    bool  ssr_backface_use_ssr_ = false;   // false = 用 env；true = 用 SSR 颜色
+    float ssr_backface_dim_ = 1.0f;        // 该像素最终采用那份颜色的亮度因子
     void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -380,6 +384,8 @@ public:
             sc.debug_coverage = ssr_debug_;
             sc.grazing_fade_start = ssr_grazing_start_;
             sc.grazing_fade_end = ssr_grazing_end_;
+            sc.backface_use_ssr = ssr_backface_use_ssr_;
+            sc.backface_dim = ssr_backface_dim_;
             cmds->ssr = sc;
         }
 
@@ -448,7 +454,8 @@ private:
                                                   "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）",
                                                   "SSR 调试：SSR 辐亮度",
-                                                  "SSR 调试：A 置信度（含掠射淡出）"};
+                                                  "SSR 调试：A 置信度（含掠射淡出）",
+                                                  "SSR 调试：背面命中掩码"};
             int dsel = ssr_debug_;
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
@@ -487,6 +494,14 @@ private:
         // 掠射淡出：只有两个阈值（end <= start 即关闭）。
         ui_.SliderFloat("掠射淡出起点 kappa", &ssr_grazing_start_, row(1, 0), 1.0f, 60.0f, 1);
         ui_.SliderFloat("掠射淡出终点 kappa", &ssr_grazing_end_, row(1, 1), 1.0f, 60.0f, 1);
+
+        // ── 右列 2..3：背面命中的两个正交 flag（2026-11-13）──
+        // ① 来源：关 = 交回 env（旧行为）；开 = 用 SSR 给出的那份颜色。
+        // ② 亮度因子：只看"最终采用的那份颜色"，1 = 不压暗。
+        //    与①正交：(关,0.2) = 环境项只保留 20%；(开,0.25) = 背面颜色整体压暗。
+        ui_.Checkbox("背面命中用 SSR 颜色（关=用 env）", &ssr_backface_use_ssr_, row(1, 2));
+        ui_.SliderFloat("背面命中压暗比 (1=不压暗)", &ssr_backface_dim_, row(1, 3),
+                        0.0f, 1.0f, 2);
 
         // ── 右列 9..15：地面材质（下拉）+ SSR 的分辨率 / 厚度 / 预算 / 磨砂 ──
         {
