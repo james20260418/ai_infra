@@ -108,6 +108,8 @@ private:
     // 本帧的引导与配置（只在 Run 期间有效，供 PassToTexture 读取）。
     SsrFilterGuides cur_guides_;
     SsrFilterConfig cur_cfg_;
+    // 本帧的类型图（R8UI）：补洞/离群都用它区分"结构空位"与"淡出后的低 A"。
+    unsigned int cur_type_tex_ = 0;
 
     // 一趟全屏后处理：src → dst，step 只给 à-trous 用（补洞/离群传 0）。
     // Pre-condition: GL context 已激活；src != dst；尺寸 = width_×height_。

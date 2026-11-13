@@ -302,6 +302,15 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     CHECK(in.cfg.fade_hit_edge_pixels >= 0.0f)
         << "SsrConfig::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭），得到 "
         << in.cfg.fade_hit_edge_pixels;
+    // （NaN 与任何数比较都为假 ⇒ 下面这些 "≥/>" 检查天然也能拦 NaN。）
+    CHECK_GT(in.cfg.filter_clamp_sigma, 0.0f)
+        << "SsrConfig::filter_clamp_sigma 必须 > 0，得到 " << in.cfg.filter_clamp_sigma;
+    CHECK_GE(in.cfg.filter_atrous_iterations, 1)
+        << "SsrConfig::filter_atrous_iterations 必须 ∈ [1,3]，得到 "
+        << in.cfg.filter_atrous_iterations;
+    CHECK_LE(in.cfg.filter_atrous_iterations, 3)
+        << "SsrConfig::filter_atrous_iterations 必须 ∈ [1,3]，得到 "
+        << in.cfg.filter_atrous_iterations;
 
     const int scale = static_cast<int>(std::lround(1.0f / in.cfg.resolution_scale));
 

@@ -253,7 +253,8 @@ unsigned int UploadFloatTex(int w, int h, int internal, int format,
 // 8×8 合成输入 → 跑一遍 → 读回 mip level 0（= 遮丑链的最终输出）。
 // use_guides = false 走 4 参数重载（= 2026-11-13 之前的行为）。
 std::vector<float> RunPost(const std::vector<float>& rgba, bool use_guides,
-                           const jpov::SsrFilterConfig& cfg) {
+                           const jpov::SsrFilterConfig& cfg,
+                           const std::vector<unsigned char>* types_override = nullptr) {
     GlEnv::Get().Ensure();
     const int n = kSize * kSize;
     std::vector<unsigned char> type(static_cast<size_t>(n), 0);
@@ -262,6 +263,9 @@ std::vector<float> RunPost(const std::vector<float>& rgba, bool use_guides,
     for (int i = 0; i < n; ++i) {
         if (rgba[static_cast<size_t>(i) * 4 + 3] > 0.0f) {
             type[static_cast<size_t>(i)] = 1;                 // kHit
+        }
+        if (types_override != nullptr) {
+            type[static_cast<size_t>(i)] = (*types_override)[static_cast<size_t>(i)];
         }
         nrm[static_cast<size_t>(i) * 4 + 2] = 1.0f;           // 法线 = +Z（同面）
         nrm[static_cast<size_t>(i) * 4 + 3] = 1.0f;
@@ -392,6 +396,85 @@ TEST(SsrFilterPost, OutlierClampPullsOnlyTheOutlier) {
     EXPECT_NEAR(At(out, kSize, 3, 3, 0), 0.25f, 3.0e-3f);
     // 覆盖率不参与 clamp（A 原样）。
     EXPECT_NEAR(At(out, kSize, 4, 4, 3), 1.0f, 1.0e-3f);
+}
+
+// 接口安全：非法配置必须在进 GL 之前就被拦住（而不是静默画出一堆垃圾）。
+// 三条都是"用户能配出来的"非法值：缺引导、趟数 0、σ = NaN。
+TEST(SsrFilterPost, InvalidConfigRejectedBeforeGl) {
+    GlEnv::Get().Ensure();
+    const std::vector<float> rgba = SolidGrid(0.0f);
+    const std::vector<float> wbuf(static_cast<size_t>(kSize) * kSize, 0.05f);
+    std::vector<float> nrm(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
+    std::vector<unsigned char> type(static_cast<size_t>(kSize) * kSize, 0);
+    for (int i = 0; i < kSize * kSize; ++i) {
+        nrm[static_cast<size_t>(i) * 4 + 2] = 1.0f;
+        nrm[static_cast<size_t>(i) * 4 + 3] = 1.0f;
+    }
+    const unsigned int rad = UploadRadiance(kSize, kSize, rgba);
+    const unsigned int typ = UploadType(kSize, kSize, type);
+    const unsigned int wt = UploadFloatTex(kSize, kSize, GL_R32F, GL_RED, wbuf);
+    const unsigned int nt = UploadFloatTex(kSize, kSize, GL_RGBA16F, GL_RGBA, nrm);
+
+    jpov::ShaderManager mgr;
+    SsrFilter filter;
+    filter.Init(&mgr);
+
+    jpov::SsrFilterConfig on;
+    on.hole_fill = true;
+
+    // ① 开了滤波器却没给引导。
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, jpov::SsrFilterGuides{}, on), "");
+
+    jpov::SsrFilterGuides guides;
+    guides.down_w_tex = wt;
+    guides.down_normal_tex = nt;
+
+    // ② 小波趟数 0（步长会退化成恒 1，支撑不够 = 静默失效）。
+    jpov::SsrFilterConfig bad_iters;
+    bad_iters.atrous = true;
+    bad_iters.atrous_iterations = 0;
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, guides, bad_iters), "");
+
+    // ③ σ = NaN（会让 clamp 的边界变成 NaN，整片颜色被写成 NaN）。
+    jpov::SsrFilterConfig bad_sigma;
+    bad_sigma.outlier_clamp = true;
+    bad_sigma.clamp_sigma = std::nanf("");
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, guides, bad_sigma), "");
+
+    filter.Finalize();
+    glDeleteTextures(1, &rad);
+    glDeleteTextures(1, &typ);
+    glDeleteTextures(1, &wt);
+    glDeleteTextures(1, &nt);
+}
+
+// 回归：A 被淡出到 0.2 的**命中格**不许被补洞"补回 1"。
+// 判据必须看类型图（结构上是不是命中），不能看 A 阈值 —— 否则两条通路互相打架
+// （补洞把淡出撤销，用户拖淡出滑条会看到"某些像素不动"）。
+TEST(SsrFilterPost, HoleFillLeavesFadedHitsAlone) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    for (int x = 2; x <= 4; ++x) {
+        SetPx(&rgba, x, 4, 0.5f, 1.0f);
+    }
+    SetPx(&rgba, 3, 4, 0.5f, 0.2f);   // 中间那格：命中，但 A 被淡到 0.2
+
+    std::vector<unsigned char> types(static_cast<size_t>(kSize) * kSize, 0);
+    for (int x = 2; x <= 4; ++x) {
+        types[static_cast<size_t>(4) * kSize + x] = 1;   // 三格都是 kHit
+    }
+
+    jpov::SsrFilterConfig cfg;
+    cfg.hole_fill = true;
+    const std::vector<float> out = RunPost(rgba, /*use_guides=*/true, cfg, &types);
+
+    // 负向：只看 a>0.5 的实现会把它补成 ~1.0。
+    EXPECT_NEAR(At(out, kSize, 3, 4, 3), 0.2f, 2.0e-3f);
+    EXPECT_NEAR(At(out, kSize, 3, 4, 0), 0.5f, 2.0e-3f);
+
+    // 同一行的真·结构空位（如果存在）仍然按规则补：把 (3,4) 改成 type=0 就该被补。
+    types[static_cast<size_t>(4) * kSize + 3] = 0;
+    const std::vector<float> out2 = RunPost(rgba, /*use_guides=*/true, cfg, &types);
+    EXPECT_NEAR(At(out2, kSize, 3, 4, 3), 1.0f, 2.0e-3f);
 }
 
 }  // namespace

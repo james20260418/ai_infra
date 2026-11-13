@@ -78,6 +78,7 @@ constexpr const char* kSsrFilterGuidesFs = R"glsl(
 uniform sampler2D uSrc;
 uniform sampler2D uW;
 uniform sampler2D uNormal;
+uniform usampler2D uType;   // R8UI：1 = kHit。**结构空位与"淡出后的低 A"必须分开判**
 uniform ivec2 uRes;
 uniform float uDepthTol;    // 深度软权尺度（相对残差）
 uniform float uCosMin;      // 法线门限：低于它 = 跨面，权重 0
@@ -121,20 +122,26 @@ float SsrGuideWeight(ivec2 p, ivec2 q, float w_c, vec2 gw, vec3 n_c) {
         nw = c;
     }
     float pred = w_c + dot(gw, vec2(q - p));
-    return SsrRangeWeight(SsrRelResidual(pred, w_n), uDepthTol) * nw;
+    float rel = SsrRelResidual(pred, w_n);
+    // 软权之外再加一道**硬拒**：跨剪影时 1/(rel+tol) 只是"变小"，长尾会把 2~3 格外的
+    // 另一个面拉进来（表现为倒影边缘的浅色渗色）。超过 4× 尺度直接判 0，宁缺毋滥。
+    if (rel > 4.0 * uDepthTol) {
+        return 0.0;
+    }
+    return SsrRangeWeight(rel, uDepthTol) * nw;
 }
 
 // 同一表面（布尔版，给补洞用）。
+// 深度门槛比软权尺度**宽 4 倍**：缝里的邻居本来就该被当成同一面，门槛太紧会让掠射处
+// 一条缝都补不上（软权版本里的 1/(rel+tol) 会自然衰减，这里要的是一句"算不算"）。
 bool SsrSameSurfaceAt(ivec2 p, ivec2 q, float w_c, vec2 gw, vec3 n_c) {
     float w_n = texelFetch(uW, q, 0).r;
     if (!(w_n > 0.0)) {
         return false;
     }
-    if (dot(texelFetch(uNormal, q, 0).xyz, texelFetch(uNormal, q, 0).xyz) > 0.25) {
-        vec3 n_n = normalize(texelFetch(uNormal, q, 0).xyz);
-        if (dot(n_c, n_n) < uCosMin) {
-            return false;
-        }
+    vec3 n_raw = texelFetch(uNormal, q, 0).xyz;
+    if (dot(n_raw, n_raw) > 0.25 && dot(n_c, normalize(n_raw)) < uCosMin) {
+        return false;
     }
     return SsrRelResidual(w_c + dot(gw, vec2(q - p)), w_n) < (uDepthTol * 4.0);
 }
@@ -148,7 +155,9 @@ layout(location = 0) out vec4 FragColor;
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec4 s = texelFetch(uSrc, p, 0);
-    if (s.a > 0.5) {
+    // 只处理**结构上空**的格子（type != kHit）。命中格哪怕 A 被淡到 0.2 也不碰 ——
+    // 否则补洞会把"淡出"好心办坏事地补回 1，两条通路的语义就打架了。
+    if (texelFetch(uType, p, 0).r == 1u) {
         FragColor = s;
         return;
     }
@@ -165,7 +174,7 @@ void main() {
     for (int k = 0; k < 4; ++k) {
         ivec2 q = clamp(p + offs[k], ivec2(0), uRes - 1);
         nb[k] = texelFetch(uSrc, q, 0);
-        hit[k] = (nb[k].a > 0.5) && SsrSameSurfaceAt(p, q, w_c, gw, n_c);
+        hit[k] = (texelFetch(uType, q, 0).r == 1u) && SsrSameSurfaceAt(p, q, w_c, gw, n_c);
     }
     // 只有"两侧都通"才叫缝；单侧命中是真实的边界。
     bool lr = hit[0] && hit[1];
@@ -202,7 +211,8 @@ layout(location = 0) out vec4 FragColor;
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec4 s = texelFetch(uSrc, p, 0);
-    if (!(s.a > 0.5)) {
+    // 只有命中格有"颜色"可夹（未命中格的 rgb 是抄来的填充色）。淡出后的低 A 仍是命中。
+    if (texelFetch(uType, p, 0).r != 1u) {
         FragColor = s;
         return;
     }
@@ -213,16 +223,20 @@ void main() {
     }
     vec3 n_c = texelFetch(uNormal, p, 0).xyz;
     vec2 gw = SsrWGrad(p, w_c);
+    // 9 个样本一次取齐（颜色 + 权重）：均值与方差用同一批数据，避免重复取纹理/重复算引导。
+    vec3 cols[9];
+    float wts[9];
     vec3 mean = vec3(0.0);
     float wsum = 0.0;
-    for (int j = -1; j <= 1; ++j) {
-        for (int i = -1; i <= 1; ++i) {
-            ivec2 q = clamp(p + ivec2(i, j), ivec2(0), uRes - 1);
-            vec4 t = texelFetch(uSrc, q, 0);
-            float w = t.a * SsrGuideWeight(p, q, w_c, gw, n_c);
-            mean += w * t.rgb;
-            wsum += w;
-        }
+    for (int k = 0; k < 9; ++k) {
+        ivec2 o = ivec2(k % 3 - 1, k / 3 - 1);
+        ivec2 q = clamp(p + o, ivec2(0), uRes - 1);
+        vec4 t = texelFetch(uSrc, q, 0);
+        float w = t.a * SsrGuideWeight(p, q, w_c, gw, n_c);
+        cols[k] = t.rgb;
+        wts[k] = w;
+        mean += w * t.rgb;
+        wsum += w;
     }
     if (!(wsum > 1.0e-6)) {
         FragColor = s;
@@ -230,14 +244,9 @@ void main() {
     }
     mean /= wsum;
     vec3 var = vec3(0.0);
-    for (int j = -1; j <= 1; ++j) {
-        for (int i = -1; i <= 1; ++i) {
-            ivec2 q = clamp(p + ivec2(i, j), ivec2(0), uRes - 1);
-            vec4 t = texelFetch(uSrc, q, 0);
-            float w = t.a * SsrGuideWeight(p, q, w_c, gw, n_c);
-            vec3 d = t.rgb - mean;
-            var += w * d * d;
-        }
+    for (int k = 0; k < 9; ++k) {
+        vec3 d = cols[k] - mean;
+        var += wts[k] * d * d;
     }
     var /= wsum;
     vec3 sd = sqrt(max(var, vec3(0.0)));
@@ -323,7 +332,8 @@ constexpr int kTexUnitType = 1;
 constexpr int kTexUnitSrc = 0;
 constexpr int kTexUnitW = 1;
 constexpr int kTexUnitNormal = 2;
-constexpr int kTexUnitCount = 3;
+constexpr int kTexUnitTypeTex = 3;
+constexpr int kTexUnitCount = 4;
 
 int ComputeLevelCount(int w, int h) {
     int m = std::max(w, h);
@@ -483,9 +493,19 @@ void SsrFilter::Run(unsigned int ssr_radiance_tex, unsigned int ssr_type_tex, in
     }
     CHECK_GE(cfg.atrous_iterations, 1) << "SsrFilterConfig::atrous_iterations 必须 ≥ 1";
     CHECK_LE(cfg.atrous_iterations, 3) << "SsrFilterConfig::atrous_iterations 必须 ≤ 3（步长 1/2/4）";
-    CHECK_GT(cfg.clamp_sigma, 0.0f) << "SsrFilterConfig::clamp_sigma 必须 > 0";
+    // 数值参数一律拦住非法值（NaN 用 "!(x > 0)" 表达，因为 NaN 与任何数比较都为假）。
+    CHECK_GT(cfg.clamp_sigma, 0.0f)
+        << "SsrFilterConfig::clamp_sigma 必须 > 0，得到 " << cfg.clamp_sigma;
+    CHECK_GT(cfg.guide_depth_tol, 0.0f)
+        << "SsrFilterConfig::guide_depth_tol 必须 > 0（= 0 会让引导权重变成 inf/NaN），得到 "
+        << cfg.guide_depth_tol;
+    CHECK_GE(cfg.guide_normal_cos, 0.0f) << "SsrFilterConfig::guide_normal_cos 必须 ∈ [0,1]，得到 "
+                                         << cfg.guide_normal_cos;
+    CHECK_LE(cfg.guide_normal_cos, 1.0f) << "SsrFilterConfig::guide_normal_cos 必须 ∈ [0,1]，得到 "
+                                         << cfg.guide_normal_cos;
     cur_guides_ = guides;
     cur_cfg_ = cfg;
+    cur_type_tex_ = ssr_type_tex;
 
     GLint prev_read_fbo = 0;
     GLint prev_draw_fbo = 0;
@@ -496,7 +516,7 @@ void SsrFilter::Run(unsigned int ssr_radiance_tex, unsigned int ssr_type_tex, in
     GLint prev_depth = 0;
     GLint prev_cull = 0;
     GLint prev_scissor = 0;
-    GLint prev_bind[kTexUnitCount] = {0, 0};
+    GLint prev_bind[kTexUnitCount] = {};
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
@@ -643,11 +663,16 @@ void SsrFilter::PassToTexture(unsigned int prog, unsigned int src_tex, unsigned 
     glUniform1f(shader_mgr_->GetUniform(prog, "uDepthTol"), cur_cfg_.guide_depth_tol);
     glUniform1f(shader_mgr_->GetUniform(prog, "uCosMin"), cur_cfg_.guide_normal_cos);
     glUniform1f(shader_mgr_->GetUniform(prog, "uClampK"), cur_cfg_.clamp_sigma);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitTypeTex);
+    glBindTexture(GL_TEXTURE_2D, cur_type_tex_);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uType"), kTexUnitTypeTex);
     glUniform1i(shader_mgr_->GetUniform(prog, "uStep"), step);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glActiveTexture(GL_TEXTURE0 + kTexUnitW);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0 + kTexUnitNormal);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitTypeTex);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 

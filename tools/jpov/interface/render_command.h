@@ -738,39 +738,28 @@ struct SsrConfig {
     float grazing_fade_start = 2.0f;   // kappa ≥ 它开始淡出
     float grazing_fade_end = 10.0f;    // kappa ≥ 它完全交给兜底
 
-    // ── A 的三个淡出（2026-11-13，"遮丑"用，默认全关）──
-    // 三者都只乘在 A（覆盖率）上：颜色、命中判据、距离一律不动 ⇒ A→0 就等价于"这里交回 env"。
-    // 单位是**全分辨率屏幕像素**，接入层按 1/N 折成 SSR 像素；0 = 关闭该条。
-    //
-    // ① 预算淡出：A *= fade(max_ray_pixels − σ)，σ = **P→Q 的像素距离**（就是命中点的屏幕弧长）。
-    //    射线快走到预算上限才勉强撞上 ⇒ 多半是"再走一格就没了"的擦边命中，观感是刺。
-    // ② 反射体贴边（P）：A *= fade(P 到最近画面边的距离)。
-    //    倒影被画面边框硬切一刀，给一圈缓冲带，免得边框处出现一道直边。
-    // ③ 命中点贴边（Q）：A *= fade(Q 到最近画面边的距离)。
-    //    反射源本身就在画面外沿，数据可信度低；和 ② 是**两个不同位置**的问题，各自一个旋钮。
-    //
-    // 曲线都是 smoothstep（线性斜坡两端会有可见"折线"），见 ssr_math.h::FadeWeight。
-    // 历史：2026-11-06 的分支验证过效果（当时叫 fade_budget_pixels / fade_edge_pixels /
-    // fade_hit_edge_pixels），11-13 重做时只把落点从"融合层"挪到"resolve 的 A"。
-    float fade_budget_pixels = 0.0f;      // ① 0 = 关闭
-    float fade_edge_pixels = 0.0f;        // ② 0 = 关闭
-    float fade_hit_edge_pixels = 0.0f;    // ③ 0 = 关闭
+    // ── A 的三个淡出（2026-11-13）：只乘在 A 上，颜色/命中/距离都不动 ──
+    // 单位 = 全分辨率屏幕像素（接入层 /N 折成 SSR 像素）；0 = 关闭该条；曲线 smoothstep。
+    //   ① 预算：A *= fade(max_ray_pixels − σ)，σ = P→Q 的像素距离（= 命中点屏幕弧长）。
+    //   ② P 贴边：倒影贴着画面边框会被硬切 ⇒ 留一圈缓冲带。
+    //   ③ Q 贴边：反射源本身在画面外沿 ⇒ 可信度低。② 和 ③ 是两个不同位置的问题，各一个旋钮。
+    // 三者与掠射淡出（kappa）是**乘法**关系，任何一条为 0 都等于"这里交回 env"。
+    // 默认全 0 ⇒ 逐字节等于旧行为。
+    float fade_budget_pixels = 0.0f;
+    float fade_edge_pixels = 0.0f;
+    float fade_hit_edge_pixels = 0.0f;
 
-    // ── 遮丑滤波器（2026-11-13，"多配置选型"用；默认全关 ⇒ 逐字节旧行为）──
-    // 全部跑在 **SSR 分辨率**、mip 链之前。三条各治一种病，可以单独开对比，也可以叠：
-    //   ① filter_hole_fill     形态学补洞：只补"左右/上下两侧都命中、自己是空"的 1px 缝
-    //                          ⇒ 专治周期性梳齿；宽洞不动，不会凭空造出倒影
-    //   ② filter_outlier_clamp 统计：3×3 加权方差，把偏离 k·σ 的样本夹回边界
-    //                          ⇒ 专治孤立亮点/黑点，几乎不损失锐度
-    //   ③ filter_atrous        边缘保持 à-trous 小波（5×5 B3，步长 1/2/4）
-    //                          深度+法线引导 ⇒ 跨剪影不串色；A 当"样本数"一起平均
-    // 放在低分侧而不是升采样后：梳齿周期 = SSR texel，低分上覆盖同样的世界半径
-    // 只要 1/N² 的像素。详见 ssr_filter.h 顶部。
-    bool filter_hole_fill = false;      // ①
-    bool filter_outlier_clamp = false;  // ②
-    bool filter_atrous = false;         // ③
-    float filter_clamp_sigma = 2.0f;    // ② 允许偏离几倍标准差（> 0）
-    int filter_atrous_iterations = 1;   // ③ 1..3（步长 1/2/4；2 趟起明显发虚）
+    // ── 三个遮丑滤波器（2026-11-13）：都在 SSR 分辨率、mip 链之前；默认全关 ──
+    // 各自独立，可单独开对比，也可叠（固定顺序：补洞 → 离群 → 小波）。
+    //   ① filter_hole_fill：形态学补洞，只补两侧都命中的 1px 缝（治梳齿）。
+    //   ② filter_outlier_clamp：3×3 方差引导，把偏离 k·σ 的样本夹回（治毛刺）。
+    //   ③ filter_atrous：边缘保持 à-trous（深度/法线引导），A 当"样本数"一起平均（多尺度）。
+    // 详见 ssr_filter.h 顶部。
+    bool filter_hole_fill = false;
+    bool filter_outlier_clamp = false;
+    bool filter_atrous = false;
+    float filter_clamp_sigma = 2.0f;    // ② 允许偏离几倍标准差，> 0
+    int filter_atrous_iterations = 1;   // ③ 1..3（步长 1/2/4；≥2 趟明显发虚）
 
     // ── 背面命中（2026-11-13）：模块照常给颜色，**处置权在融合层**，两个正交 flag ──
     // 背面命中 = 射线从某个面的背后穿出（法线朝相机、射线朝屏幕里）。它的颜色是那一格的
