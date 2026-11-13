@@ -107,6 +107,14 @@ uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段
 // 屏幕预算（SSR 像素弧长）。**ray_ratio 的分母**：常量分母 ⇒ 提前结束的射线不会被误淡出。
 uniform float uMaxRayPixels;
 
+// 背面命中的编码偏移（2026-11-13）。march 每 lane 只能输出一个 float：
+//   s ∈ [0, kSsrBackfaceBias) = 正面命中；s + kSsrBackfaceBias = 只有背面命中；
+//   uSentinel = 什么都没撞到。resolve 对 T² 取 min ⇒ 正面命中天然优先，
+//   两个优先级共用一次归约（零额外通道 / 零额外 pass）。
+// 取值约束：远大于任何可能的 s（屏幕对角线 < 1e4），远小于 uSentinel（1e30）。
+// **必须与 ssr_math.h::kBackfaceBias 一致**（CPU 镜像对拍用）。
+const float kSsrBackfaceBias = 1.0e5;
+
 // 屏幕射线：σ = 未裁剪线段上的像素弧长，w = 1/d 对 σ 仿射（ssr_math.h::ScreenRay）。
 struct SsrRay {
     vec2 s0;
@@ -308,40 +316,37 @@ bool SsrVanishingPoint(vec3 dir_view, out vec2 vp) {
 
 )glsl";
 
-// march：每 texel = 一个 lane，输出本段**最早命中格内的中点** s（无命中 = uSentinel）。
+// march：每 texel = 一个 lane，输出本段**最早命中格内的中点** s。
+//
+// 编码（2026-11-13）：
+//   s ∈ [0, bias)   正面命中（真实命中，优先）
+//   s + bias        只有背面命中（射线从面背后穿出，见 SsrHitFacing）
+//   uSentinel       什么都没撞到
+// resolve 对 T² 个 lane 取 min ⇒ 正面命中天然优先，背面命中只是"没有正面命中时的退路"。
+//
+// **背面命中一律按命中输出颜色**（2026-11-13 Danis 定）：模块只报事实，不替调用方决定
+// 该不该用它。用 env 还是用这个颜色、要不要压暗，全在融合层（两个正交 flag）。
 inline constexpr const char* kSsrMarchFs = R"glsl(
 out float FragS;
 
-void main() {
-    ivec2 px = ivec2(gl_FragCoord.xy);
-    ivec2 mir = px / uTile;
-    ivec2 sub = px - mir * uTile;
-    int lane = sub.y * uTile + sub.x;
-
-    FragS = uSentinel;
-
-    // 远平面（清空值）：没有深度数据，不发射线。天空占屏的场景里这一步最省。
-    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
-        return;
-    }
-    // 太粗糙 ⇒ 不发射线（预算省下来）：单条镜面射线表达不了宽反射瓣，交给 env 的 mip。
-    if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
-        return;
-    }
-    SsrRay ray;
-    if (!SsrBuildRay(mir, ray)) {
-        return;
-    }
+// 一条 lane 的 DDA。
+//
+// 抽成函数只为一件事：背面候选必须在**每一个出口**都写出去。原地有 5 处 return
+// （出屏 / 退化 / 段尾 / 命中），逐处改写极易漏掉某条分支 —— 而"漏一条"的表现是
+// 偶发的整行回落 env，极难定位。这里统一成 result/backface 两个变量 + 单出口。
+float SsrMarchLane(SsrRay ray, int lane) {
+    float result = uSentinel;
+    float backface = -1.0;   // 本 lane 最早的"背面命中"候选（<0 = 没有）
 
     // lane 覆盖 [k·L, (k+1)·L)（切段见 ssr_math.h::MarchSlabs）
     float lane_begin = float(lane) * uSlabPixels;
     if (lane_begin >= ray.exit) {
-        return;                       // 短射线：后面的段整段空转
+        return result;                       // 短射线：后面的段整段空转
     }
     float start = max(lane_begin, ray.enter);
     float end = min(lane_begin + uSlabPixels, ray.exit);
     if (!(end > start)) {
-        return;
+        return result;
     }
 
     vec2 pos = ray.s0 + ray.dir * start;
@@ -383,18 +388,18 @@ void main() {
 
     for (int i = 0; i < uStepsPerLane; ++i) {
         if (cell.x < 0 || cell.y < 0 || cell.x >= int(uRes.x) || cell.y >= int(uRes.y)) {
-            return;
+            break;
         }
         float sigma_out = min(min(tmx, tmy), end);
         if (!(sigma_out > sigma)) {
-            return;
+            break;
         }
         // 空格子（天空/无深度数据）没有柱子：穿过去，**不要**当成 far 处的墙。
         // 见 ssr_math.h::kEmptyCell 的反例（掠射时会在近地平线造出一大片假高光）。
         float w_cell = texelFetch(uW, cell, 0).r;
         if (!SsrHasDepth(w_cell)) {
             if (sigma_out >= end) {
-                return;
+                break;
             }
             sigma = sigma_out;
             if (tmx < tmy) {
@@ -406,14 +411,18 @@ void main() {
             }
             continue;
         }
-        // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell, cell) &&
-            SsrHitFacing(ray.d3, cell)) {
-            FragS = 0.5 * (sigma + sigma_out);
-            return;
+        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell, cell)) {
+            float s_mid = 0.5 * (sigma + sigma_out);
+            if (SsrHitFacing(ray.d3, cell)) {
+                result = s_mid;              // 正经的正面命中：立刻结束（优先级最高）
+                break;
+            }
+            if (backface < 0.0) {
+                backface = s_mid;            // 记下最早的背面命中，继续找正面命中
+            }
         }
         if (sigma_out >= end) {
-            return;
+            break;
         }
         sigma = sigma_out;
         if (tmx < tmy) {
@@ -424,6 +433,39 @@ void main() {
             tmy += tdy;
         }
     }
+    // ⚠️ 正面命中优先：result 一旦被置上，就必须原样返回（它本来就在 break 之前写好）。
+    // 这里曾经写成"先看 backface"，结果同一个 lane 里既有正面命中又有背面命中时会把
+    // 背面那个报出去 —— 表现为"该走的远命中变成了近处的背面命中"，只有对拍抓得到。
+    if (result < uSentinel * 0.5) {
+        return result;
+    }
+    if (backface >= 0.0) {
+        return backface + kSsrBackfaceBias;
+    }
+    return result;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    ivec2 mir = px / uTile;
+    ivec2 sub = px - mir * uTile;
+    int lane = sub.y * uTile + sub.x;
+
+    FragS = uSentinel;
+
+    // 远平面（清空值）：没有深度数据，不发射线。天空占屏的场景里这一步最省。
+    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
+        return;
+    }
+    // 太粗糙 ⇒ 不发射线（预算省下来）：单条镜面射线表达不了宽反射瓣，交给 env 的 mip。
+    if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
+        return;
+    }
+    SsrRay ray;
+    if (!SsrBuildRay(mir, ray)) {
+        return;
+    }
+    FragS = SsrMarchLane(ray, lane);
 }
 )glsl";
 
@@ -445,6 +487,9 @@ uniform float uGrazingFadeEnd;     // kappa 全淡
 
 layout(location = 0) out vec4 FragRadiance;
 layout(location = 1) out uint FragType;
+// R8UI，位置 3（位置 2 留给 SSR_DEBUG 的 hit_s）：bit0 = 本次命中是**背面命中**。
+// 模块只报事实；"用 env 还是用这个颜色 / 要不要压暗"由融合层的两个正交 flag 决定。
+layout(location = 3) out uint FragBackface;
 #ifdef SSR_DEBUG
 layout(location = 2) out float FragHitS;    // 像素弧长；无命中 = uSentinel
 #endif
@@ -470,6 +515,10 @@ void main() {
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
+    // 背面命中（2026-11-13）：march 把 s 编成 s + kSsrBackfaceBias 写出来（见 kSsrMarchFs）。
+    // T² 的 min 归约保证"有正面命中就一定不是背面命中"。
+    bool is_backface = have_hit && best >= kSsrBackfaceBias;
+    FragBackface = is_backface ? 1u : 0u;
     if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
         type = 0u;                         // kNone：本像素不是反射候选
     } else if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
@@ -480,7 +529,7 @@ void main() {
             type = 3u;                     // kOffscreen：整条射线在屏幕外
         } else if (have_hit) {
             // s 是**命中格内的中点** ⇒ floor 回去一定是那个命中格（ssr_math.h::CellAtSigma）。
-            float s = clamp(best, ray.enter, ray.exit);
+            float s = clamp(is_backface ? (best - kSsrBackfaceBias) : best, ray.enter, ray.exit);
             vec2 pos = ray.s0 + ray.dir * s;
             // 双线性取色（2026-11-02，替换原来的 texelFetch 最近邻）：
             // pos 是**连续**的屏幕坐标（像素单位，texel 中心 = +0.5），所以 uv = pos / uRes

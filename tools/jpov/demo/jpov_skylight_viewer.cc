@@ -612,6 +612,35 @@ int RunCaptureSsr(const std::string& out_dir) {
 
     // (b2) 柱体已经是"三源取最厚"（无开关），不再产出 slab0/slab1 对照图。
 
+    // (b6) 背面命中：两个正交 flag 的 A/B（2026-11-13）
+    //   SSR_BACKFACE=1 ⇒ 出四张：掩码 / 交回 env 且压暗 env / 用 SSR 颜色且压暗 / 用 SSR 颜色不压暗。
+    //   SSR_BACKFACE_DIM 可改压暗比（默认 0.25）。
+    if (std::getenv("SSR_BACKFACE") != nullptr) {
+        float dim = 0.25f;
+        if (const char* v = std::getenv("SSR_BACKFACE_DIM")) {
+            dim = std::strtof(v, nullptr);
+        }
+        app.ssr_backface_use_ssr_ = false;
+        app.ssr_backface_dim_ = 1.0f;
+        app.ssr_debug_ = 5;   // 背面命中掩码（先看范围）
+        app.RunOnce(input, winfo, (out_dir + "/ssr_backface_mask.png").c_str());
+        app.ssr_debug_ = 0;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_backface_off.png").c_str());
+
+        app.ssr_backface_use_ssr_ = false;      // 用 env，且把 env 压到 dim
+        app.ssr_backface_dim_ = dim;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_backface_envdim.png").c_str());
+
+        app.ssr_backface_use_ssr_ = true;       // 用 SSR 颜色 × dim
+        app.RunOnce(input, winfo, (out_dir + "/ssr_backface_ssr.png").c_str());
+
+        app.ssr_backface_dim_ = 1.0f;           // 用 SSR 颜色但不压暗
+        app.RunOnce(input, winfo, (out_dir + "/ssr_backface_ssr_full.png").c_str());
+
+        app.ssr_backface_use_ssr_ = false;      // 回默认
+        app.ssr_backface_dim_ = 1.0f;
+    }
+
     // (c) 1:2 + 升采样
     app.ssr_scale_ = 0.5f;
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_half.png").c_str());

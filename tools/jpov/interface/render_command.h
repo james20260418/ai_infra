@@ -738,6 +738,22 @@ struct SsrConfig {
     float grazing_fade_start = 2.0f;   // kappa ≥ 它开始淡出
     float grazing_fade_end = 10.0f;    // kappa ≥ 它完全交给兜底
 
+    // ── 背面命中（2026-11-13）：模块照常给颜色，**处置权在融合层**，两个正交 flag ──
+    // 背面命中 = 射线从某个面的背后穿出（法线朝相机、射线朝屏幕里）。它的颜色是那一格的
+    // **正面色**（背面在屏幕空间里不存在），所以"几何对、颜色近似"。
+    //
+    //   backface_use_ssr：false = 交回 env（**默认，与旧行为逐字节相同**）；true = 用 SSR 颜色。
+    //   backface_dim    ：该像素最终采用的那份颜色的亮度因子，1 = 不压暗（默认）。
+    //  二者正交：
+    //     (false, 1.0) → 等于"不算命中"，画面与没有这条通路时逐字节相同
+    //     (false, 0.2) → 只保留 20% 的 env（旧版 backface_env_scale 的语义）
+    //     (true,  1.0) → 当作正常命中
+    //     (true,  0.25)→ 用背面位置的颜色，整体压暗（本 PR 的推荐档）
+    // A（覆盖率）在这里**不参与**：背面命中一样受"信息压缩比"（掠射 kappa）导致的 A 淡出，
+    // 那条 fallback 无法避免，也不应为背面单独放宽。
+    bool backface_use_ssr = false;
+    float backface_dim = 1.0f;
+
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;

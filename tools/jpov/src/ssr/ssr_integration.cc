@@ -383,6 +383,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     fi.full_w = in.full_w;
     fi.full_h = in.full_h;
     fi.ssr_radiance_tex = outs.radiance_tex;
+    fi.backface_tex = outs.backface_tex;   // 背面命中 flag（两个正交开关在 fp.cfg 里）
     fi.down_w_tex = downsample_.w_tex();
     fi.down_normal_tex = downsample_.normal_tex();
     fi.ssr_w = downsample_.width();
