@@ -33,11 +33,59 @@ void main() {
 inline constexpr const char* kSsrGlslVersion = "#version 330 core\n";
 
 // 两份 FS 共用的头部：uniform + 射线反构/裁剪 + 每格判据。**不带 #version**。
+// ── 共享的「同面判定」数学（2026-11-13）──
+//
+// 这个模型有三处用到（以前各写一份，阈值/形式容易漂）：
+//   ① 体素柱的同面并集（ssr_integration.cc 的 ssr_slab_back pass）
+//   ② 融合层双边升采样的值域项（ssr_fusion.cc）
+//   ③ 掠射淡出里对 Q 的两个视角比较（同一套"预测—残差"思路）
+// 只放与分辨率/取纹理无关的纯函数；调用方自己算好角射线与预测值再传进来。
+inline constexpr const char* kSsrSameSurfaceGlsl = R"glsl(
+float SsrRelResidual(float w_pred, float w_actual) {
+    return abs(w_actual - w_pred) / max(abs(w_pred), 1.0e-9);
+}
+
+float SsrRangeWeight(float rel, float tol) {
+    return 1.0 / (rel + tol);
+}
+
+float SsrNormalWeight(vec3 n0, vec3 n1) {
+    return clamp(dot(n0, n1), 0.0, 1.0);
+}
+
+bool SsrSameSurface(float w_pred, float w_actual, vec3 n0, vec3 n1,
+                    float rel_max, float cos_min) {
+    if (!(w_pred > 0.0) || !(w_actual > 0.0)) {
+        return false;
+    }
+    if (dot(n0, n1) < cos_min) {
+        return false;
+    }
+    return SsrRelResidual(w_pred, w_actual) < rel_max;
+}
+
+// inv_res = 1/res（宿主预算；把每像素的除法换成乘法）
+vec3 SsrCellRay(ivec2 p, vec2 inv_res, float aspect_tan, float tan_half) {
+    vec2 ndc = (vec2(p) + 0.5) * inv_res * 2.0 - 1.0;
+    return vec3(ndc.x * aspect_tan, ndc.y * tan_half, -1.0);
+}
+
+// 平面 (n, P) 与角射线 c 的交点视距；<= 0 = 退化。
+float SsrPlaneViewDist(vec3 n, vec3 P, vec3 c) {
+    float den = dot(n, c);
+    if (abs(den) < 1.0e-7) {
+        return 0.0;
+    }
+    float t = dot(n, P) / den;
+    return (t > 1.0e-4) ? t : 0.0;
+}
+)glsl";
+
 inline constexpr const char* kSsrCommonGlsl = R"glsl(
 // R32F：**w = 1/z_view**（不是窗口深度）。0 = 没有几何（天空/背景）。
 // SSR 内部一律用 w：判据全是"1/d 落在哪个区间"，而 1/d 对屏幕坐标仿射 ⇒ 每格零除法。
 uniform sampler2D uW;
-uniform sampler2D uNormal;    // 反射体视空间法线 .xy（z 由 sqrt 重建）
+uniform sampler2D uNormal;    // 视空间法线 **rgb 三分量**（.a = 掩码：1/0.5/0 无数据）
 // 反射层**逐像素** roughness（R16F，降采样后）。2026-11-02 起材质进属性纹理，
 // 不再有"全场景一套粗糙度"；这里只用于一件事：超过 uRoughnessCutoff 的像素**不发射线**。
 uniform sampler2D uRough;
@@ -49,6 +97,8 @@ uniform float uTanHalf;       // tan(垂直 FOV / 2)
 uniform float uAspect;
 uniform float uMaxDistance;   // 米，射线长度上限（内部再与 uFar 取 min）
 uniform float uThicknessC;    // c = N_px · θ_px（ssr_math.h::DeriveParams）
+uniform float uInvTanHalf;    // 1/uTanHalf（同上；把 1/(d·tan) 变成 w·本体
+uniform sampler2D uSlabBack;  // 同面并集后的柱体 back（w 空间，R32F，SSR 分辨率；无条件由 ②b pass 产出）
 uniform float uMinThickness;  // 米，T 的下限
 uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
@@ -63,6 +113,7 @@ struct SsrRay {
     vec2 dir;
     vec3 d3;          // 视空间单位方向（朝向判据用；ssr_math.h::ScreenRay::dir3）
     float span;
+    float inv_span;   // 1/span（预算好：SsrWAt 每格调用两次，去掉内层两次除法）
     float w0;
     float w1;
     float enter;
@@ -96,7 +147,8 @@ float SsrRoughnessAt(ivec2 mir) {
 // σ 处的 1/d。**只在这里做插值，永远不要在 d 空间插值**（§3.1）。
 // ssr_math.h::WAt
 float SsrWAt(SsrRay ray, float sigma) {
-    float t = (ray.span > 0.0) ? sigma / ray.span : 0.0;
+    // span 在 SsrBuildRay 里已校验 > 1e-6，inv_span 一定有限 ⇒ 内层无除法。
+    float t = sigma * ray.inv_span;
     return ray.w0 + (ray.w1 - ray.w0) * t;
 }
 
@@ -104,8 +156,10 @@ float SsrWAt(SsrRay ray, float sigma) {
 //
 //   d_hi ≥ z      ⟺  w_min ≤ w_cell
 //   d_lo ≤ z + T  ⟺  w_max·(1+c) ≥ w_cell      （T = c·z ⇒ 1/(z+T) = z⁻¹/(1+c)）
-// 两条都是比较/乘法，**没有除法** —— 这是 w 空间重构的全部收益。
-bool SsrCellHit(float w_in, float w_out, float w_cell) {
+// 老模型（只有 c·T 时）两条都是比较/乘法、内层零除法；2026-11-13 加入柱体 back 后
+// 每格只剩 1 次除法（见下面的代数改写），其余仍是比较。
+// cell 是本格坐标：要取那一格的柱体 back。
+bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
     float w_min = min(w_in, w_out);
     float w_max = max(w_in, w_out);
     if (!(w_min > 0.0) || !(w_cell > 0.0)) {
@@ -114,11 +168,25 @@ bool SsrCellHit(float w_in, float w_out, float w_cell) {
     if (w_min > w_cell) {
         return false;                    // 整段在柱子前方
     }
-    // 退化分支：厚度下限生效（z 极近）。正常相机永不进入。
-    if (!(w_cell <= uThicknessC / uMinThickness)) {
-        return w_max >= 1.0 / (1.0 / w_cell + uMinThickness);
+    // ── 体素柱（2026-11-13 定稿）：front = w_cell（真实最近深度），back 取三者最厚 ──
+    //   ① 同面并集（uSlabBack）      ② c·T：back = w/(1+c)
+    //   ③ 全局最小厚度 t_min：back = 1/(1/w + t_min)
+    // 三者都只往远处扩 ⇒ 取 min（w 越小越远）。区间 [w_min,w_max] ∩ [back,w_cell] 即命中。
+    float back = texelFetch(uSlabBack, cell, 0).r;
+    // 三源取最厚：同面并集 / c·T / 全局最小厚度。三者都只往远处扩 ⇒ back 取 min。
+    //
+    // 2026-11-13：判据**交叉相乘**写成比较，内层彻底无除法（原来每格 3 次）。
+    //   w_max ≥ back_ct   ⟺ w_max·(1+c) ≥ w_cell            （T = c·z）
+    //   w_max ≥ back_tmin ⟺ w_max·(1 + t·w_cell) ≥ w_cell   （1/(1/w+t) = w/(1+t·w)，两边乘正数）
+    //   w_max ≥ back_slab ⟺ 直接比较（纹理值）
+    // 三者取"或"（任意一源认为命中即命中），与"back 取 min 后比较"完全等价。
+    if (back > 0.0 && w_max >= back) {
+        return true;
     }
-    return w_max * (1.0 + uThicknessC) >= w_cell;
+    if (w_max * (1.0 + uThicknessC) >= w_cell) {
+        return true;
+    }
+    return w_max * (1.0 + uMinThickness * w_cell) >= w_cell;
 }
 
 // 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
@@ -170,17 +238,19 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
         return false;
     }
 
-    // 每点只做 1 次除法（原来两个分量各除一次，其中 uAspect 与 tanHalf 是可以提出来的常量）。
-    float inv0 = 1.0 / (d0 * uTanHalf);
-    float inv1 = 1.0 / (d1 * uTanHalf);
+    // 2026-11-13：inv = 1/(d·tan) = w·(1/tan) —— 复用已算的 w0/w1，两条除法变乘法。
+    float w0_ = 1.0 / d0;
+    float w1_ = 1.0 / d1;
+    float inv0 = w0_ * uInvTanHalf;
+    float inv1 = w1_ * uInvTanHalf;
     vec2 nrm0 = vec2(P.x / uAspect, P.y) * inv0;
     vec2 nrm1 = vec2(Q.x / uAspect, Q.y) * inv1;
     vec2 s0 = (nrm0 * 0.5 + 0.5) * uRes;
     vec2 s1 = (nrm1 * 0.5 + 0.5) * uRes;
 
     ray.s0 = s0;
-    ray.w0 = 1.0 / d0;
-    ray.w1 = 1.0 / d1;
+    ray.w0 = w0_;
+    ray.w1 = w1_;
     // R 已经是单位向量：reflect(I, N) 在 |I| = |N| = 1 时保长度，因此**不再 normalize**
     //（一次 rsqrt 省下来；四个 lane 各建一次射线 ⇒ 每像素省 4 次）。
     ray.d3 = R;   // 朝向判据用（ssr_math.h::BuildScreenRay 同一行）
@@ -190,7 +260,8 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     if (!(ray.span > 1.0e-6)) {
         return false;
     }
-    ray.dir = delta / ray.span;
+    ray.inv_span = 1.0 / ray.span;   // 只在这里除一次；SsrWAt 用乘法
+    ray.dir = delta * ray.inv_span;
 
     // 矩形裁剪（Liang–Barsky），结果用 σ 表示。
     float t0 = 0.0;
@@ -280,19 +351,20 @@ void main() {
     float tdx = 1.0e30;
     float tmy = 1.0e30;
     float tdy = 1.0e30;
+    // 2026-11-13：先算 1/dir，再用乘法（原来每个分量多除一次）。
     if (ray.dir.x > 1.0e-9) {
         tdx = 1.0 / ray.dir.x;
-        tmx = sigma + (float(cell.x + 1) - pos.x) / ray.dir.x;
+        tmx = sigma + (float(cell.x + 1) - pos.x) * tdx;
     } else if (ray.dir.x < -1.0e-9) {
         tdx = -1.0 / ray.dir.x;
-        tmx = sigma + (float(cell.x) - pos.x) / ray.dir.x;
+        tmx = sigma + (pos.x - float(cell.x)) * tdx;
     }
     if (ray.dir.y > 1.0e-9) {
         tdy = 1.0 / ray.dir.y;
-        tmy = sigma + (float(cell.y + 1) - pos.y) / ray.dir.y;
+        tmy = sigma + (float(cell.y + 1) - pos.y) * tdy;
     } else if (ray.dir.y < -1.0e-9) {
         tdy = -1.0 / ray.dir.y;
-        tmy = sigma + (float(cell.y) - pos.y) / ray.dir.y;
+        tmy = sigma + (pos.y - float(cell.y)) * tdy;
     }
 
     // 起点格跳过：只在"起点确实落在反射体表面上"（σ=0）的那一段需要，否则射线会在
@@ -335,7 +407,7 @@ void main() {
             continue;
         }
         // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell) &&
+        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), w_cell, cell) &&
             SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
@@ -358,14 +430,18 @@ void main() {
 // resolve：T² 取 min → 命中格 → 取色 + ray_ratio + 类型。
 //
 // 输出（三样，紧凑排列）：
-//   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = ray_ratio
+//   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = **A（置信度）**
+//                                 命中 = 1（掠射淡出时 < 1）、非命中 = 0。
+//                                 注意 a ≠ ray_ratio（后者只是预算占用，供调试档使用）
 //   location 1  FragType      R8UI     0=None 1=Hit 2=Sky 3=Offscreen 4=Exhausted
 //   location 2  FragHitS      R32F     调试：命中位置的像素弧长（SSR_DEBUG 时才有）
 //
-// A（"有没有可用结果"）不再单独占通道 —— 由 type == kHit 派生。
+// A（"结果有多可信"）走 radiance.a：2026-11-13 起由 resolve 写入（掠射淡出乘在这里）。
 inline constexpr const char* kSsrResolveFs = R"glsl(
 uniform sampler2D uSlice;
 uniform sampler2D uColor;
+uniform float uGrazingFadeStart;   // kappa 起淡
+uniform float uGrazingFadeEnd;     // kappa 全淡
 
 layout(location = 0) out vec4 FragRadiance;
 layout(location = 1) out uint FragType;
@@ -388,6 +464,9 @@ void main() {
     uint type = 0u;            // kNone
     vec3 rgb = vec3(0.0);
     float ray_ratio = 0.0;
+    // 输出给滤波层的 **A**（覆盖率/置信度）：命中=1，掠射淡出时 <1，非命中=0。
+    // 注意：A ≠ ray_ratio（后者是预算占用率，只用于调试）。
+    float a_out = 0.0;
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
@@ -412,6 +491,40 @@ void main() {
             ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
             hit_s = s;
             type = 1u;                     // kHit
+            a_out = 1.0;
+
+            // ── 掠射淡出（2026-11-13）──
+            // kappa = cos(θ_p)/cos(θ_m)：主视图看 Q 有多掠射 vs 镜像视图看 Q 有多正。
+            // kappa 大 ⇒ 需要的源信息在屏幕空间里根本不存在（缝/极掠射）⇒ A 淡出、交回 env。
+            // **只动 A**：颜色/命中/距离都不变，所以下游（滤波/融合）逻辑不受影响。
+            if (uGrazingFadeEnd > uGrazingFadeStart) {
+                ivec2 hcell = clamp(ivec2(pos), ivec2(0), ivec2(uRes) - 1);
+                float w_hit = SsrWAt(ray, s);
+                vec3 nq = SsrNormalOf(texelFetch(uNormal, hcell, 0));
+                if (w_hit > 0.0 && dot(nq, nq) > 0.5) {
+                    float d_hit = 1.0 / w_hit;
+                    vec2 ndc_h = pos / uRes * 2.0 - 1.0;
+                    vec3 Qv = vec3(ndc_h.x * uAspect * uTanHalf, ndc_h.y * uTanHalf, -1.0) * d_hit;
+                    // 反射体像素的视空间位置与法线（P 就是本像素）
+                    float w_p = texelFetch(uW, mir, 0).r;
+                    if (w_p > 0.0) {
+                        vec3 np = SsrNormalOf(texelFetch(uNormal, mir, 0));
+                        vec2 uv_p = (vec2(mir) + 0.5) / uRes;
+                        vec2 ndc_p = uv_p * 2.0 - 1.0;
+                        vec3 Pv = vec3(ndc_p.x * uAspect * uTanHalf, ndc_p.y * uTanHalf, -1.0) / w_p;
+                        // 眼睛对反射平面的镜像位置（相机在原点）
+                        vec3 eye_m = 2.0 * dot(np, Pv) * np;
+                        vec3 Vp = normalize(Qv);
+                        vec3 Vm = normalize(Qv - eye_m);
+                        float cp = abs(dot(nq, Vp));
+                        float cm = abs(dot(nq, Vm));
+                        // kappa = 镜像视图的前缩 / 主视图的前缩。>1 表示"镜像里看得更大，
+                        // 但屏幕里只存了一条缝" ⇒ 需要凭空放大。（cp→0 时发散，正是最坏情形。）
+                        float kappa = cm / max(cp, 1.0e-3);
+                        a_out = 1.0 - smoothstep(uGrazingFadeStart, uGrazingFadeEnd, kappa);
+                    }
+                }
+            }
         } else {
             // 没命中：按**灭点**分类（旧版按 ray.exits 分，语义是反的）。
             vec2 vp;
@@ -425,7 +538,7 @@ void main() {
             }
         }
     }
-    FragRadiance = vec4(rgb, ray_ratio);
+    FragRadiance = vec4(rgb, a_out);
     FragType = type;
 #ifdef SSR_DEBUG
     FragHitS = hit_s;

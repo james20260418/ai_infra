@@ -42,12 +42,13 @@ namespace {
 constexpr int kTexUnitMarchDepth = 0;
 constexpr int kTexUnitMarchNormal = 1;
 constexpr int kTexUnitMarchRough = 2;
+constexpr int kTexUnitMarchSlab = 3;
 constexpr int kTexUnitResolveSlice = 0;
 constexpr int kTexUnitResolveDepth = 1;
 constexpr int kTexUnitResolveNormal = 2;
 constexpr int kTexUnitResolveColor = 3;
 constexpr int kTexUnitResolveRough = 4;
-constexpr int kTexUnitSize = 5;
+constexpr int kTexUnitSize = 6;
 
 bool IsValidTile(int tile) {
     return tile == 1 || tile == 2 || tile == 4 || tile == 8;
@@ -212,6 +213,9 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK(initialized_) << "SsrRenderer::Render 前必须先 Init";
     CHECK_NE(in.color_tex, 0u) << "SsrInputs::color_tex 未设置";
     CHECK_NE(in.w_tex, 0u) << "SsrInputs::w_tex 未设置（w = 1/z）";
+    // 2026-11-13 起柱体是命中判据的一部分（三源取最厚）⇒ back 纹理是**必需输入**，
+    // 不再"可选"。缺了会采到未绑定纹理 → 结果不可预期，所以这里直接炸。
+    CHECK_NE(in.slab_back_tex, 0u) << "SsrInputs::slab_back_tex 未设置（同面并集柱体）";
     CHECK_NE(in.normal_tex, 0u) << "SsrInputs::normal_tex 未设置";
     CHECK_NE(in.rough_tex, 0u) << "SsrInputs::rough_tex 未设置（逐像素 roughness）";
     CHECK_GT(in.width, 0) << "SsrInputs::width 未设置";
@@ -288,7 +292,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
     prev_cull = glIsEnabled(GL_CULL_FACE);
     prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0, 0};
+    GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0, 0, 0};
     for (int u = 0; u < kTexUnitSize; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind[u]);
@@ -333,6 +337,8 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uAspect", in.aspect);
         set1f(prog, "uMaxDistance", in.max_distance_m);
         set1f(prog, "uThicknessC", derived.thickness_coefficient);
+        // 预算量（2026-11-13）：内层热路径上的两处除法挪到宿主。
+        set1f(prog, "uInvTanHalf", 1.0f / std::max(in.tan_half_fov_y, 1.0e-6f));
         set1f(prog, "uMinThickness", in.min_thickness_m);
         set1f(prog, "uSentinel", ssr::kNoHit);
         set1i(prog, "uTile", in.tile_size);
@@ -348,9 +354,13 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glBindTexture(GL_TEXTURE_2D, in.normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
+    // 可选的同面并集柱体 back（2026-11-12）：off 时绑 0，着色器走老的 c·T 判据。
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchSlab);
+    glBindTexture(GL_TEXTURE_2D, in.slab_back_tex);
     set1i(prog_march_, "uW", kTexUnitMarchDepth);
     set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
     set1i(prog_march_, "uRough", kTexUnitMarchRough);
+    set1i(prog_march_, "uSlabBack", kTexUnitMarchSlab);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── ② resolve：W×H，T² 取 min → 命中格颜色 + A ──
@@ -374,6 +384,12 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveRough);
     glBindTexture(GL_TEXTURE_2D, in.rough_tex);
     set1i(prog_resolve, "uRough", kTexUnitResolveRough);
+    // 掠射淡出（2026-11-13）：只改 resolve 输出的 A，march 不受影响。
+    // 钳位到 [0, 64]：end <= start 由着色器解释为"关闭"（面板把它拖到很大即可）。
+    const float gf0 = std::min(std::max(in.grazing_fade_start, 0.0f), 64.0f);
+    const float gf1 = std::min(std::max(in.grazing_fade_end, 0.0f), 64.0f);
+    set1f(prog_resolve, "uGrazingFadeStart", gf0);
+    set1f(prog_resolve, "uGrazingFadeEnd", gf1);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── 恢复调用方的状态 ──

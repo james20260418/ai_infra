@@ -199,11 +199,12 @@ void main() {
             // 最小深度，1:1 时格就是一个 texel ⇒ 扩展量必须为 0（否则 1:1 变回归）。
             float w_center = w_hi + dot(gw, dpx);
             float w_pred = w_center + 0.5 * float(uScale - 1) * (abs(gw.x) + abs(gw.y));
-            float rel = abs(w_lo - w_pred) / max(abs(w_pred), 1.0e-6);
-            float wr = 1.0 / (rel + uRangeDepthRatio);
+            // 共享判据（2026-11-13）：残差与值域权重只有一份实现。
+            float rel = SsrRelResidual(w_pred, w_lo);
+            float wr = SsrRangeWeight(rel, uRangeDepthRatio);
             bool hard_reject = (rel > uHardCut);   // 数量级不同 ⇒ 真跨表面，硬拒（挡剪影串色）
             // 法线：连续权。0 = 正交（地面 vs 墙），1 = 同向。
-            wr *= clamp(dot(n_hi, n_lo), 0.0, 1.0);
+            wr *= SsrNormalWeight(n_hi, n_lo);
 
             // 空间权 × 值域权；**非硬拒**的再抬一个下限，保证 Σw > 0（不出孔洞）。
             float w = ws * wr;
@@ -290,7 +291,7 @@ void SsrFusion::Init(ShaderManager* shader_mgr) {
     shader_mgr_ = shader_mgr;
     // 合成的 FS = 环境镜面（GLSL 只有一份，见 env_specular.h）+ 本模块主体。
     const std::string composite_src =
-        std::string(kSsrGlslVersion) + kEnvSpecularGlsl + kSsrCompositeFs;
+        std::string(kSsrGlslVersion) + kSsrSameSurfaceGlsl + kEnvSpecularGlsl + kSsrCompositeFs;
     prog_ = shader_mgr_->GetOrCreate("ssr_composite",
                                      {kSsrFullscreenVs, composite_src.c_str(), {}});
     CHECK_NE(prog_, 0u);

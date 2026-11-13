@@ -574,6 +574,17 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.view_.phi   = 0.21;   // ≈12°
     app.view_.theta = 0.6;
     app.view_.R     = 45.0;
+    // SSR_CAM="px,py,pz"：按 HUD 的相机位置反解 phi/theta/R（目标恒为原点）。
+    if (std::getenv("SSR_CAM") != nullptr) {
+        float px = 0.0f;
+        float py = 0.0f;
+        float pz = 0.0f;
+        std::sscanf(std::getenv("SSR_CAM"), "%f,%f,%f", &px, &py, &pz);
+        const double R = std::sqrt(double(px) * px + double(py) * py + double(pz) * pz);
+        app.view_.R = R;
+        app.view_.phi = std::asin(py / R);
+        app.view_.theta = std::atan2(px, pz);
+    }
 
     // (a) 关 SSR
     app.SetSsr(false);
@@ -584,6 +595,22 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.ssr_scale_ = 1.0f;
     app.ssr_debug_ = 0;
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_1x.png").c_str());
+
+    // (b3) 掠射淡出 A/B（2026-11-13）
+    if (std::getenv("SSR_GRAZING") != nullptr) {
+        if (const char* v = std::getenv("SSR_GRAZING_START")) {
+            app.ssr_grazing_start_ = std::strtof(v, nullptr);
+        }
+        if (const char* v = std::getenv("SSR_GRAZING_END")) {
+            app.ssr_grazing_end_ = std::strtof(v, nullptr);
+        }
+        app.RunOnce(input, winfo, (out_dir + "/ssr_grazing_on_1x.png").c_str());
+        app.ssr_grazing_start_ = 1.0e9f;   // 关闭 = end <= start
+        app.ssr_grazing_end_ = 1.0e9f;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_grazing_off_1x.png").c_str());
+    }
+
+    // (b2) 柱体已经是"三源取最厚"（无开关），不再产出 slab0/slab1 对照图。
 
     // (c) 1:2 + 升采样
     app.ssr_scale_ = 0.5f;

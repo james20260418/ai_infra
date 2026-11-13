@@ -717,6 +717,27 @@ struct SsrConfig {
     float max_distance_m = 1000.0f;
     int max_ray_pixels = 220;
 
+    // ── 体素柱（2026-11-13 定稿：无开关，全部同时生效，都只往"厚"了加）──
+    // back = min( 同面并集,  c·T 的 far 端,  全局最小厚度 t_min 的 far 端 )
+    //   · 同面并集：front = 该格真实 w，back 从同面邻居的 front 取 min（见 ssr_integration）
+    //   · c·T：T = thickness_pixels · θ_px · z（老的线性模型，仍在，作为下限之一）
+    //   · t_min：min_thickness_m（绝对下限，近处防零厚度）
+    // 三者都是"往更远"扩（w 更小），取 min 即"取最厚"。
+    float slab_min_thickness = 0.01f;   // 同面并集的基线相对厚度（防零厚度自交），1% ≈ 6 px @N=1
+    float slab_gate_rel = 0.02f;        // 同面判定的深度残差门槛（相对）
+    float slab_gate_cos = 0.94f;        // 同面判定的法线夹角门槛（cos ≈ 20°）
+
+
+    // 掠射淡出（2026-11-13）：镜像视图与主视图对被反射面（Q）的前缩比差太多时，
+    // 屏幕空间里根本没有足够信息（典型：桌面底面在主视图只剩一条缝，镜像视图却近乎正对）。
+    //   kappa = cos(θ_primary) / cos(θ_mirror)   （θ = Q 法线 × 视方向）
+    //   1 = 两个视角一样（不淡出）；越大 = 越需要"凭空放大"
+    // A 用 smoothstep 从 fade_start 淡到 fade_end（kappa 越大 A 越接近 0，交回 env 兜底）。
+    // 关掉时逐字节等于旧行为。
+    // 只有两个阈值（2026-11-13 定稿）：想关就把 end 设得比 start 小（或都设很大）。
+    float grazing_fade_start = 2.0f;   // kappa ≥ 它开始淡出
+    float grazing_fade_end = 10.0f;    // kappa ≥ 它完全交给兜底
+
     // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;
