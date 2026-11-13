@@ -198,6 +198,17 @@ struct SsrInputs {
     float grazing_fade_start = 2.0f;
     float grazing_fade_end = 10.0f;
 
+    // A 的三个淡出（2026-11-13）：也只改 A（覆盖率），颜色/命中/距离全不变。
+    //   ① fade_budget_pixels   ：命中点离 march 预算（max_ray_pixels）还剩多少
+    //   ② fade_edge_pixels     ：**反射体像素 P** 离画面边框多远
+    //   ③ fade_hit_edge_pixels ：**命中点 Q** 离画面边框多远
+    // 单位是 **SSR 像素**（接入层把"全分辨率屏幕像素"的配置按 1/N 折算下来）；
+    // 0 = 关闭该条。三条相乘，与掠射淡出（无量纲 kappa）也是相乘关系。
+    // 语义与曲线见 ssr_math.h 的 ②.5 节，必须与 ssr_shader.h 逐字同形式。
+    float fade_budget_pixels = 0.0f;
+    float fade_edge_pixels = 0.0f;
+    float fade_hit_edge_pixels = 0.0f;
+
     // 发射线门槛 [0,1]。1 = 从不跳过（等价于 2026-11-02 之前的行为）。
     // 业界同口径：FidelityFX SSSR 的 tile classification 对高粗糙像素直接不发射线，
     // 交回预滤波的 environment probe。

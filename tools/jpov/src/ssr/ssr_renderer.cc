@@ -244,6 +244,14 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK(IsValidTile(in.tile_size))
         << "SsrInputs::tile_size 必须是 1/2/4/8（tile 须为偶数且是 2 的幂，"
            "否则 2×2 quad 会跨 tile，隐式 LOD 出错），得到 " << in.tile_size;
+    // 三个淡出带宽：允许 0（= 关闭），但负值/NaN 一律炸 —— NaN 会让淡出静默恒 0。
+    CHECK(in.fade_budget_pixels >= 0.0f)
+        << "SsrInputs::fade_budget_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.fade_budget_pixels;
+    CHECK(in.fade_edge_pixels >= 0.0f)
+        << "SsrInputs::fade_edge_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.fade_edge_pixels;
+    CHECK(in.fade_hit_edge_pixels >= 0.0f)
+        << "SsrInputs::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭），得到 "
+        << in.fade_hit_edge_pixels;
 
     // 输入尺寸必须与声明的分辨率一致（不一致会静默采到别的像素）。
     CHECK_EQ(TextureWidth(in.color_tex), in.width)
@@ -403,6 +411,10 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     const float gf1 = std::min(std::max(in.grazing_fade_end, 0.0f), 64.0f);
     set1f(prog_resolve, "uGrazingFadeStart", gf0);
     set1f(prog_resolve, "uGrazingFadeEnd", gf1);
+    // A 的三个淡出（2026-11-13）：只改 resolve 输出的 A。单位已经是 SSR 像素。
+    set1f(prog_resolve, "uFadeBudget", in.fade_budget_pixels);
+    set1f(prog_resolve, "uFadeEdge", in.fade_edge_pixels);
+    set1f(prog_resolve, "uFadeHitEdge", in.fade_hit_edge_pixels);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ── 恢复调用方的状态 ──

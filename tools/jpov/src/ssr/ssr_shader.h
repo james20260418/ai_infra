@@ -485,6 +485,37 @@ uniform sampler2D uSlice;
 uniform sampler2D uColor;
 uniform float uGrazingFadeStart;   // kappa 起淡
 uniform float uGrazingFadeEnd;     // kappa 全淡
+// A 的三个淡出（2026-11-13）。单位一律 **SSR 像素**（接入层把屏幕像素 / N）。
+// 0 = 关闭该条；三条都是乘法，互不干扰。语义与曲线见 ssr_math.h 的 ②.5 节。
+uniform float uFadeBudget;         // ① 命中点离 march 预算还有多远（P→Q = s）
+uniform float uFadeEdge;           // ② 反射体像素 P 贴边
+uniform float uFadeHitEdge;        // ③ 命中点 Q 贴边
+
+// 剩余可用距离 → 权重。width ≤ 0 ⇒ 1（关闭）。
+float SsrFadeWeight(float remain_px, float width_px) {
+    if (!(width_px > 0.0)) {
+        return 1.0;
+    }
+    float t = clamp(remain_px / width_px, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// 到最近画面边的像素距离（uRes = SSR 栅格尺寸）。
+float SsrDistToEdge(vec2 p) {
+    return min(min(p.x, uRes.x - p.x), min(p.y, uRes.y - p.y));
+}
+
+// 命中点 s 处的 A（ssr_math.h::HitConfidence 的逐字镜像）。
+float SsrHitConfidence(SsrRay ray, float s) {
+    float a = SsrFadeWeight(uMaxRayPixels - s, uFadeBudget);
+    if (uFadeEdge > 0.0) {
+        a *= SsrFadeWeight(SsrDistToEdge(ray.s0), uFadeEdge);
+    }
+    if (uFadeHitEdge > 0.0) {
+        a *= SsrFadeWeight(SsrDistToEdge(ray.s0 + ray.dir * s), uFadeHitEdge);
+    }
+    return a;
+}
 
 layout(location = 0) out vec4 FragRadiance;
 layout(location = 1) out uint FragType;
@@ -536,7 +567,8 @@ void main() {
             rgb = texture(uColor, pos / uRes).rgb;
             hit_s = s;
             type = 1u;                     // kHit
-            a_out = 1.0;
+            // A 的三个淡出（预算 / P 贴边 / Q 贴边）在这一行定稿：s 就是 P→Q 的像素距离。
+            a_out = SsrHitConfidence(ray, s);
 
             // ── 掠射淡出（2026-11-13）──
             // kappa = cos(θ_p)/cos(θ_m)：主视图看 Q 有多掠射 vs 镜像视图看 Q 有多正。
@@ -566,7 +598,8 @@ void main() {
                         // kappa = 镜像视图的前缩 / 主视图的前缩。>1 表示"镜像里看得更大，
                         // 但屏幕里只存了一条缝" ⇒ 需要凭空放大。（cp→0 时发散，正是最坏情形。）
                         float kappa = cm / max(cp, 1.0e-3);
-                        a_out = 1.0 - smoothstep(uGrazingFadeStart, uGrazingFadeEnd, kappa);
+                        // 乘上去（不是赋值）：上面三个淡出已经写进 a_out 了。
+                        a_out *= 1.0 - smoothstep(uGrazingFadeStart, uGrazingFadeEnd, kappa);
                     }
                 }
             }

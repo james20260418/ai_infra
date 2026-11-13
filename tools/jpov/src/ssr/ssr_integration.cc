@@ -295,6 +295,13 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     CHECK(IsValidScale(in.cfg.resolution_scale))
         << "SsrConfig::resolution_scale 只支持 1/N（N = 1..4，即 1.0 / 0.5 / 0.3333 / 0.25），得到 "
         << in.cfg.resolution_scale;
+    CHECK(in.cfg.fade_budget_pixels >= 0.0f)
+        << "SsrConfig::fade_budget_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.cfg.fade_budget_pixels;
+    CHECK(in.cfg.fade_edge_pixels >= 0.0f)
+        << "SsrConfig::fade_edge_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.cfg.fade_edge_pixels;
+    CHECK(in.cfg.fade_hit_edge_pixels >= 0.0f)
+        << "SsrConfig::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭），得到 "
+        << in.cfg.fade_hit_edge_pixels;
 
     const int scale = static_cast<int>(std::lround(1.0f / in.cfg.resolution_scale));
 
@@ -366,6 +373,12 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.debug_reason = false;
     si.grazing_fade_start = in.cfg.grazing_fade_start;
     si.grazing_fade_end = in.cfg.grazing_fade_end;
+    // 三个淡出带宽：配置用**全分辨率屏幕像素**（人对"留 24 像素缓冲带"有直觉），
+    // 模块吃的是 SSR 像素 ⇒ 在这里 /N。改 N 时观感（屏幕上的带宽）保持不变。
+    const float fade_scale = 1.0f / static_cast<float>(scale);
+    si.fade_budget_pixels = in.cfg.fade_budget_pixels * fade_scale;
+    si.fade_edge_pixels = in.cfg.fade_edge_pixels * fade_scale;
+    si.fade_hit_edge_pixels = in.cfg.fade_hit_edge_pixels * fade_scale;
     si.slab_back_tex = slab_tex_;
     const SsrOutputs& outs = ssr_.Render(si);
 

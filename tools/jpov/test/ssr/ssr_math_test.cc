@@ -16,6 +16,8 @@
 //   6. MinPicksEarliest        两处都命中时必须取**早**的那个（负向：取 max 会拿到远的）
 //   7. DerivedParams            c = N_px·θ_px / L / steps / 浪费告警阈值
 //   8. DegenerateInputs         near→0 的 NaN 守卫、法线越界归一化、近平面裁剪、出屏
+//   9. FadeCurve / FadeBudget / FadeEdgeP / FadeEdgeQ / FadeDefaults
+//                              A 的三个淡出（预算 / P 贴边 / Q 贴边）与"全 0 = 恒 1"
 
 #include <cmath>
 #include <random>
@@ -34,6 +36,10 @@ using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
 using jpov::ssr::DerivedParams;
+using jpov::ssr::DistToScreenEdge;
+using jpov::ssr::FadeParams;
+using jpov::ssr::FadeWeight;
+using jpov::ssr::HitConfidence;
 using jpov::ssr::HitFacesRay;
 using jpov::ssr::kNoHit;
 using jpov::ssr::MarchSegment;
@@ -792,3 +798,146 @@ TEST(SsrMath, UpsampleScaleOneIsIdenticalToOldRule) {
 }
 
 }  // namespace
+
+// ───────────────────── 9. A 的三个淡出（2026-11-13）─────────────────────
+//
+// 这三条都是"遮丑"性质的乘子：A = fade(预算) · fade(P 贴边) · fade(Q 贴边)。
+// 断言必须能区分"用了正确的量"和"用了一个看起来差不多的量" —— 所以每个 TEST
+// 都顺手把错误实现算一遍，断言它给出**不同**的结果（否则这些测试等于没测）。
+
+// 直接构造一条屏幕空间射线（不经过 3D：这里测的是纯屏幕空间的判据）。
+jpov::ssr::ScreenRay MakeScreenRay(Vec2 s0, Vec2 dir, float span, Vec2 res) {
+    jpov::ssr::ScreenRay ray;
+    ray.s0 = s0;
+    ray.dir = dir;
+    ray.span = span;
+    ray.w0 = 1.0f / 10.0f;
+    ray.w1 = 1.0f / 12.0f;
+    ray.sigma_enter = 0.0f;
+    ray.sigma_exit = span;
+    ray.dir3 = Vec3{0.0f, 0.0f, 1.0f};
+    ray.res = res;
+    return ray;
+}
+
+TEST(SsrMath, FadeCurve) {
+    // 关闭：width ≤ 0 ⇒ 恒 1（**不是**"衰减 0 像素"）。
+    EXPECT_FLOAT_EQ(FadeWeight(0.0f, 0.0f), 1.0f);
+    EXPECT_FLOAT_EQ(FadeWeight(-5.0f, -1.0f), 1.0f);
+    // 剩余量 ≥ 带宽 ⇒ 1；剩余 0 ⇒ 0。
+    EXPECT_FLOAT_EQ(FadeWeight(50.0f, 50.0f), 1.0f);
+    EXPECT_FLOAT_EQ(FadeWeight(80.0f, 50.0f), 1.0f);
+    EXPECT_FLOAT_EQ(FadeWeight(0.0f, 50.0f), 0.0f);
+    // 负剩余（已经超预算，理论上不该出现）也被 clamp 到 0，而不是变负。
+    EXPECT_FLOAT_EQ(FadeWeight(-30.0f, 50.0f), 0.0f);
+    // smoothstep 中点 = 0.5；四分之一点必须明显不同于线性斜坡。
+    EXPECT_FLOAT_EQ(FadeWeight(25.0f, 50.0f), 0.5f);
+    const float t = 0.25f;
+    const float linear = t;                        // 线性斜坡的错误实现
+    const float smooth = t * t * (3.0f - 2.0f * t); // = 0.15625
+    EXPECT_NEAR(FadeWeight(12.5f, 50.0f), smooth, 1.0e-6f);
+    // 负向：拿**实现**与线性斜坡比（只比两个常量是恒真断言，测不到代码）。
+    EXPECT_GT(std::fabs(FadeWeight(12.5f, 50.0f) - linear), 0.09f);
+}
+
+TEST(SsrMath, FadeBudgetUsesMaxRayPixelsNotSpan) {
+    // 掠射场景的原型：射线在屏幕上只走了 span=120 像素，但预算 max_ray=400。
+    // 若误用 min(max_ray, span)，命中点会被大面积误压（2026-11-06 实测覆盖区 91% 变淡）。
+    const jpov::ssr::ScreenRay ray =
+        MakeScreenRay(Vec2{40.0f, 90.0f}, Vec2{1.0f, 0.0f}, /*span=*/120.0f, Vec2{320.0f, 180.0f});
+    FadeParams fade;
+    fade.budget_px = 50.0f;
+
+    // σ=100：离**预算**还有 300 ⇒ 完全不衰减。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 100.0f, /*max_ray_pixels=*/400.0f, fade), 1.0f);
+    // 负向对照：若把分母换成 min(max_ray, span)=120，剩余只有 20 ⇒ 被压到 ~0.35。
+    const float wrong = FadeWeight(120.0f - 100.0f, fade.budget_px);
+    EXPECT_LT(wrong, 0.4f);
+    EXPECT_GT(std::fabs(wrong - 1.0f), 0.5f);
+
+    // 真的接近预算时才开始压：σ=380 ⇒ 剩 20/50。
+    const float near_budget = HitConfidence(ray, 380.0f, 400.0f, fade);
+    EXPECT_NEAR(near_budget, FadeWeight(20.0f, 50.0f), 1.0e-6f);
+    EXPECT_LT(near_budget, 0.4f);
+    // σ = 预算 ⇒ 0（不是负、不是 1）。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 400.0f, 400.0f, fade), 0.0f);
+
+    // 单调：越接近预算 A 越小（防止把 (max_ray − σ) 写成 (σ − max_ray)）。
+    float prev = 2.0f;
+    for (float sigma = 300.0f; sigma <= 400.0f; sigma += 20.0f) {
+        const float a = HitConfidence(ray, sigma, 400.0f, fade);
+        EXPECT_LE(a, prev);
+        prev = a;
+    }
+}
+
+TEST(SsrMath, FadeEdgePTracksReflectorPixel) {
+    // P 贴左边框 5 像素；Q 在画面正中 ⇒ 只有 ② 打开时 A 才被压。
+    const jpov::ssr::ScreenRay ray =
+        MakeScreenRay(Vec2{5.0f, 90.0f}, Vec2{1.0f, 0.0f}, /*span=*/100.0f, Vec2{320.0f, 180.0f});
+    FadeParams fade;
+    fade.reflector_edge_px = 40.0f;
+
+    const float a = HitConfidence(ray, 50.0f, /*max_ray_pixels=*/1000.0f, fade);
+    EXPECT_NEAR(a, FadeWeight(5.0f, 40.0f), 1.0e-6f);
+    EXPECT_LT(a, 0.05f);
+
+    // 同一位置、只开 ③（Q 贴边）：Q = (55,90) 离边很远 ⇒ 必须回到 1。
+    // 负向：把 ③ 也写成用 ray.s0，这个断言会红（说明两条判据被混成一条）。
+    FadeParams only_hit_edge;
+    only_hit_edge.hit_edge_px = 40.0f;
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 50.0f, 1000.0f, only_hit_edge), 1.0f);
+
+    // 到最近边的距离：正中 = 90（上下边更近），而不是到左/右边。
+    EXPECT_FLOAT_EQ(DistToScreenEdge(Vec2{160.0f, 90.0f}, ray), 90.0f);
+}
+
+TEST(SsrMath, FadeEdgeQTracksHitPoint) {
+    // P 在画面正中（离任何边都 ≥ 90），Q 贴右边框 5 像素 ⇒ 只有 ③ 打开时必须被压。
+    // 这条是"②和③不是一个东西"的正面证据（只开 ② 时这里是 1）。
+    const jpov::ssr::ScreenRay ray =
+        MakeScreenRay(Vec2{160.0f, 90.0f}, Vec2{1.0f, 0.0f}, /*span=*/200.0f, Vec2{320.0f, 180.0f});
+    FadeParams fade;
+    fade.hit_edge_px = 40.0f;
+
+    const float a = HitConfidence(ray, 155.0f, 1000.0f, fade);   // Q = (315,90) ⇒ 距右边界 5
+    EXPECT_NEAR(a, FadeWeight(5.0f, 40.0f), 1.0e-6f);
+    EXPECT_LT(a, 0.05f);
+
+    // 同一 σ 下把 ③ 换成 ②：P 在正中 ⇒ 1。负向：两条判据互换会被这条抓住。
+    FadeParams only_reflector_edge;
+    only_reflector_edge.reflector_edge_px = 40.0f;
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 155.0f, 1000.0f, only_reflector_edge), 1.0f);
+
+    // Q 退回画面中部（σ=100 ⇒ Q=(260,90)，距右边 60 ≥ 带宽）⇒ 不衰减。
+    EXPECT_FLOAT_EQ(HitConfidence(ray, 100.0f, 1000.0f, fade), 1.0f);
+}
+
+TEST(SsrMath, FadeDefaultsAreIdentityAndMultiply) {
+    // 全 0（默认）= 逐字节旧行为：任意命中点 A 恒等于 1。这是"默认零回归"的钉子。
+    const jpov::ssr::ScreenRay ray =
+        MakeScreenRay(Vec2{3.0f, 4.0f}, Vec2{0.6f, 0.8f}, /*span=*/150.0f, Vec2{320.0f, 180.0f});
+    const FadeParams off;
+    for (float sigma : {0.0f, 37.5f, 99.0f, 150.0f}) {
+        EXPECT_FLOAT_EQ(HitConfidence(ray, sigma, /*max_ray_pixels=*/0.0f, off), 1.0f);
+    }
+
+    // 三条同时打开 = 三条单独结果的乘积（乘法、顺序无关）。
+    FadeParams all;
+    all.budget_px = 60.0f;
+    all.reflector_edge_px = 30.0f;
+    all.hit_edge_px = 25.0f;
+    FadeParams only_budget;
+    only_budget.budget_px = all.budget_px;
+    FadeParams only_p;
+    only_p.reflector_edge_px = all.reflector_edge_px;
+    FadeParams only_q;
+    only_q.hit_edge_px = all.hit_edge_px;
+    const float sigma = 140.0f;
+    const float combined = HitConfidence(ray, sigma, 200.0f, all);
+    const float product = HitConfidence(ray, sigma, 200.0f, only_budget) *
+                          HitConfidence(ray, sigma, 200.0f, only_p) *
+                          HitConfidence(ray, sigma, 200.0f, only_q);
+    EXPECT_NEAR(combined, product, 1.0e-6f);
+    EXPECT_LT(combined, 0.05f);   // 三条都命中 ⇒ 确实被压扁了，不是恒 1
+}

@@ -610,6 +610,49 @@ int RunCaptureSsr(const std::string& out_dir) {
         app.RunOnce(input, winfo, (out_dir + "/ssr_grazing_off_1x.png").c_str());
     }
 
+    // (b7) A 的三个淡出（2026-11-13）：SSR_FADE=1 ⇒ 五张图。
+    //   全关 / 全开 / 只预算 / 只 P 贴边 / 只 Q 贴边。
+    //   带宽单位是**全分辨率屏幕像素**（面板同口径）；三个 env 可单独覆盖。
+    if (std::getenv("SSR_FADE") != nullptr) {
+        float budget = 60.0f;
+        float edge_p = 40.0f;
+        float edge_q = 40.0f;
+        if (const char* v = std::getenv("SSR_FADE_BUDGET")) {
+            budget = std::strtof(v, nullptr);
+        }
+        if (const char* v = std::getenv("SSR_FADE_EDGE")) {
+            edge_p = std::strtof(v, nullptr);
+        }
+        if (const char* v = std::getenv("SSR_FADE_HIT_EDGE")) {
+            edge_q = std::strtof(v, nullptr);
+        }
+        app.ssr_fade_budget_px_ = 0.0f;
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_fade_hit_edge_px_ = 0.0f;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_fade_off_1x.png").c_str());
+
+        app.ssr_fade_budget_px_ = budget;
+        app.ssr_fade_edge_px_ = edge_p;
+        app.ssr_fade_hit_edge_px_ = edge_q;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_fade_on_1x.png").c_str());
+
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_fade_hit_edge_px_ = 0.0f;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_fade_budget_1x.png").c_str());
+
+        app.ssr_fade_budget_px_ = 0.0f;
+        app.ssr_fade_edge_px_ = edge_p;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_fade_edgep_1x.png").c_str());
+
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_fade_hit_edge_px_ = edge_q;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_fade_edgeq_1x.png").c_str());
+
+        app.ssr_fade_budget_px_ = 0.0f;
+        app.ssr_fade_edge_px_ = 0.0f;
+        app.ssr_fade_hit_edge_px_ = 0.0f;
+    }
+
     // (b2) 柱体已经是"三源取最厚"（无开关），不再产出 slab0/slab1 对照图。
 
     // (b6) 背面命中：两个正交 flag 的 A/B（2026-11-13）
