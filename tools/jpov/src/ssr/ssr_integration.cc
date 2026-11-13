@@ -64,6 +64,7 @@ uniform float uGateCos;
 uniform float uAspect;
 uniform float uTanHalf;
 uniform float uAspectTan;   // = uAspect * uTanHalf（预算好，省一次乘法）
+uniform vec2  uInvRes;      // 1/uRes（同上，把角射线的除法换成乘法）
 out vec4 FragColor;
 
 // 同面判定（2026-11-13 去重）：调用方预算好角射线，这里只做平面预测 + 判据。
@@ -73,6 +74,7 @@ bool SameSurfacePre(vec3 n_self, vec3 P_self, vec3 c_self,
     if (!(w_nb > 0.0)) {
         return false;
     }
+    // 法线门槛在共享判据里再查一次（这里先查是为了省掉整个平面预测）。
     if (dot(n_self, n_nb) < uGateCos) {
         return false;
     }
@@ -98,7 +100,7 @@ void main() {
     }
     float back = base;
     // self 的角射线与平面点只算一次（原来每次比较都重算，4 邻居 × 2 向 = 8 次）
-    vec3 c_self = SsrCellRay(p, vec2(uRes), uAspectTan, uTanHalf);
+    vec3 c_self = SsrCellRay(p, uInvRes, uAspectTan, uTanHalf);
     vec3 P_self = c_self / w;
     ivec2 off[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
     for (int i = 0; i < 4; ++i) {
@@ -108,7 +110,7 @@ void main() {
             continue;
         }
         vec3 n_nb = normalize(texelFetch(uNormal, q, 0).xyz);
-        vec3 c_nb = SsrCellRay(q, vec2(uRes), uAspectTan, uTanHalf);
+        vec3 c_nb = SsrCellRay(q, uInvRes, uAspectTan, uTanHalf);
         bool fwd = SameSurfacePre(n, P_self, c_self, w_nb, n_nb, c_nb);
         // 反向：用邻居的平面预测"我"的位置（单侧判会让较近那格漏并）
         bool rev = false;
@@ -268,6 +270,8 @@ void SsrIntegration::BuildSlabBack(const SsrPassInputs& in, int w, int h) {
     set1f("uAspect", in.aspect);
     set1f("uTanHalf", in.tan_half_fov_y);
     set1f("uAspectTan", in.aspect * in.tan_half_fov_y);
+    glUniform2f(shader_mgr_->GetUniform(prog_slab_, "uInvRes"), 1.0f / static_cast<float>(w),
+                1.0f / static_cast<float>(h));
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));

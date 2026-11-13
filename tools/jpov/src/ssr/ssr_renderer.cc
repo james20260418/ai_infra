@@ -213,6 +213,9 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     CHECK(initialized_) << "SsrRenderer::Render 前必须先 Init";
     CHECK_NE(in.color_tex, 0u) << "SsrInputs::color_tex 未设置";
     CHECK_NE(in.w_tex, 0u) << "SsrInputs::w_tex 未设置（w = 1/z）";
+    // 2026-11-13 起柱体是命中判据的一部分（三源取最厚）⇒ back 纹理是**必需输入**，
+    // 不再"可选"。缺了会采到未绑定纹理 → 结果不可预期，所以这里直接炸。
+    CHECK_NE(in.slab_back_tex, 0u) << "SsrInputs::slab_back_tex 未设置（同面并集柱体）";
     CHECK_NE(in.normal_tex, 0u) << "SsrInputs::normal_tex 未设置";
     CHECK_NE(in.rough_tex, 0u) << "SsrInputs::rough_tex 未设置（逐像素 roughness）";
     CHECK_GT(in.width, 0) << "SsrInputs::width 未设置";
@@ -334,6 +337,8 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uAspect", in.aspect);
         set1f(prog, "uMaxDistance", in.max_distance_m);
         set1f(prog, "uThicknessC", derived.thickness_coefficient);
+        // 预算量（2026-11-13）：内层热路径上的两处除法挪到宿主。
+        set1f(prog, "uInvTanHalf", 1.0f / std::max(in.tan_half_fov_y, 1.0e-6f));
         set1f(prog, "uMinThickness", in.min_thickness_m);
         set1f(prog, "uSentinel", ssr::kNoHit);
         set1i(prog, "uTile", in.tile_size);

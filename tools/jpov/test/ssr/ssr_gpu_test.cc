@@ -252,6 +252,7 @@ struct Fixture {
     unsigned int normal_tex = 0;
     unsigned int color_tex = 0;
     unsigned int rough_tex = 0;
+    unsigned int slab_tex = 0;   // 2026-11-13：柱体 back 是必需输入（全 0 = 无并集信息）
     SsrInputs in;
 
     void Setup(const Scene& sc, int tile, int max_ray_pixels) {
@@ -294,11 +295,18 @@ struct Fixture {
             std::vector<float> ones(static_cast<size_t>(kWidth) * kHeight, 0.0f);
             rough_tex = UploadFloatTexture(ones, kWidth, kHeight, GL_R16F, GL_RED);
         }
+        // 柱体 back（R32F）：全 0 ⇒ 着色器按"该格没有并集信息"处理，退化为 c·T + t_min。
+        // 本文件的对拍对象是 CPU 参考（同样只有 c·T + t_min），所以这是**刻意的空柱体**。
+        {
+            std::vector<float> zeros(static_cast<size_t>(kWidth) * kHeight, 0.0f);
+            slab_tex = UploadFloatTexture(zeros, kWidth, kHeight, GL_R32F, GL_RED);
+        }
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
         in.w_tex = w_tex;
         in.normal_tex = normal_tex;
         in.rough_tex = rough_tex;
+        in.slab_back_tex = slab_tex;
         in.roughness_cutoff = 1.0f;
         in.width = kWidth;
         in.height = kHeight;
