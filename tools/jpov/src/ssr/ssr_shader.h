@@ -471,7 +471,7 @@ void main() {
 
 // resolve：T² 取 min → 命中格 → 取色 + ray_ratio + 类型。
 //
-// 输出（三样，紧凑排列）：
+// 输出（四样，紧凑排列）：
 //   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = **A（置信度）**
 //                                 命中 = 1（掠射淡出时 < 1）、非命中 = 0。
 //                                 注意 a ≠ ray_ratio（后者只是预算占用，供调试档使用）
@@ -518,7 +518,6 @@ void main() {
     // 背面命中（2026-11-13）：march 把 s 编成 s + kSsrBackfaceBias 写出来（见 kSsrMarchFs）。
     // T² 的 min 归约保证"有正面命中就一定不是背面命中"。
     bool is_backface = have_hit && best >= kSsrBackfaceBias;
-    FragBackface = is_backface ? 1u : 0u;
     if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
         type = 0u;                         // kNone：本像素不是反射候选
     } else if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
@@ -589,6 +588,8 @@ void main() {
     }
     FragRadiance = vec4(rgb, a_out);
     FragType = type;
+    // flag 与 type 同源（只有 kHit 才可能有背面语义）：不做任何"先写后改"的隐式约定。
+    FragBackface = (type == 1u && is_backface) ? 1u : 0u;
 #ifdef SSR_DEBUG
     FragHitS = hit_s;
 #endif

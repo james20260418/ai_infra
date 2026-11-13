@@ -234,18 +234,15 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
         return jpov::ssr::HitFacesRay(d, n);
     };
     // 与着色器一致：正面命中优先，没有正面命中时才报最早的背面命中（带偏移）。
-    float backface_s = -1.0f;
     const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing,
                                /*collect_backface=*/true);
     if (s < kNoHit) {
         out.hit = true;
         out.backface = s >= jpov::ssr::kBackfaceBias;
         out.s = out.backface ? (s - jpov::ssr::kBackfaceBias) : s;
-        backface_s = out.s;
         out.cell_x = cx;
         out.cell_y = cy;
     }
-    (void)backface_s;
     return out;
 }
 
@@ -837,12 +834,7 @@ TEST(SsrGpu, BackfaceHitsFlaggedNotRejected) {
                 if (flag_mismatch < 4) {
                     ADD_FAILURE() << "像素(" << x << "," << y << ") CPU backface=" << cpu.backface
                                   << " GPU flag=" << gpu_bf << " kind=" << f.scene.kind[i]
-                                  << " cpu_s=" << cpu.s << " cpu_cell=(" << cpu.cell_x << ","
-                                  << cpu.cell_y << ") gpu_cell=("
-                                  << static_cast<int>(std::lround(rad[i * 4 + 0] * (kWidth + 1))) - 1
-                                  << ","
-                                  << static_cast<int>(std::lround(rad[i * 4 + 1] * (kHeight + 1))) - 1
-                                  << ") gpu_s=" << hs[i] << " attr_z=" << f.scene.attr_z[i];
+                                  << " cpu_s=" << cpu.s << " gpu_s=" << hs[i];
                 }
             }
             if (!gpu_hit) {

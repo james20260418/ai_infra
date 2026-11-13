@@ -543,7 +543,8 @@ ScreenRay MakeSyntheticRay() {
     return ray;
 }
 
-TEST(SsrMath, BackfaceHitRejected) {
+// 不收集背面命中时的旧语义：背面命中"不算命中"，射线继续往前找。
+TEST(SsrMath, BackfaceHitSkippedWithoutCollection) {
     const ScreenRay ray = MakeSyntheticRay();
     // c = 0.18 ⇒ T = 3.6 m（z=20）⇒ 射线在桌子/墙那两段确实落在柱体带内，
     // 所以"能不能命中"完全取决于朝向判据，不是厚度在挡。

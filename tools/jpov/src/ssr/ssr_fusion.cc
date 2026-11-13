@@ -182,7 +182,9 @@ void main() {
     vec3 num = vec3(0.0);
     float den = 0.0;
     float wsum = 0.0;
-    // 背面 flag 的判定：取**值域权 × 空间权最大**的那个 tap（硬 flag）。
+    // 背面 flag 的判定：取**实际贡献颜色最多**的那个 tap（w × a_lo 最大）的硬 flag。
+    // 用 w·a_lo 而不是 w：A=0 的相邻 tap 虽然权重大，但对颜色零贡献，让它的 flag 说话
+    // 等于用一格"没有答案"的分类去决定整块像素的处置。
     // 为什么是硬判定而不是按权平均：flag 是"这块像素属于哪一类"的语义，平均出来的分数
     // 会让"关着两个 flag 时应当逐字节等于旧行为"这条不变量破掉（0.5 的分数会部分替换 env）。
     float wbest_bf = -1.0;
@@ -233,8 +235,9 @@ void main() {
             num += w * a_lo * s.rgb;
             den += w * a_lo;
             wsum += w;
-            if (w > wbest_bf) {
-                wbest_bf = w;
+            float w_color = w * a_lo;
+            if (w_color > wbest_bf) {
+                wbest_bf = w_color;
                 is_backface = ((texelFetch(uBackface, q, 0).r & 1u) != 0u);
             }
         }
@@ -296,20 +299,22 @@ void main() {
     //   ⇒ 出现负辐亮度 ⇒ tone map 把负通道压成 0、正通道顶到 1 ⇒ **纯红描边**。
     //   辐亮度不可能为负，所以"减掉的不超过现有的"是物理硬约束，不是调参：
     //   正常情况下 removed ≤ hdr，本式与原来的 `hdr + (add − removed)` **逐位相同**。
+    //
     // ── 背面命中的处置（2026-11-13）：两个正交 flag ──
     // A 不动（背面命中同样受压缩比淡出约束）。只有"被减掉的 env 权重"和
     // "加上的 ssr 权重"这两个系数按 flag 改：
     //   use_ssr=false, dim=1 ⇒ A_rm = 0, A_ad = 0 ⇒ out = hdr（**逐字节等于旧行为**）
     //   use_ssr=false, dim<1 ⇒ 只保留 dim 那份 env（旧版 backface_env_scale 的语义）
     //   use_ssr=true        ⇒ 用 SSR 颜色，整体乘 dim
+    float bf_dim = clamp(uBackfaceDim, 0.0, 1.0);
     float A_rm = A;
     float A_ad = A;
     if (is_backface) {
         if (uBackfaceUseSsr != 0) {
             A_rm = A;
-            A_ad = A * clamp(uBackfaceDim, 0.0, 1.0);
+            A_ad = A * bf_dim;
         } else {
-            A_rm = A * (1.0 - clamp(uBackfaceDim, 0.0, 1.0));
+            A_rm = A * (1.0 - bf_dim);   // 只保住 bf_dim 那份 env
             A_ad = 0.0;
         }
     }
