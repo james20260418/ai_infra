@@ -383,7 +383,18 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     const SsrOutputs& outs = ssr_.Render(si);
 
     // ── ④ 粗糙度预滤波：A 预乘 mip 链（决定了"磨砂"的模糊量）──
-    filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height());
+    // 遮丑滤波器（2026-11-13）：引导用**降采样后的** w 与法线（与 SSR 同分辨率）。
+    SsrFilterGuides fg;
+    fg.down_w_tex = downsample_.w_tex();
+    fg.down_normal_tex = downsample_.normal_tex();
+    SsrFilterConfig fc;
+    fc.hole_fill = in.cfg.filter_hole_fill;
+    fc.outlier_clamp = in.cfg.filter_outlier_clamp;
+    fc.atrous = in.cfg.filter_atrous;
+    fc.clamp_sigma = in.cfg.filter_clamp_sigma;
+    fc.atrous_iterations = in.cfg.filter_atrous_iterations;
+    filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height(),
+                fg, fc);
 
     // ── ⑤ 融合：升采样 + 替换环境镜面项，写回 3D FBO 颜色 ──
     SsrFusionInputs fi;

@@ -653,6 +653,41 @@ int RunCaptureSsr(const std::string& out_dir) {
         app.ssr_fade_hit_edge_px_ = 0.0f;
     }
 
+    // (b8) 遮丑滤波器（2026-11-13）：SSR_FILTER=1 ⇒ 五张图，**逐条独立**对比。
+    //   off / hole（补洞）/ clamp（离群）/ atrous（小波）/ all（三条全开）。
+    //   SSR_FILTER_ITERS 改小波趟数（默认 2）；SSR_FILTER_K 改离群抑制的 k·σ（默认 2）。
+    if (std::getenv("SSR_FILTER") != nullptr) {
+        if (const char* v = std::getenv("SSR_FILTER_ITERS")) {
+            app.ssr_filter_atrous_iters_ = std::strtof(v, nullptr);
+        }
+        if (const char* v = std::getenv("SSR_FILTER_K")) {
+            app.ssr_filter_clamp_k_ = std::strtof(v, nullptr);
+        }
+        app.ssr_filter_hole_ = false;
+        app.ssr_filter_clamp_ = false;
+        app.ssr_filter_atrous_ = false;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_filter_off_1x.png").c_str());
+
+        app.ssr_filter_hole_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_filter_hole_1x.png").c_str());
+        app.ssr_filter_hole_ = false;
+
+        app.ssr_filter_clamp_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_filter_clamp_1x.png").c_str());
+        app.ssr_filter_clamp_ = false;
+
+        app.ssr_filter_atrous_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_filter_atrous_1x.png").c_str());
+
+        app.ssr_filter_hole_ = true;
+        app.ssr_filter_clamp_ = true;
+        app.RunOnce(input, winfo, (out_dir + "/ssr_filter_all_1x.png").c_str());
+
+        app.ssr_filter_hole_ = false;
+        app.ssr_filter_clamp_ = false;
+        app.ssr_filter_atrous_ = false;
+    }
+
     // (b2) 柱体已经是"三源取最厚"（无开关），不再产出 slab0/slab1 对照图。
 
     // (b6) 背面命中：两个正交 flag 的 A/B（2026-11-13）

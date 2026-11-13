@@ -756,6 +756,22 @@ struct SsrConfig {
     float fade_edge_pixels = 0.0f;        // ② 0 = 关闭
     float fade_hit_edge_pixels = 0.0f;    // ③ 0 = 关闭
 
+    // ── 遮丑滤波器（2026-11-13，"多配置选型"用；默认全关 ⇒ 逐字节旧行为）──
+    // 全部跑在 **SSR 分辨率**、mip 链之前。三条各治一种病，可以单独开对比，也可以叠：
+    //   ① filter_hole_fill     形态学补洞：只补"左右/上下两侧都命中、自己是空"的 1px 缝
+    //                          ⇒ 专治周期性梳齿；宽洞不动，不会凭空造出倒影
+    //   ② filter_outlier_clamp 统计：3×3 加权方差，把偏离 k·σ 的样本夹回边界
+    //                          ⇒ 专治孤立亮点/黑点，几乎不损失锐度
+    //   ③ filter_atrous        边缘保持 à-trous 小波（5×5 B3，步长 1/2/4）
+    //                          深度+法线引导 ⇒ 跨剪影不串色；A 当"样本数"一起平均
+    // 放在低分侧而不是升采样后：梳齿周期 = SSR texel，低分上覆盖同样的世界半径
+    // 只要 1/N² 的像素。详见 ssr_filter.h 顶部。
+    bool filter_hole_fill = false;      // ①
+    bool filter_outlier_clamp = false;  // ②
+    bool filter_atrous = false;         // ③
+    float filter_clamp_sigma = 2.0f;    // ② 允许偏离几倍标准差（> 0）
+    int filter_atrous_iterations = 1;   // ③ 1..3（步长 1/2/4；2 趟起明显发虚）
+
     // ── 背面命中（2026-11-13）：模块照常给颜色，**处置权在融合层**，两个正交 flag ──
     // 背面命中 = 射线从某个面的背后穿出（法线朝相机、射线朝屏幕里）。它的颜色是那一格的
     // **正面色**（背面在屏幕空间里不存在），所以"几何对、颜色近似"。

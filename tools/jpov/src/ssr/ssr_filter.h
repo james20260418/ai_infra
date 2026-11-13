@@ -31,6 +31,42 @@ namespace jpov {
 
 class ShaderManager;
 
+// ── 三个"遮丑"滤波器（2026-11-13，多配置选型用）──
+//
+// 都跑在 **SSR 分辨率**、level 0 之后、mip 链之前；都默认关闭（关闭时逐字节等于旧行为）。
+// 三条各治一种病，可以单独开、也可以叠（顺序固定：补洞 → 离群 → 小波）：
+//
+//   ① hole_fill     形态学：只补"左右（或上下）两侧都是命中、自己是空"的 1px 缝。
+//                   专治周期性梳齿；对宽洞（真没数据）不动，所以不会凭空造出倒影。
+//   ② outlier_clamp 统计：3×3 加权均值/方差，把偏离 k·σ 的样本拉回边界。
+//                   专治孤立亮点/黑点（"毛刺"），只动离群点 ⇒ 几乎不损失锐度。
+//   ③ atrous        频域/多尺度：边缘保持的 à-trous 小波（5×5 B3 核，步长 1/2/4）。
+//                   深度 + 法线引导 ⇒ 跨剪影不串色；A 被当作"样本数"一起平均 ⇒
+//                   梳齿处的覆盖率由邻域抬起来，真空洞仍然交回 env。
+//
+// 为什么放在低分侧而不是升采样之后：梳齿的周期 = **SSR texel**。在 SSR 分辨率上
+// 覆盖同样的世界半径只要 1/N² 的像素；换到全分辨率需要覆盖 2N 个屏幕像素才能跨过
+// 同样的洞（成本 ×N²，模糊量还一样大）。升采样自己产生的那 1~2 px 台阶由融合层的
+// 双边核负责，不在这三条的职责里。
+//
+// 引导纹理（可选）：w = 1/z 与视空间法线，**SSR 分辨率**（就是降采样那两张）。
+// 打开了任何一条却没给引导 ⇒ 直接 FATAL（采样未绑定纹理是不可预期的，不静默兜底）。
+struct SsrFilterGuides {
+    unsigned int down_w_tex = 0;       // R32F，w = 1/z（0 = 天空/无几何）
+    unsigned int down_normal_tex = 0;  // RGBA16F，rgb = 三维视空间法线
+};
+
+struct SsrFilterConfig {
+    bool hole_fill = false;        // ①
+    bool outlier_clamp = false;    // ②
+    bool atrous = false;           // ③
+    int atrous_iterations = 1;     // ③ 趟数（1..3；步长 1/2/4；2 趟起明显发虚）
+    float clamp_sigma = 2.0f;      // ② 允许偏离 k·σ（> 0）
+    float guide_depth_tol = 0.15f; // 引导的深度软权尺度（相对残差）
+    float guide_normal_cos = 0.85f;// 引导的法线门限（低于它视为跨面，权重 0）
+};
+
+
 class SsrFilter {
 public:
     SsrFilter();
@@ -42,10 +78,14 @@ public:
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
-    // ssr_radiance_tex：RGBA16F，rgb = 命中颜色、a = ray_ratio（未命中 rgb 无意义）
+    // ssr_radiance_tex：RGBA16F，rgb = 命中颜色、a = **A（置信度）**（未命中 rgb 无意义）
     // ssr_type_tex    ：R8UI，SsrResultType（只有 kHit 算命中）
     // 两张图必须都是 w×h。Run 会保存/恢复调用方的 FBO、viewport、program 与纹理绑定。
+    //
+    // 4 参数重载 = 三个遮丑滤波器全关 + 无引导（等价于 2026-11-13 之前的行为）。
     void Run(unsigned int ssr_radiance_tex, unsigned int ssr_type_tex, int w, int h);
+    void Run(unsigned int ssr_radiance_tex, unsigned int ssr_type_tex, int w, int h,
+             const SsrFilterGuides& guides, const SsrFilterConfig& cfg);
 
     // RGBA16F 带 mip 链：rgb = 覆盖率加权的平均颜色；a = 该级别的覆盖率。
     // MIN_FILTER = LINEAR_MIPMAP_LINEAR ⇒ 直接用 textureLod(uv, lod) 连续采样。
@@ -60,6 +100,19 @@ private:
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_fill_ = 0;   // level 0：覆盖率化 + 3×3 空像素填充
+    unsigned int prog_hole_ = 0;   // ① 形态学补洞
+    unsigned int prog_clamp_ = 0;  // ② 方差引导离群抑制
+    unsigned int prog_atrous_ = 0; // ③ 边缘保持 à-trous
+    // 遮丑滤波器之间、以及它们与 mip 链之间的中转（避免"边采样边写"的反馈环）。
+    unsigned int post_tex_[2] = {0, 0};
+    // 本帧的引导与配置（只在 Run 期间有效，供 PassToTexture 读取）。
+    SsrFilterGuides cur_guides_;
+    SsrFilterConfig cur_cfg_;
+
+    // 一趟全屏后处理：src → dst，step 只给 à-trous 用（补洞/离群传 0）。
+    // Pre-condition: GL context 已激活；src != dst；尺寸 = width_×height_。
+    void PassToTexture(unsigned int prog, unsigned int src_tex, unsigned int dst_tex,
+                       int step);
     unsigned int prog_down_ = 0;   // level n → n+1：A 预乘 box
     unsigned int mip_tex_ = 0;     // 最终对外的那张（带完整 mip 链）
     // ⚠️ 每一级先渲到**独立纹理**，最后用 glBlitFramebuffer 拼进 mip_tex_ 的各 level。
