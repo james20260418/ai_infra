@@ -234,4 +234,247 @@ TEST(SsrFilter, FillColorFollowsRadiance) {
     glDeleteTextures(1, &typ);
 }
 
+// ───────────── 遮丑滤波器（2026-11-13）：三条独立可关，默认零回归 ─────────────
+//
+// 这一组测的是"开关的语义"，不是画质：关 = 逐字节旧行为；每条打开后**只**动它该动的地方。
+
+unsigned int UploadFloatTex(int w, int h, int internal, int format,
+                            const std::vector<float>& data) {
+    unsigned int tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, format, GL_FLOAT, data.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+// 8×8 合成输入 → 跑一遍 → 读回 mip level 0（= 遮丑链的最终输出）。
+// use_guides = false 走 4 参数重载（= 2026-11-13 之前的行为）。
+std::vector<float> RunPost(const std::vector<float>& rgba, bool use_guides,
+                           const jpov::SsrFilterConfig& cfg,
+                           const std::vector<unsigned char>* types_override = nullptr) {
+    GlEnv::Get().Ensure();
+    const int n = kSize * kSize;
+    std::vector<unsigned char> type(static_cast<size_t>(n), 0);
+    std::vector<float> wbuf(static_cast<size_t>(n), 0.05f);   // 全部同一平面
+    std::vector<float> nrm(static_cast<size_t>(n) * 4, 0.0f);
+    for (int i = 0; i < n; ++i) {
+        if (rgba[static_cast<size_t>(i) * 4 + 3] > 0.0f) {
+            type[static_cast<size_t>(i)] = 1;                 // kHit
+        }
+        if (types_override != nullptr) {
+            type[static_cast<size_t>(i)] = (*types_override)[static_cast<size_t>(i)];
+        }
+        nrm[static_cast<size_t>(i) * 4 + 2] = 1.0f;           // 法线 = +Z（同面）
+        nrm[static_cast<size_t>(i) * 4 + 3] = 1.0f;
+    }
+    const unsigned int rad = UploadRadiance(kSize, kSize, rgba);
+    const unsigned int typ = UploadType(kSize, kSize, type);
+    const unsigned int wt = UploadFloatTex(kSize, kSize, GL_R32F, GL_RED, wbuf);
+    const unsigned int nt = UploadFloatTex(kSize, kSize, GL_RGBA16F, GL_RGBA, nrm);
+
+    jpov::ShaderManager mgr;
+    SsrFilter filter;
+    filter.Init(&mgr);
+    if (use_guides) {
+        jpov::SsrFilterGuides g;
+        g.down_w_tex = wt;
+        g.down_normal_tex = nt;
+        filter.Run(rad, typ, kSize, kSize, g, cfg);
+    } else {
+        filter.Run(rad, typ, kSize, kSize);
+    }
+    std::vector<float> out = ReadMipLevel(filter.mip_tex(), 0, kSize, kSize);
+    filter.Finalize();
+    glDeleteTextures(1, &rad);
+    glDeleteTextures(1, &typ);
+    glDeleteTextures(1, &wt);
+    glDeleteTextures(1, &nt);
+    return out;
+}
+
+std::vector<float> SolidGrid(float a) {
+    std::vector<float> rgba(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
+    for (int i = 0; i < kSize * kSize; ++i) {
+        rgba[static_cast<size_t>(i) * 4 + 3] = a;
+    }
+    return rgba;
+}
+
+void SetPx(std::vector<float>* rgba, int x, int y, float rgb, float a) {
+    const size_t i = static_cast<size_t>(y) * kSize + x;
+    (*rgba)[i * 4 + 0] = rgb;
+    (*rgba)[i * 4 + 1] = rgb;
+    (*rgba)[i * 4 + 2] = rgb;
+    (*rgba)[i * 4 + 3] = a;
+}
+
+// 默认零回归：三条全关时，给不给引导都必须与旧路径**逐字节**相同。
+TEST(SsrFilterPost, DisabledIsByteIdentical) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize / 2; ++x) {
+            SetPx(&rgba, x, y, kHitRadiance, 1.0f);
+        }
+    }
+    const jpov::SsrFilterConfig off;
+    const std::vector<float> legacy = RunPost(rgba, /*use_guides=*/false, off);
+    const std::vector<float> with_guides = RunPost(rgba, /*use_guides=*/true, off);
+    ASSERT_EQ(legacy.size(), with_guides.size());
+    for (size_t i = 0; i < legacy.size(); ++i) {
+        EXPECT_FLOAT_EQ(legacy[i], with_guides[i]) << "第 " << i << " 个分量不同";
+    }
+}
+
+// ① 补洞：只补"两侧都命中"的 1px 缝；单侧命中的边界与宽洞都不许动。
+TEST(SsrFilterPost, HoleFillOnlyClosesTwoSidedGap) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    // 第 4 行：x=2 命中、(3) 空、x=4 命中 ⇒ 3 是"两侧都命中"的缝。
+    SetPx(&rgba, 2, 4, 0.5f, 1.0f);
+    SetPx(&rgba, 4, 4, 0.5f, 1.0f);
+    // 第 6 行：x=2 命中、x=3 空、x=4 也空 ⇒ 3 只有单侧命中，不许填。
+    SetPx(&rgba, 2, 6, 0.5f, 1.0f);
+
+    jpov::SsrFilterConfig cfg;
+    cfg.hole_fill = true;
+    const std::vector<float> out = RunPost(rgba, /*use_guides=*/true, cfg);
+
+    // 缝被补上：覆盖率回到 1，颜色取两侧命中的平均（0.5）。
+    EXPECT_NEAR(At(out, kSize, 3, 4, 3), 1.0f, 1.0e-3f);
+    EXPECT_NEAR(At(out, kSize, 3, 4, 0), 0.5f, 1.0e-3f);
+    // 命中格原样（不是"整片糊一遍"）。
+    EXPECT_NEAR(At(out, kSize, 2, 4, 3), 1.0f, 1.0e-3f);
+    // 负向：单侧命中的空位保持 0（若把判据写成"有任意命中邻居就填"，这里会变 1）。
+    EXPECT_FLOAT_EQ(At(out, kSize, 3, 6, 3), 0.0f);
+    // 远离任何命中的空位保持 0。
+    EXPECT_FLOAT_EQ(At(out, kSize, 7, 0, 3), 0.0f);
+}
+
+// ③ à-trous：单个孤立命中会被摊开 —— 中心覆盖率 = 36/256（B3 核的中心权 × 无边缘拒绝），
+//    而核覆盖不到的角落必须仍是 0。负向：不摊开（仍 1）或摊成一片（角落 > 0）都会红。
+TEST(SsrFilterPost, AtrousSpreadsIsolatedSample) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    SetPx(&rgba, 4, 4, 0.5f, 1.0f);   // 唯一命中，5×5 窗口正好完整落在 8×8 内
+
+    jpov::SsrFilterConfig cfg;
+    cfg.atrous = true;
+    cfg.atrous_iterations = 1;
+    const std::vector<float> out = RunPost(rgba, /*use_guides=*/true, cfg);
+
+    const float center = 36.0f / 256.0f;   // (6·6)/16²：B3 核中心项
+    EXPECT_NEAR(At(out, kSize, 4, 4, 3), center, 2.0e-3f);
+    // 颜色不因 A 变小而丢（按 A 加权的平均值仍是原色）。
+    EXPECT_NEAR(At(out, kSize, 4, 4, 0), 0.5f, 1.0e-3f);
+    // 核外的角落保持 0（不是全屏糊）。
+    EXPECT_FLOAT_EQ(At(out, kSize, 0, 0, 3), 0.0f);
+}
+
+// ② 离群抑制：3×3 里 8 个 0.25 + 中心 1.0 ⇒ 中心被夹回 mean + k·σ，正常样本不动。
+TEST(SsrFilterPost, OutlierClampPullsOnlyTheOutlier) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    for (int y = 3; y <= 5; ++y) {
+        for (int x = 3; x <= 5; ++x) {
+            SetPx(&rgba, x, y, 0.25f, 1.0f);
+        }
+    }
+    SetPx(&rgba, 4, 4, 1.0f, 1.0f);   // 离群点
+
+    jpov::SsrFilterConfig cfg;
+    cfg.outlier_clamp = true;
+    cfg.clamp_sigma = 2.0f;
+    const std::vector<float> out = RunPost(rgba, /*use_guides=*/true, cfg);
+
+    const float mean = (8.0f * 0.25f + 1.0f) / 9.0f;
+    const float var = (8.0f * (0.25f - mean) * (0.25f - mean) + (1.0f - mean) * (1.0f - mean)) / 9.0f;
+    const float expect_center = mean + 2.0f * std::sqrt(var);
+    // 负向：不做 clamp 时这里是 1.0（这条断言就是"确实动了"）。
+    EXPECT_NEAR(At(out, kSize, 4, 4, 0), expect_center, 3.0e-3f);
+    EXPECT_LT(At(out, kSize, 4, 4, 0), 0.95f);
+    // 正常样本必须保持原值（只夹离群点，不整体模糊）。
+    EXPECT_NEAR(At(out, kSize, 3, 3, 0), 0.25f, 3.0e-3f);
+    // 覆盖率不参与 clamp（A 原样）。
+    EXPECT_NEAR(At(out, kSize, 4, 4, 3), 1.0f, 1.0e-3f);
+}
+
+// 接口安全：非法配置必须在进 GL 之前就被拦住（而不是静默画出一堆垃圾）。
+// 三条都是"用户能配出来的"非法值：缺引导、趟数 0、σ = NaN。
+TEST(SsrFilterPost, InvalidConfigRejectedBeforeGl) {
+    GlEnv::Get().Ensure();
+    const std::vector<float> rgba = SolidGrid(0.0f);
+    const std::vector<float> wbuf(static_cast<size_t>(kSize) * kSize, 0.05f);
+    std::vector<float> nrm(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
+    std::vector<unsigned char> type(static_cast<size_t>(kSize) * kSize, 0);
+    for (int i = 0; i < kSize * kSize; ++i) {
+        nrm[static_cast<size_t>(i) * 4 + 2] = 1.0f;
+        nrm[static_cast<size_t>(i) * 4 + 3] = 1.0f;
+    }
+    const unsigned int rad = UploadRadiance(kSize, kSize, rgba);
+    const unsigned int typ = UploadType(kSize, kSize, type);
+    const unsigned int wt = UploadFloatTex(kSize, kSize, GL_R32F, GL_RED, wbuf);
+    const unsigned int nt = UploadFloatTex(kSize, kSize, GL_RGBA16F, GL_RGBA, nrm);
+
+    jpov::ShaderManager mgr;
+    SsrFilter filter;
+    filter.Init(&mgr);
+
+    jpov::SsrFilterConfig on;
+    on.hole_fill = true;
+
+    // ① 开了滤波器却没给引导。
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, jpov::SsrFilterGuides{}, on), "");
+
+    jpov::SsrFilterGuides guides;
+    guides.down_w_tex = wt;
+    guides.down_normal_tex = nt;
+
+    // ② 小波趟数 0（步长会退化成恒 1，支撑不够 = 静默失效）。
+    jpov::SsrFilterConfig bad_iters;
+    bad_iters.atrous = true;
+    bad_iters.atrous_iterations = 0;
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, guides, bad_iters), "");
+
+    // ③ σ = NaN（会让 clamp 的边界变成 NaN，整片颜色被写成 NaN）。
+    jpov::SsrFilterConfig bad_sigma;
+    bad_sigma.outlier_clamp = true;
+    bad_sigma.clamp_sigma = std::nanf("");
+    EXPECT_DEATH(filter.Run(rad, typ, kSize, kSize, guides, bad_sigma), "");
+
+    filter.Finalize();
+    glDeleteTextures(1, &rad);
+    glDeleteTextures(1, &typ);
+    glDeleteTextures(1, &wt);
+    glDeleteTextures(1, &nt);
+}
+
+// 回归：A 被淡出到 0.2 的**命中格**不许被补洞"补回 1"。
+// 判据必须看类型图（结构上是不是命中），不能看 A 阈值 —— 否则两条通路互相打架
+// （补洞把淡出撤销，用户拖淡出滑条会看到"某些像素不动"）。
+TEST(SsrFilterPost, HoleFillLeavesFadedHitsAlone) {
+    std::vector<float> rgba = SolidGrid(0.0f);
+    for (int x = 2; x <= 4; ++x) {
+        SetPx(&rgba, x, 4, 0.5f, 1.0f);
+    }
+    SetPx(&rgba, 3, 4, 0.5f, 0.2f);   // 中间那格：命中，但 A 被淡到 0.2
+
+    std::vector<unsigned char> types(static_cast<size_t>(kSize) * kSize, 0);
+    for (int x = 2; x <= 4; ++x) {
+        types[static_cast<size_t>(4) * kSize + x] = 1;   // 三格都是 kHit
+    }
+
+    jpov::SsrFilterConfig cfg;
+    cfg.hole_fill = true;
+    const std::vector<float> out = RunPost(rgba, /*use_guides=*/true, cfg, &types);
+
+    // 负向：只看 a>0.5 的实现会把它补成 ~1.0。
+    EXPECT_NEAR(At(out, kSize, 3, 4, 3), 0.2f, 2.0e-3f);
+    EXPECT_NEAR(At(out, kSize, 3, 4, 0), 0.5f, 2.0e-3f);
+
+    // 同一行的真·结构空位（如果存在）仍然按规则补：把 (3,4) 改成 type=0 就该被补。
+    types[static_cast<size_t>(4) * kSize + 3] = 0;
+    const std::vector<float> out2 = RunPost(rgba, /*use_guides=*/true, cfg, &types);
+    EXPECT_NEAR(At(out2, kSize, 3, 4, 3), 1.0f, 2.0e-3f);
+}
+
 }  // namespace

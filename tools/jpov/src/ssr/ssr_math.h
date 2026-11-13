@@ -178,6 +178,9 @@ struct ScreenRay {
     float w1 = 0.0f;      // σ = span 处的 1/d
     float sigma_enter = 0.0f;  // 屏幕矩形裁剪后仍可见的 σ 区间
     float sigma_exit = 0.0f;
+    // 本射线所在的栅格尺寸（像素）。只给"到屏幕边的距离"用（见 HitConfidence）。
+    // 存在这里而不是当参数传：BuildScreenRay 本来就知道，且它与 s0/dir 是同一套坐标。
+    Vec2 res{0.0f, 0.0f};
     // true = 射线在 sigma_exit 处撞到屏幕边界（或近平面裁剪）；false = 走完了整段。
     // 只用于调试原因位（kSky vs kOffscreen），不参与取色。
 };
@@ -213,6 +216,7 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
     const Vec2 s1{(nq.x * 0.5f + 0.5f) * w, (nq.y * 0.5f + 0.5f) * h};
     out->w0 = 1.0f / d0;
     out->w1 = 1.0f / d1;
+    out->res = Vec2{w, h};
 
     const Vec2 delta = s1 - out->s0;
     out->span = Length(delta);
@@ -262,6 +266,72 @@ inline float WAt(const ScreenRay& ray, float sigma) {
 // σ 处的位置（像素坐标）。
 inline Vec2 PosAt(const ScreenRay& ray, float sigma) {
     return ray.s0 + ray.dir * sigma;
+}
+
+// ─────────────────── ②.5 A 的三个淡出（2026-11-13）───────────────────
+//
+// A = "这个像素的答案有多少值得用"，∈ [0,1]。命中后本来是 1；现在再乘三个**互相独立**的
+// 衰减因子（都是乘法 ⇒ 顺序无关、可以单独关掉）：
+//
+//   ① 预算：d_budget = max_ray_pixels − σ
+//       σ 是命中点的屏幕弧长，也就是 **P→Q 的距离**（dir 是像素空间单位向量 ⇒ |PQ| = σ）。
+//       射线越接近预算上限，答案越像"走到最后一格才勉强撞到"，可信度越低。
+//   ② 反射体贴边（P）：P 到最近画面边的距离。倒影本身被画面边框切断，需要一圈缓冲带。
+//   ③ 命中点贴边（Q）：Q 到最近画面边的距离。反射源已经在画面外沿，数据可信度低。
+//
+// 为什么 ②③ 用**图像空间**距离而不是 "ray.sigma_exit − σ"（沿射线到出屏点的距离）：
+//   后者看着更"正确"，但掠射下会把整片倒影吃掉 —— 掠射时地面映的是远处物体，那些命中点
+//   本来就贴着射线的出屏点 ⇒ 对所有"远处的倒影"天然很小。2026-11-06 实测（带宽 163 屏幕
+//   像素）：倒影覆盖区 A 的保留率只剩 60.6%，观感是"镜面掠射直接糊成哑光"。
+//   图像空间判据只在真正贴着画面边框的一圈衰减，符合"给边缘留个像素 buffer"的本意。
+//
+// 为什么 ① **不**取 min(max_ray_pixels, ray.span)：
+//   掠射时 span（投影后的射线全长）会被压到几十像素（世界上飞十几米、屏幕上只走 30 像素），
+//   于是几乎每个命中点都贴着这个上限 ⇒ 一开带宽整片变淡（实测带宽 50 屏幕像素时覆盖区
+//   91% 被压）。span 短**不等于**预算用尽：射线是被世界距离/近平面截断的。
+//
+// 与 ssr_shader.h 的 SsrFadeWeight / SsrHitConfidence **逐字同一形式**（改一处必须改另一处）。
+
+// 剩余可用距离 → 权重。width ≤ 0 ⇒ 1（= **关闭**；不是"衰减 0 像素"）。
+// 曲线用 smoothstep：线性斜坡两端一阶导跳变，在平滑地板上能看见两条"折线"。
+inline float FadeWeight(float remain_px, float width_px) {
+    if (!(width_px > 0.0f)) {
+        return 1.0f;
+    }
+    float t = remain_px / width_px;
+    t = std::min(1.0f, std::max(0.0f, t));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// 三个带宽，单位一律 **SSR 像素**（接入层把"全分辨率屏幕像素"的配置除以 N 折算下来）。
+// 0 = 关闭该衰减。
+struct FadeParams {
+    float budget_px = 0.0f;          // ① 命中点离 march 预算还有多远
+    float reflector_edge_px = 0.0f;  // ② **反射体像素**（P）离画面边框多远
+    float hit_edge_px = 0.0f;        // ③ **命中点**（Q）离画面边框多远
+};
+
+// 到最近画面边的像素距离（p 在屏内）。
+inline float DistToScreenEdge(const Vec2& p, const ScreenRay& ray) {
+    return std::min(std::min(p.x, ray.res.x - p.x), std::min(p.y, ray.res.y - p.y));
+}
+
+// 命中点 σ 处的 A。三个带宽相乘。
+//
+// ② 与 ③ 是两个**不同的问题**、都保留（Danis 2026-11-06 定稿）：
+//   ② 反射体（倒影在屏幕上的位置）贴边 ⇒ 镜子被画面边缘切断的观感，需要缓冲带；
+//   ③ 命中点（反射源）贴边     ⇒ 那块内容本身就在画面外沿，可信度低，需要软化。
+//   同一画面里它们落的位置完全不同：② 贴着画面边框，③ 跟着"倒影映到的东西"走。
+inline float HitConfidence(const ScreenRay& ray, float sigma, float max_ray_pixels,
+                           const FadeParams& fade) {
+    float a = FadeWeight(max_ray_pixels - sigma, fade.budget_px);
+    if (fade.reflector_edge_px > 0.0f) {
+        a *= FadeWeight(DistToScreenEdge(ray.s0, ray), fade.reflector_edge_px);
+    }
+    if (fade.hit_edge_px > 0.0f) {
+        a *= FadeWeight(DistToScreenEdge(PosAt(ray, sigma), ray), fade.hit_edge_px);
+    }
+    return a;
 }
 
 // ─────────────────────────── ③ 体素柱判据 ───────────────────────────

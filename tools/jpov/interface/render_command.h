@@ -730,13 +730,36 @@ struct SsrConfig {
 
     // 掠射淡出（2026-11-13）：镜像视图与主视图对被反射面（Q）的前缩比差太多时，
     // 屏幕空间里根本没有足够信息（典型：桌面底面在主视图只剩一条缝，镜像视图却近乎正对）。
-    //   kappa = cos(θ_primary) / cos(θ_mirror)   （θ = Q 法线 × 视方向）
+    //   kappa = cos(θ_mirror) / cos(θ_primary)   （θ = Q 法线 × 视方向）
     //   1 = 两个视角一样（不淡出）；越大 = 越需要"凭空放大"
     // A 用 smoothstep 从 fade_start 淡到 fade_end（kappa 越大 A 越接近 0，交回 env 兜底）。
     // 关掉时逐字节等于旧行为。
     // 只有两个阈值（2026-11-13 定稿）：想关就把 end 设得比 start 小（或都设很大）。
     float grazing_fade_start = 2.0f;   // kappa ≥ 它开始淡出
     float grazing_fade_end = 10.0f;    // kappa ≥ 它完全交给兜底
+
+    // ── A 的三个淡出（2026-11-13）：只乘在 A 上，颜色/命中/距离都不动 ──
+    // 单位 = 全分辨率屏幕像素（接入层 /N 折成 SSR 像素）；0 = 关闭该条；曲线 smoothstep。
+    //   ① 预算：A *= fade(max_ray_pixels − σ)，σ = P→Q 的像素距离（= 命中点屏幕弧长）。
+    //   ② P 贴边：倒影贴着画面边框会被硬切 ⇒ 留一圈缓冲带。
+    //   ③ Q 贴边：反射源本身在画面外沿 ⇒ 可信度低。② 和 ③ 是两个不同位置的问题，各一个旋钮。
+    // 三者与掠射淡出（kappa）是**乘法**关系，任何一条为 0 都等于"这里交回 env"。
+    // 默认全 0 ⇒ 逐字节等于旧行为。
+    float fade_budget_pixels = 0.0f;
+    float fade_edge_pixels = 0.0f;
+    float fade_hit_edge_pixels = 0.0f;
+
+    // ── 三个遮丑滤波器（2026-11-13）：都在 SSR 分辨率、mip 链之前；默认全关 ──
+    // 各自独立，可单独开对比，也可叠（固定顺序：补洞 → 离群 → 小波）。
+    //   ① filter_hole_fill：形态学补洞，只补两侧都命中的 1px 缝（治梳齿）。
+    //   ② filter_outlier_clamp：3×3 方差引导，把偏离 k·σ 的样本夹回（治毛刺）。
+    //   ③ filter_atrous：边缘保持 à-trous（深度/法线引导），A 当"样本数"一起平均（多尺度）。
+    // 详见 ssr_filter.h 顶部。
+    bool filter_hole_fill = false;
+    bool filter_outlier_clamp = false;
+    bool filter_atrous = false;
+    float filter_clamp_sigma = 2.0f;    // ② 允许偏离几倍标准差，> 0
+    int filter_atrous_iterations = 1;   // ③ 1..3（步长 1/2/4；≥2 趟明显发虚）
 
     // ── 背面命中（2026-11-13）：模块照常给颜色，**处置权在融合层**，两个正交 flag ──
     // 背面命中 = 射线从某个面的背后穿出（法线朝相机、射线朝屏幕里）。它的颜色是那一格的

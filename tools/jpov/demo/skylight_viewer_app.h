@@ -224,6 +224,17 @@ public:
     // 只有两个阈值；把 end 调到 <= start 即等于关闭。
     float ssr_grazing_start_ = 2.0f;
     float ssr_grazing_end_ = 10.0f;
+    // A 的三个淡出（2026-11-13，遮丑用）。单位 = **全分辨率屏幕像素**；0 = 关闭。
+    // 默认全 0 ⇒ 与"没有这三条"逐字节相同（gold 不动）。
+    float ssr_fade_budget_px_ = 0.0f;      // ① 命中点离射线预算还剩多少
+    float ssr_fade_edge_px_ = 0.0f;        // ② 反射体像素 P 贴边
+    float ssr_fade_hit_edge_px_ = 0.0f;    // ③ 命中点 Q 贴边
+    // 遮丑滤波器（2026-11-13）：三个 toggle 各自独立，默认全关 = 旧行为。
+    bool  ssr_filter_hole_ = false;        // ① 形态学补洞（1px 梳齿缝）
+    bool  ssr_filter_clamp_ = false;       // ② 方差引导离群抑制（毛刺）
+    bool  ssr_filter_atrous_ = false;      // ③ 边缘保持 à-trous（多尺度）
+    float ssr_filter_atrous_iters_ = 1.0f; // ③ 趟数 1..3（步长 1/2/4）
+    float ssr_filter_clamp_k_ = 2.0f;      // ② 允许偏离几倍标准差（面板暂未暴露，拍摄用 env）
     // 背面命中的两个正交 flag（2026-11-13）：模块照常给颜色，处置在这里。
     // 默认 (false, 1.0) = 交回 env = 与旧行为逐字节相同（gold 不动）；交互时再打开。
     bool  ssr_backface_use_ssr_ = false;   // false = 用 env；true = 用 SSR 颜色
@@ -384,6 +395,15 @@ public:
             sc.debug_coverage = ssr_debug_;
             sc.grazing_fade_start = ssr_grazing_start_;
             sc.grazing_fade_end = ssr_grazing_end_;
+            sc.fade_budget_pixels = ssr_fade_budget_px_;
+            sc.fade_edge_pixels = ssr_fade_edge_px_;
+            sc.fade_hit_edge_pixels = ssr_fade_hit_edge_px_;
+            sc.filter_hole_fill = ssr_filter_hole_;
+            sc.filter_outlier_clamp = ssr_filter_clamp_;
+            sc.filter_atrous = ssr_filter_atrous_;
+            sc.filter_atrous_iterations =
+                static_cast<int>(std::lround(ssr_filter_atrous_iters_));
+            sc.filter_clamp_sigma = ssr_filter_clamp_k_;
             sc.backface_use_ssr = ssr_backface_use_ssr_;
             sc.backface_dim = ssr_backface_dim_;
             cmds->ssr = sc;
@@ -484,6 +504,11 @@ private:
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 
+        // ── 左列 14..15：遮丑滤波器 ①②（2026-11-13）──
+        // 三个 toggle 完全独立，可以逐条对比；③ 的趟数放在右列 8。
+        ui_.Checkbox("遮丑① 补洞 (1px 缝)", &ssr_filter_hole_, row(0, 14));
+        ui_.Checkbox("遮丑② 离群抑制 (方差)", &ssr_filter_clamp_, row(0, 15));
+
         // 远景仰角雾的 UI 已按 Danis 要求整段删除（2026-11-13）：
         // 场景里 elev_fog_on 默认 false，SSR 对比时它只会干扰判断。数据/命令仍在
         // （skylight_scene.h 的 deg_ 字段 + render_command 的 elevation_fog），需要时
@@ -494,6 +519,18 @@ private:
         // 掠射淡出：只有两个阈值（end <= start 即关闭）。
         ui_.SliderFloat("掠射淡出起点 kappa", &ssr_grazing_start_, row(1, 0), 1.0f, 60.0f, 1);
         ui_.SliderFloat("掠射淡出终点 kappa", &ssr_grazing_end_, row(1, 1), 1.0f, 60.0f, 1);
+
+        // ── 右列 4..6：A 的三个淡出（2026-11-13，遮丑）──
+        // 单位 = 全分辨率屏幕像素；0 = 关闭该条。三条相乘（与上面两个 kappa 也是相乘）。
+        // ① 预算：光靠"快走到预算上限"就压 A —— 擦边命中不再是一根刺。
+        // ② / ③ 贴边：P（倒影显示位置）和 Q（反射源）各自一条缓冲带。
+        ui_.SliderFloat("A 淡出·预算带 px", &ssr_fade_budget_px_, row(1, 4), 0.0f, 120.0f, 0);
+        ui_.SliderFloat("A 淡出·反射体贴边 px", &ssr_fade_edge_px_, row(1, 5), 0.0f, 240.0f, 0);
+        ui_.SliderFloat("A 淡出·命中点贴边 px", &ssr_fade_hit_edge_px_, row(1, 6), 0.0f, 240.0f, 0);
+
+        // ── 右列 7..8：遮丑滤波器 ③（2026-11-13）──
+        ui_.Checkbox("遮丑③ 边缘保持小波", &ssr_filter_atrous_, row(1, 7));
+        ui_.SliderFloat("小波趟数 (1..3)", &ssr_filter_atrous_iters_, row(1, 8), 1.0f, 3.0f, 0);
 
         // ── 右列 2..3：背面命中的两个正交 flag（2026-11-13）──
         // ① 来源：关 = 交回 env（旧行为）；开 = 用 SSR 给出的那份颜色。

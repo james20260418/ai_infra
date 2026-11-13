@@ -295,6 +295,22 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     CHECK(IsValidScale(in.cfg.resolution_scale))
         << "SsrConfig::resolution_scale 只支持 1/N（N = 1..4，即 1.0 / 0.5 / 0.3333 / 0.25），得到 "
         << in.cfg.resolution_scale;
+    CHECK(in.cfg.fade_budget_pixels >= 0.0f)
+        << "SsrConfig::fade_budget_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.cfg.fade_budget_pixels;
+    CHECK(in.cfg.fade_edge_pixels >= 0.0f)
+        << "SsrConfig::fade_edge_pixels 必须 ≥ 0（0 = 关闭），得到 " << in.cfg.fade_edge_pixels;
+    CHECK(in.cfg.fade_hit_edge_pixels >= 0.0f)
+        << "SsrConfig::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭），得到 "
+        << in.cfg.fade_hit_edge_pixels;
+    // （NaN 与任何数比较都为假 ⇒ 下面这些 "≥/>" 检查天然也能拦 NaN。）
+    CHECK_GT(in.cfg.filter_clamp_sigma, 0.0f)
+        << "SsrConfig::filter_clamp_sigma 必须 > 0，得到 " << in.cfg.filter_clamp_sigma;
+    CHECK_GE(in.cfg.filter_atrous_iterations, 1)
+        << "SsrConfig::filter_atrous_iterations 必须 ∈ [1,3]，得到 "
+        << in.cfg.filter_atrous_iterations;
+    CHECK_LE(in.cfg.filter_atrous_iterations, 3)
+        << "SsrConfig::filter_atrous_iterations 必须 ∈ [1,3]，得到 "
+        << in.cfg.filter_atrous_iterations;
 
     const int scale = static_cast<int>(std::lround(1.0f / in.cfg.resolution_scale));
 
@@ -366,11 +382,28 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     si.debug_reason = false;
     si.grazing_fade_start = in.cfg.grazing_fade_start;
     si.grazing_fade_end = in.cfg.grazing_fade_end;
+    // 三个淡出带宽：配置用**全分辨率屏幕像素**（人对"留 24 像素缓冲带"有直觉），
+    // 模块吃的是 SSR 像素 ⇒ 在这里 /N。改 N 时观感（屏幕上的带宽）保持不变。
+    const float fade_scale = 1.0f / static_cast<float>(scale);
+    si.fade_budget_pixels = in.cfg.fade_budget_pixels * fade_scale;
+    si.fade_edge_pixels = in.cfg.fade_edge_pixels * fade_scale;
+    si.fade_hit_edge_pixels = in.cfg.fade_hit_edge_pixels * fade_scale;
     si.slab_back_tex = slab_tex_;
     const SsrOutputs& outs = ssr_.Render(si);
 
     // ── ④ 粗糙度预滤波：A 预乘 mip 链（决定了"磨砂"的模糊量）──
-    filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height());
+    // 遮丑滤波器（2026-11-13）：引导用**降采样后的** w 与法线（与 SSR 同分辨率）。
+    SsrFilterGuides fg;
+    fg.down_w_tex = downsample_.w_tex();
+    fg.down_normal_tex = downsample_.normal_tex();
+    SsrFilterConfig fc;
+    fc.hole_fill = in.cfg.filter_hole_fill;
+    fc.outlier_clamp = in.cfg.filter_outlier_clamp;
+    fc.atrous = in.cfg.filter_atrous;
+    fc.clamp_sigma = in.cfg.filter_clamp_sigma;
+    fc.atrous_iterations = in.cfg.filter_atrous_iterations;
+    filter_.Run(outs.radiance_tex, outs.type_tex, downsample_.width(), downsample_.height(),
+                fg, fc);
 
     // ── ⑤ 融合：升采样 + 替换环境镜面项，写回 3D FBO 颜色 ──
     SsrFusionInputs fi;
