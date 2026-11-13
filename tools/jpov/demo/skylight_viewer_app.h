@@ -454,7 +454,8 @@ private:
                                                   "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）",
                                                   "SSR 调试：SSR 辐亮度",
-                                                  "SSR 调试：A 置信度（含掠射淡出）"};
+                                                  "SSR 调试：A 置信度（含掠射淡出）",
+                                                  "SSR 调试：背面命中掩码"};
             int dsel = ssr_debug_;
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;

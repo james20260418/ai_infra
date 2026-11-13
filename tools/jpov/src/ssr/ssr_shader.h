@@ -104,7 +104,8 @@ uniform float uSentinel;      // 无命中哨兵（= ssr::kNoHit）
 uniform int   uTile;          // T，tile 边长
 uniform float uSlabPixels;    // L = max_ray_pixels / T²（ssr_math.h::DerivedParams::slab_pixels）
 uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段尾就 break）
-// 屏幕预算（SSR 像素弧长）。**ray_ratio 的分母**：常量分母 ⇒ 提前结束的射线不会被误淡出。
+// 屏幕预算（SSR 像素弧长）。宿主侧用它推 DerivedParams（每段长度 / 步数上限），
+// 着色器内已不再消费（原来的 ray_ratio 输出 2026-11-13 删除）。
 uniform float uMaxRayPixels;
 
 // 背面命中的编码偏移（2026-11-13）。march 每 lane 只能输出一个 float：
@@ -469,12 +470,12 @@ void main() {
 }
 )glsl";
 
-// resolve：T² 取 min → 命中格 → 取色 + ray_ratio + 类型。
+// resolve：T² 取 min → 命中格 → 取色 + A（置信度）+ 类型 + 背面 flag。
 //
 // 输出（四样，紧凑排列）：
 //   location 0  FragRadiance  RGBA16F  rgb = 命中颜色辐亮度, a = **A（置信度）**
 //                                 命中 = 1（掠射淡出时 < 1）、非命中 = 0。
-//                                 注意 a ≠ ray_ratio（后者只是预算占用，供调试档使用）
+//                                 （2026-11-13 起 ray_ratio 不再输出：预算占用率没人消费）
 //   location 1  FragType      R8UI     0=None 1=Hit 2=Sky 3=Offscreen 4=Exhausted
 //   location 2  FragHitS      R32F     调试：命中位置的像素弧长（SSR_DEBUG 时才有）
 //
@@ -508,9 +509,7 @@ void main() {
 
     uint type = 0u;            // kNone
     vec3 rgb = vec3(0.0);
-    float ray_ratio = 0.0;
     // 输出给滤波层的 **A**（覆盖率/置信度）：命中=1，掠射淡出时 <1，非命中=0。
-    // 注意：A ≠ ray_ratio（后者是预算占用率，只用于调试）。
     float a_out = 0.0;
     float hit_s = uSentinel;
 
@@ -535,8 +534,6 @@ void main() {
             // 正好落在正确的双线性位置。最近邻会让倒影边缘逐像素跳一格 —— 这正是"反射
             // 锯齿"的主要内容（斜面/球面上尤其明显），改成线性后免费好一大截。
             rgb = texture(uColor, pos / uRes).rgb;
-            // 预算占用率：分母是**常量**预算（不是 span）。提前结束的射线比值天然小 ⇒ 不误淡出。
-            ray_ratio = clamp(s / max(uMaxRayPixels, 1.0), 0.0, 1.0);
             hit_s = s;
             type = 1u;                     // kHit
             a_out = 1.0;

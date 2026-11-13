@@ -261,8 +261,8 @@ void main() {
         FragColor = vec4(vec3(is_backface ? 1.0 : 0.0), 1.0);
         return;
     }
-    // 调试档 4：ray_ratio（预算占用率）灰度图。命中越接近预算上限越亮 ——
-    // 用来目视确认"提前结束的射线不会被误判成快到极限"。
+    // 调试档 4：**A（置信度，含掠射淡出）** 的灰度图。读的是 radiance.a —— 2026-11-13 起
+    // 那里存的是 A，不再是 ray_ratio（预算占用率已不输出，面板标签也已改为"A 置信度"）。
     if (uCoverageDebug == 4) {
         ivec2 q0c = clamp(q0, ivec2(0), ivec2(uSsrRes) - 1);
         FragColor = vec4(vec3(texelFetch(uSsr, q0c, 0).a), 1.0);
