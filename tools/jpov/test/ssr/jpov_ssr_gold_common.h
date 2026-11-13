@@ -3,14 +3,18 @@
 // 目的：给「SSR 链路」上**成图**保护。SSR 之前只有 CPU↔GPU 对拍（几何与命中格）
 // 与 tile 等价性（并发粒度），没有任何一张"整帧观感"的基线 —— 于是像"深度纹理换成
 // w = 1/z"这种改动（数学等价、舍入不同）无法验收。这里用天光查看器的**镜面场景**
-// 拍 5 张固定组合，作为 SSR 输出的端到端 gold。
+// 拍 11 张固定组合（5 个基础 + 6 个「能力各见效」），作为 SSR 输出的端到端 gold。
 //
-// 5 个组合刻意覆盖不同失效面（都是"改坏了才看得出来"的角度）：
+// 前 5 个组合刻意覆盖不同失效面（都是"改坏了才看得出来"的角度）：
 //   1. graze_mirror     极掠射（离地 6 cm / 45 m）—— 深度精度最敏感，条纹/黑带的老病灶
 //   2. mirror_1x        1:1 全分辨率 —— 反射最锐，取色/命中错一格立刻可见
 //   3. metal_mid        金属 r=0.30 + 中等俯角 —— 磨砂 mip 链（LOD>0）
 //   4. ladder_high      四段拼接 + 高俯角 —— 同屏四种材质（逐像素 F0/roughness）
 //   5. dawn_metal_third 低太阳 + 1:3 降采样 —— 非 2 的幂的分辨率、长影子
+//
+// 后 6 个（2026-11-13）每个只打开一项「遮丑」能力，机位是为「让这一项真的起作用」挑的；
+// 每个组合还带一条 min_ab_ratio：ON 与「六项全关」的差异必须 ≥ 它（否则说明这项没生效，
+// 后面的 gold 比较就变成空测 —— 这条自检就是为了防"gold 很绿但什么都没测到"）。
 //
 // 场景/资产与交互查看器的「场景1」同源（镜面地板 + 24 个散布方块 + 桌子/橡树 +
 // 4 个镜面蓝人），但**全部参数在这里钉死**：gold 不能依赖面板默认值。
@@ -47,20 +51,74 @@ struct SsrGoldCase {
     float ssr_scale = 0.5f;          // 1/N
     float rough_to_lod = 8.0f;
     float rough_cutoff = 0.6f;
+
+    // ── 六项「遮丑」能力（2026-11-13）：默认全关 ⇒ 下面 5 个老组合逐字节不变 ──
+    int   max_ray_px = 220;          // SSR 像素
+    float thickness_px = 6.0f;       // SSR 像素（面板默认 6）
+    float fade_budget_px = 0.0f;     // 全分辨率屏幕像素，0 = 关
+    float fade_edge_px = 0.0f;
+    float fade_hit_edge_px = 0.0f;
+    bool  filter_hole = false;
+    bool  filter_clamp = false;
+    bool  filter_atrous = false;
+    float clamp_k = 2.0f;
+    int   atrous_iters = 1;
+    // 「这一项真的起作用」的下限：该组合 ON 与「六项全关」的显著变化像素占比必须 ≥ 它。
+    // 0 = 不做这项断言（5 个老组合）。取值 ≈ 实测的 40%~50%，留出 llvmpipe 波动余量。
+    float min_ab_ratio = 0.0f;
 };
 
 // 0.0013333 ≈ asin(0.06 / 45)：相机离地 6 cm、距原点 45 m（真正的掠射）。
-inline constexpr SsrGoldCase kCases[5] = {
+inline constexpr SsrGoldCase kCases[11] = {
     {"graze_mirror", /*phi*/ 0.0013333f, /*theta*/ 0.6f, /*R*/ 45.0f,
-     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f},
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f},
     {"mirror_1x", /*phi*/ 0.21f, /*theta*/ 0.15f, /*R*/ 45.0f,
-     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f},
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f},
     {"metal_mid", /*phi*/ 0.35f, /*theta*/ 0.9f, /*R*/ 32.0f,
-     /*sun*/ 25.0f, 40.0f, /*turb*/ 4.0f, /*floor*/ 1, /*scale*/ 0.5f, 8.0f, 0.6f},
+     /*sun*/ 25.0f, 40.0f, /*turb*/ 4.0f, /*floor*/ 1, /*scale*/ 0.5f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f},
     {"ladder_high", /*phi*/ 0.55f, /*theta*/ 0.3f, /*R*/ 30.0f,
-     /*sun*/ 45.0f, 120.0f, /*turb*/ 2.0f, /*floor*/ 4, /*scale*/ 0.5f, 8.0f, 0.6f},
+     /*sun*/ 45.0f, 120.0f, /*turb*/ 2.0f, /*floor*/ 4, /*scale*/ 0.5f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f},
     {"dawn_metal_third", /*phi*/ 0.18f, /*theta*/ 1.2f, /*R*/ 40.0f,
-     /*sun*/ 8.0f, 75.0f, /*turb*/ 3.0f, /*floor*/ 1, /*scale*/ 1.0f / 3.0f, 8.0f, 0.6f},
+     /*sun*/ 8.0f, 75.0f, /*turb*/ 3.0f, /*floor*/ 1, /*scale*/ 1.0f / 3.0f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f},
+
+    // ── 六项能力的「各自见效」机位（2026-11-13）──
+    // 每个组合只打开一个开关，其余保持默认；相机/预算都是为「让这一项真的起作用」挑的。
+    // 括号里是当时实测的「相对全关」变化像素数（1280×720，>4/255），生成时核对过。
+
+    // ① 预算淡出：把预算压到 90 SSR 像素 ⇒ 大量命中落在淡出带里（σ > 30）。
+    {"fade_budget", /*phi*/ 0.21f, /*theta*/ 0.15f, /*R*/ 45.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
+     /*max_ray*/ 90, /*thick*/ 6.0f, /*budget*/ 60.0f, 0.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.006f},
+
+    // ② 反射体贴边（P）：地板铺满下半屏 + 160 px 缓冲带 ⇒ 画面底/左边缘一圈变淡。
+    {"fade_edge_p", /*phi*/ 0.21f, /*theta*/ 0.15f, /*R*/ 45.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, /*edge*/ 160.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.006f},
+
+    // ③ 命中点贴边（Q）：宽 300 px ⇒ 映到画面左右外沿的倒影变淡（和 ② 落点不同）。
+    {"fade_hit_edge_q", /*phi*/ 0.21f, /*theta*/ 1.2f, /*R*/ 45.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 1.0f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, /*hit edge*/ 300.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.002f},
+
+    // ④ 补洞：1:4 降采样 + 树/桌的稀疏反射 ⇒ 梳齿缝最多。
+    {"filter_hole", /*phi*/ 0.10f, /*theta*/ 0.9f, /*R*/ 30.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.25f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 3.0f, 0.0f, 0.0f, 0.0f, /*hole*/ true, false, false, 2.0f, 1, /*minAB*/ 0.0004f},
+
+    // ⑤ 离群抑制：同样 1:4（噪点最多），k=1 让「只夹离群点」也看得出来。
+    {"filter_clamp", /*phi*/ 0.21f, /*theta*/ 0.6f, /*R*/ 45.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.25f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, /*clamp*/ true, false, /*k*/ 0.5f, 1, /*minAB*/ 0.0006f},
+
+    // ⑥ 边缘保持小波：1:2 + 1 趟（默认档）—— 就是这个 PR 交付的默认观感。
+    {"filter_atrous", /*phi*/ 0.21f, /*theta*/ 0.6f, /*R*/ 45.0f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, false, /*atrous*/ true, 2.0f, 1, /*minAB*/ 0.006f},
 };
 
 inline std::string AssetPath(const std::string& rel) {
@@ -164,7 +222,29 @@ inline void ApplyCase(jpov_skylight::SkylightApp& app, const SsrGoldCase& c) {
     app.ssr_rough_to_lod_ = c.rough_to_lod;
     app.ssr_rough_cutoff_ = c.rough_cutoff;
     app.ssr_debug_ = 0;
+    // 六项能力：逐 case 显式写死（默认全关 ⇒ 老组合不受影响）。
+    app.ssr_max_ray_px_ = c.max_ray_px;
+    app.ssr_thickness_px_ = c.thickness_px;
+    app.ssr_fade_budget_px_ = c.fade_budget_px;
+    app.ssr_fade_edge_px_ = c.fade_edge_px;
+    app.ssr_fade_hit_edge_px_ = c.fade_hit_edge_px;
+    app.ssr_filter_hole_ = c.filter_hole;
+    app.ssr_filter_clamp_ = c.filter_clamp;
+    app.ssr_filter_atrous_ = c.filter_atrous;
+    app.ssr_filter_clamp_k_ = c.clamp_k;
+    app.ssr_filter_atrous_iters_ = static_cast<float>(c.atrous_iters);
     app.SetSsr(true);
+}
+
+// 把六项能力**全部关掉**（相机/预算/材质不动）—— 给「这一项到底起没起作用」做对照。
+// Pre-condition: app 已经 ApplyCase 过（这里只改这六个开关）。
+inline void DisableAllFeatures(jpov_skylight::SkylightApp& app) {
+    app.ssr_fade_budget_px_ = 0.0f;
+    app.ssr_fade_edge_px_ = 0.0f;
+    app.ssr_fade_hit_edge_px_ = 0.0f;
+    app.ssr_filter_hole_ = false;
+    app.ssr_filter_clamp_ = false;
+    app.ssr_filter_atrous_ = false;
 }
 
 inline std::string GoldFileName(const SsrGoldCase& c) {

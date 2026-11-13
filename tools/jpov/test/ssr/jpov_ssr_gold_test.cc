@@ -1,10 +1,12 @@
-// JPOV SSR gold test（5 个固定组合，端到端）
+// JPOV SSR gold test（11 个固定组合，端到端）
 //
 // 为什么需要它：SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并发粒度），
 // **没有任何整帧基线**。于是"数学等价但舍入不同"的改动（例如把 SSR 深度纹理从
 // 窗口深度换成 w = 1/z）没有验收手段 —— 它既不该让画面变，也无法证明没变。
-// 本测试用天光查看器的镜面场景拍 5 张（组合见 jpov_ssr_gold_common.h）：
-//   掠射 / 1:1 / 金属磨砂 / 四段拼接 / 低太阳 + 1:3 降采样。
+// 本测试用天光查看器的镜面场景拍 11 张（组合见 jpov_ssr_gold_common.h）：
+//   5 个基础（掠射 / 1:1 / 金属磨砂 / 四段拼接 / 低太阳 + 1:3）
+// + 6 个「单项能力」（三个 A 淡出 + 补洞 / 离群 / 小波），后者每个还断言
+//   「开关打开 vs 全关」必须有可观测差异（min_ab_ratio），防止 gold 变成空测。
 //
 // 通过条件（双闸门，与仓库其它光照 gold 一致）：
 //   1) 粗粒度：8×8 ROI 均值最大通道差 <= 25（容忍 llvmpipe 整块明暗漂移）
@@ -29,6 +31,8 @@ namespace {
 
 constexpr double kLightMeanThreshold = 25.0;   // 与 pcf/其它光照 gold 同档
 constexpr int    kPixelDiffThreshold = 24;
+// A/B 自检用低阈值：能力的效果大多是"柔和变淡"，单通道差经常只有 5~20。
+constexpr int    kAbPixelDiffThreshold = 4;
 constexpr double kMaxChangedRatio    = 0.0005; // 0.05%
 
 std::string GoldPath(const jpov_ssr_gold::SsrGoldCase& c) {
@@ -110,6 +114,24 @@ int main() {
             LOG(ERROR) << "[" << c.name << "] SSR 回归（对比 gold " << gold << "）";
             ++failures;
         }
+
+        // 自检（2026-11-13）：对这一项「能力」组合，ON 与「六项全关」必须真的有差别。
+        // 没有这条，一个把开关接反/接漏的改动也能让 gold 全绿 —— 那等于什么都没测。
+        if (c.min_ab_ratio > 0.0f) {
+            const std::string off_png = outdir + "off_" + c.name + ".png";
+            jpov_ssr_gold::DisableAllFeatures(app);
+            app.RunOnce(input, winfo, off_png.c_str());
+            const jpov::PixelChangeReport ab =
+                jpov::ComparePixelChangePng(rendered, off_png, kAbPixelDiffThreshold);
+            LOG(INFO) << "[" << c.name << "] A/B(开 vs 全关) changed="
+                      << (ab.changed_ratio * 100.0) << "% (>= "
+                      << (c.min_ab_ratio * 100.0) << "% required)";
+            if (ab.changed_ratio < c.min_ab_ratio) {
+                LOG(ERROR) << "[" << c.name << "] 这一项能力在当前机位下几乎不起作用"
+                           << "（gold 会变成空测），检查开关是否真的接上了";
+                ++failures;
+            }
+        }
     }
 
     app.Finalize();
@@ -119,6 +141,8 @@ int main() {
                    << " 个 SSR gold 组合不一致";
         return 1;
     }
-    LOG(INFO) << "TEST PASSED: 5 个 SSR gold 组合全部一致";
+    LOG(INFO) << "TEST PASSED: "
+              << (sizeof(jpov_ssr_gold::kCases) / sizeof(jpov_ssr_gold::kCases[0]))
+              << " 个 SSR gold 组合全部一致";
     return 0;
 }
