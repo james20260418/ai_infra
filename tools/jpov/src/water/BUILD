@@ -13,6 +13,24 @@ cc_library(
     linkstatic = 1,
 )
 
+# 水体介质的 CPU 参考模型（GL-free）：半空间 + 均质 ⇒ 闭式 τ/S（含 Snell 折射、
+# 菲涅尔界面透射、单次散射 + 环境项）。单测与 GPU 对拍共用这一份；
+# water_medium_shader.h 是同一套公式的 GLSL 版（"同源"，改一处必须改另一处）。
+cc_library(
+    name = "water_medium_math",
+    hdrs = [
+        "water_medium_math.h",
+        "water_medium_shader.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":water_skin_math",
+        "//tools/jpov/interface:camera",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 水皮渲染器：全屏三角形 + 解析求交 → WBO 覆盖集（accum/reveal/depth）→ over 合成。
 cc_library(
     name = "water_skin_renderer",

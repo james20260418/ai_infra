@@ -20,6 +20,7 @@
 
 #include "tools/jpov/src/fog/fog_shader.h"
 #include "tools/jpov/src/matrix_util.h"
+#include "tools/jpov/src/water/water_medium_shader.h"   // kDefaultMediumGlsl
 
 namespace jpov {
 
@@ -41,10 +42,15 @@ constexpr const char* kLayerSlotUniforms[kMaxTransparentLayers][3] = {
     {"uLayer3Accum", "uLayer3Reveal", "uLayer3Depth"},
 };
 
-// 组装一遍 FS 源码（#version 330 core + 公共前置 + 趟体）。
-std::string AssembleCompositeShader(const char* body) {
+// 组装一遍 FS 源码（#version 330 core + 公共前置 + 介质提供者 + 趟体）。
+//
+// 介质提供者（medium_glsl）必须定义 `MediumAt(ro, rd, z, out tau, out S)`；语义是
+// 「相机 → z（沿视线欧氏距离）」的**前缀累积** (τ, S)。水体实现在
+// src/water/water_medium_shader.h（物理与 water_medium_math.h 同源）。
+std::string AssembleCompositeShader(const char* medium_glsl, const char* body) {
     std::string s = "#version 330 core\n";
     s += kFogCommonGlsl;
+    s += medium_glsl;
     s += body;
     return s;
 }
@@ -55,10 +61,13 @@ FogCompositeRenderer::~FogCompositeRenderer() {
     // GL 资源由 Finalize 释放（析构不碰 GL：context 可能已先死）。
 }
 
-void FogCompositeRenderer::Init(ShaderManager* shader_mgr) {
+void FogCompositeRenderer::Init(ShaderManager* shader_mgr, const char* medium_glsl) {
     CHECK(shader_mgr != nullptr);
+    if (medium_glsl == nullptr) {
+        medium_glsl = water::kDefaultMediumGlsl;
+    }
     shader_mgr_ = shader_mgr;
-    fs_composite_ = AssembleCompositeShader(kFsComposite);
+    fs_composite_ = AssembleCompositeShader(medium_glsl, kFsComposite);
     prog_composite_ = shader_mgr_->GetOrCreate(
         "fog_composite", {kFogVs, fs_composite_.c_str()});
 
@@ -89,10 +98,11 @@ void FogCompositeRenderer::Draw(const FogField& field,
                                 const Camera& cam,
                                 const float view_proj[16],
                                 const FogParams& params,
-                                const TransparentLayerSet& layers) {
+                                const TransparentLayerSet& layers,
+                                const water::WaterMediumSample* medium) {
     CHECK(shader_mgr_ != nullptr) << "FogCompositeRenderer::Init 未调用";
-    if (!field.valid() && layers.count == 0) {
-        return;   // 无雾场也无层：零开销
+    if (!field.valid() && layers.count == 0 && medium == nullptr) {
+        return;   // 无雾场、无层、无介质：零开销
     }
     CHECK_LE(layers.count, kMaxTransparentLayers)
         << "layers.count 超过 kMaxTransparentLayers";
@@ -104,12 +114,18 @@ void FogCompositeRenderer::Draw(const FogField& field,
         << "FogCompositeRenderer: 相机矩阵不可逆（near/far 非法或退化）";
 
     // ── 保存调用方状态（见头文件「GL 状态机契约」）──
-    GLint prev_blend_src = 0;
-    GLint prev_blend_dst = 0;
+    //    混合因子按 RGB / alpha 分开保存（glBlendFuncSeparate）：逐通道透射只改 rgb 因子，
+    //    不动 alpha，否则会把 HDR 的 alpha 写成 2.0 之类的垃圾值。
+    GLint prev_blend_src_rgb = 0;
+    GLint prev_blend_dst_rgb = 0;
+    GLint prev_blend_src_a = 0;
+    GLint prev_blend_dst_a = 0;
     GLint prev_vp[4] = {0, 0, 0, 0};
     GLint prev_active_tex = 0;
-    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src);
-    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &prev_blend_src_rgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &prev_blend_dst_rgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src_a);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst_a);
     glGetIntegerv(GL_VIEWPORT, prev_vp);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
     std::vector<GLint> prev_tex_binding(static_cast<size_t>(kUnitsTouched), 0);
@@ -182,21 +198,79 @@ void FogCompositeRenderer::Draw(const FogField& field,
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uLayerCount"), layers.count);
     glActiveTexture(GL_TEXTURE0);
 
-    // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾无层像素 → 恒等。
+    // ── 全局均质介质（水体）：uniform 始终上传（无介质时置 0/零，防上帧残留）──
+    //    物理与 src/water/water_medium_math.h 的 WaterAt 同源，片段由 Init 拼入。
+    const bool has_medium = (medium != nullptr);
+    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uHasWater"),
+                has_medium ? 1 : 0);
+    if (has_medium) {
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterLevelY"),
+                    medium->level_y);
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterIor"), medium->ior);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSigmaA"),
+                    medium->sigma_a.x(), medium->sigma_a.y(), medium->sigma_a.z());
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSigmaS"),
+                    medium->sigma_s.x(), medium->sigma_s.y(), medium->sigma_s.z());
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterPhaseG"),
+                    medium->phase_g);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterAmbient"),
+                    medium->ambient.x(), medium->ambient.y(), medium->ambient.z());
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSunColor"),
+                    medium->sun_color.x(), medium->sun_color.y(), medium->sun_color.z());
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSunToward"),
+                    medium->sun_toward.x(), medium->sun_toward.y(),
+                    medium->sun_toward.z());
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uWaterHasSun"),
+                    medium->has_sun ? 1 : 0);
+    } else {
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterLevelY"), 0.0f);
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterIor"), 1.333f);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSigmaA"), 0.0f, 0.0f,
+                    0.0f);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSigmaS"), 0.0f, 0.0f,
+                    0.0f);
+        glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterPhaseG"), 0.0f);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterAmbient"), 0.0f, 0.0f,
+                    0.0f);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSunColor"), 0.0f, 0.0f,
+                    0.0f);
+        glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uWaterSunToward"), 0.0f, 1.0f,
+                    0.0f);
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uWaterHasSun"), 0);
+    }
+
+    // 就地合成：dst = L + dst·T
     glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (!has_medium) {
+        // 旧路径：一次 draw、标量 a（无水时三通道相等 ⇒ 雾 gold 逐字节不变）
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSpectralOutput"), 0);
+        glBlendFunc(GL_ONE, GL_SRC_ALPHA);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    } else {
+        // 逐通道透射：固定管线无法一次做 `dst·T(rgb) + L` ⇒ 两次 draw。
+        // 顺序必须是「先乘后加」（反了会得到 (dst+L)·T）；alpha 因子取 ZERO/ONE ⇒ alpha 不变。
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSpectralOutput"), 1);
+        glBlendFuncSeparate(GL_ZERO, GL_SRC_COLOR, GL_ZERO, GL_ONE);   // rgb *= T
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSpectralOutput"), 2);
+        glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);          // rgb += L
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
 
     // ── 复原状态（调用方随后做 highlight / bloom / tone map / 2D，均自设状态）──
     // enable 位由调用方 glPushAttrib(GL_ENABLE_BIT) 兜底；此处仍显式关掉。
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    // ⭐ 回写混合函数：GL_BLEND_SRC/DST_ALPHA 属 GL_COLOR_BUFFER_BIT，**不在** enable 位里，
-    //   必须显式复原成本趟进入前的值（否则 GL_ONE/GL_SRC_ALPHA 会沿用到 2D/字体）。
-    glBlendFunc(static_cast<GLenum>(prev_blend_src), static_cast<GLenum>(prev_blend_dst));
+    // ⭐ 回写混合函数：GL_BLEND_SRC/DST_* 属 GL_COLOR_BUFFER_BIT，**不在** enable 位里，
+    //   必须显式复原成本趟进入前的值（否则混合模式会沿用到 2D/字体）。
+    //   按 RGB / alpha 分开复原 —— 逐通道透射只改 rgb 因子，alpha 因子保持不变。
+    glBlendFuncSeparate(static_cast<GLenum>(prev_blend_src_rgb),
+                        static_cast<GLenum>(prev_blend_dst_rgb),
+                        static_cast<GLenum>(prev_blend_src_a),
+                        static_cast<GLenum>(prev_blend_dst_a));
     glUseProgram(0);
     // 回写 viewport 与纹理单元绑定，再复原活动单元。
     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);

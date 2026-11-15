@@ -775,6 +775,7 @@ int RunCaptureSsr(const std::string& out_dir) {
 //   water_above_high.png    俯视（F≈2%，应该接近“透明玻璃”而不是白板）
 //   water_sunset.png        低太阳（2°）：看掠射的天空色/地平线是否有硬边
 //   water_under_window.png  相机在水下：仰视 —— 下部 Snell 窗（透出天空/岛）+ 上部全内反射
+//   water_medium_off/on_d{2,5,10}.png  水体介质（吸收+散射）+ 30×30 岩板的深度序列
 //
 // 注：这一轮没有波浪/太阳高光/消光，所以“水面看起来平”是预期，不是缺失。
 int RunCaptureWater(const std::string& out_dir) {
@@ -840,6 +841,25 @@ int RunCaptureWater(const std::string& out_dir) {
     app.view_.theta = 0.6;
     app.view_.R = 20.0;      // 相机 y ≈ −11.3 m
     app.RunOnce(input, winfo, (out_dir + "/water_under_window.png").c_str());
+
+    // ── (f..i) 水体介质（2026-11-15 M1）：固定俯视机位，只动介质开关与岩板深度 ──
+    //   验收判据：岩板颜色的变化必须能由 exp(−σt·(d_sun + d_view)) 解释，
+    //   而不是“看起来像水”。红/蓝的比例变化是主证据。
+    app.deg_.sun_elev_deg = 55.0f;   // 太阳高一点：直射项占主导，
+    app.deg_.sun_azim_deg = 60.0f;   // 斜射会让太阳路径长度随深度变化，不易读。
+    app.view_.phi = 0.85;            // ≈48.7° 俯角（近正入射，菲涅尔最强、反射最小）
+    app.view_.theta = 0.6;
+    app.view_.R = 18.0;
+    app.SetSlabDepth(5.0f);
+
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_medium_off.png").c_str());
+    app.SetWaterMedium(true);
+    app.RunOnce(input, winfo, (out_dir + "/water_medium_on_d5.png").c_str());
+    app.SetSlabDepth(2.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_medium_on_d2.png").c_str());
+    app.SetSlabDepth(10.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_medium_on_d10.png").c_str());
 
     LOG(INFO) << "水皮验收图已写到 " << out_dir;
     app.Finalize();

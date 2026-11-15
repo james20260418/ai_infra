@@ -30,8 +30,9 @@
 //
 // ── GL 状态机契约（谁保存 / 谁复原）────────────────────────────────────────────
 // Draw() 自行保存并复原（不依赖调用方）：
-//   · GL_BLEND_SRC_ALPHA / GL_BLEND_DST_ALPHA（本趟用 GL_ONE/GL_SRC_ALPHA，
-//     这两个值属 GL_COLOR_BUFFER_BIT，**不在** glPushAttrib(GL_ENABLE_BIT) 里）；
+//   · GL_BLEND_SRC/DST_RGB 与 GL_BLEND_SRC/DST_ALPHA（本趟按 rgb/alpha 分开保存与复原：
+//     `GL_ONE/GL_SRC_ALPHA` 或逐通道透射的两次 draw；这些值属 GL_COLOR_BUFFER_BIT，
+//     **不在** glPushAttrib(GL_ENABLE_BIT) 里）；
 //   · GL_VIEWPORT（本趟按雾场构建尺寸设全屏）；
 //   · 本趟用到的纹理单元（0..2+3·4）的 GL_TEXTURE_2D 绑定与活动单元。
 // 不保存、由调用方 glPushAttrib(GL_ENABLE_BIT) 兜底：blend/depth/cull 的 enable 位、
@@ -48,6 +49,7 @@
 #include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/transparent_layer.h"
+#include "tools/jpov/src/water/water_medium_math.h"   // WaterMediumSample（POD，GL-free）
 
 namespace jpov {
 
@@ -68,7 +70,15 @@ uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
 uniform int   uGridCols;   // Nxy 单元列数
 uniform int   uGridRows;   // Nxy 单元行数
 
-out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
+out vec4 oColor;   // 语义随 uSpectralOutput：0=(S.rgb, T.r)、1=(T.rgb, ·)、2=(L.rgb, ·)
+
+// 输出选择（C++ 侧按帧决定，见 fog_composite_renderer.cc 的 Draw）：
+//   0 = 旧路径：标量 a（雾 gold 逐字节不变），混合 GL_ONE / GL_SRC_ALPHA；
+//   1 = 只输出**逐通道透射率** T，混合 GL_ZERO / GL_SRC_COLOR ⇒ dst *= T；
+//   2 = 只输出**注入亮度** L，混合 GL_ONE / GL_ONE       ⇒ dst += L。
+// 1+2 是「逐通道透射」的必需形式：固定管线的混合只有一个标量 alpha 或一个颜色因子，
+// 无法在一次 draw 里同时做 `dst·T(逐通道) + L`。水体存在时由 C++ 发两次 draw。
+uniform int uSpectralOutput;
 
 // 读某 tile 的 scatter 列在「位置 ℓ（= Nz·ln(z/near)/ln(far/near)）」处的 (τ, S)。
 // texel t 的自然位置 = t+1（覆盖 [z_near, z_{t+1}））；ℓ<1 与 identity 插值。
@@ -171,14 +181,24 @@ bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
     return true;
 }
 
-// 雾累积 (τ, S)：无雾场时直接返回恒等（省掉整条 froxel 采样链）。
-void FogAt(float ell, out float tau, out vec3 S) {
-    if (uHasFog == 0) {
-        tau = 0.0;
-        S = vec3(0.0);
-        return;
+// 场的累积 (τ, S)：froxel 雾场 + 额外介质提供者 MediumAt（水体的解析项）。
+// 两者都是「相机 → z」的前缀累积量，所以直接相加；froxel 的 τ 是标量（σ 灰），
+// 广播到三个通道 —— 水体逐通道由 MediumAt 自己负责。
+void FieldAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
+    vec3 fog_tau = vec3(0.0);
+    vec3 fog_S = vec3(0.0);
+    if (uHasFog != 0) {
+        float ct;
+        vec3 cS;
+        SampleFogBilinear(gl_FragCoord.xy, DepthToEll(z), ct, cS);
+        fog_tau = vec3(ct);
+        fog_S = cS;
     }
-    SampleFogBilinear(gl_FragCoord.xy, ell, tau, S);
+    vec3 med_tau;
+    vec3 med_S;
+    MediumAt(ro, rd, z, med_tau, med_S);   // 无水时恒等（kDefaultMediumGlsl）
+    tau = fog_tau + med_tau;
+    S = fog_S + med_S;
 }
 
 void main() {
@@ -189,8 +209,9 @@ void main() {
     // 像素场景深度 → 沿视线距离 → froxel 连续位置 ℓ_op（不透明场景深度）。
     float dndc = texture(uSceneDepthTex, uv).r;
     vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
-    float z_op = length(pw.xyz / pw.w - ro);
-    float ell_op = DepthToEll(z_op);
+    vec3 p_scene = pw.xyz / pw.w;
+    float z_op = length(p_scene - ro);
+    vec3  rd = normalize(p_scene - ro);   // 水体/介质提供者需要单位射线
 
     // ── 收集有效层 → 按代表深度升序（近→远）插入排序 ──
     vec3  layer_c[4];
@@ -220,31 +241,37 @@ void main() {
         ++n;
     }
 
-    // ── 雾段与层交替积分（front-to-back）──
+    // ── 雾段与层交替积分（front-to-back，逐通道 τ/W）──
+    //    逐通道是水体（σ 跨通道差 20+ 倍）的硬性要求；froxel 的标量雾在 FieldAt 里广播。
     vec3  L = vec3(0.0);
-    float W = 1.0;          // 已过的层透射率累积
-    float tau_prev = 0.0;
+    vec3  W = vec3(1.0);          // 已过的层透射率累积（逐通道）
+    vec3  tau_prev = vec3(0.0);
     vec3  S_prev = vec3(0.0);
     for (int i = 0; i < n; ++i) {
         float zi = min(layer_z[i], z_op);   // 层深度不超过不透明表面
-        float ell_i = DepthToEll(zi);
-        float tau_i;
+        vec3  tau_i;
         vec3  S_i;
-        FogAt(ell_i, tau_i, S_i);
+        FieldAt(ro, rd, zi, tau_i, S_i);
         L += W * (S_i - S_prev);
         L += W * exp(-tau_i) * layer_c[i];
-        W *= layer_t[i];
+        W *= vec3(layer_t[i]);
         tau_prev = tau_i;
         S_prev = S_i;
     }
 
-    float tau_op;
-    vec3  S_op;
-    FogAt(ell_op, tau_op, S_op);
+    vec3 tau_op;
+    vec3 S_op;
+    FieldAt(ro, rd, z_op, tau_op, S_op);
     L += W * (S_op - S_prev);
-    float a = W * exp(-(tau_op - tau_prev));
+    vec3 T = W * exp(-(tau_op - tau_prev));   // 背景透射率（逐通道）
 
-    oColor = vec4(L, a);
+    if (uSpectralOutput == 0) {
+        oColor = vec4(L, T.r);   // 旧路径：标量 a（无水时三通道相等 ⇒ 与改前逐字节相同）
+    } else if (uSpectralOutput == 1) {
+        oColor = vec4(T, 1.0);   // 乘 T（blend: ZERO / SRC_COLOR）
+    } else {
+        oColor = vec4(L, 1.0);   // 加 L（blend: ONE / ONE）
+    }
 }
 )glsl";
 
@@ -254,8 +281,14 @@ void main() {
     FogCompositeRenderer& operator=(const FogCompositeRenderer&) = delete;
 
     // 编译合成趟 program + 建 1×1 深度哑元。要求 GL context 已激活。
+    //
+    // medium_glsl：可选的「介质提供者」GLSL 片段，必须定义
+    //     void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S)
+    //   语义：z 处（沿视线的欧氏距离）的**前缀累积** (τ, S)。传 nullptr = 无额外介质
+    //   （用 kDefaultMediumGlsl 恒等）。水体实现见 src/water/water_medium_shader.h。
+    //   片段被拼在 kFogCommonGlsl 之后、kFsComposite 之前。
     // Pre-condition: shader_mgr != nullptr
-    void Init(ShaderManager* shader_mgr);
+    void Init(ShaderManager* shader_mgr, const char* medium_glsl = nullptr);
 
     // 释放 Init 申请的资源（与 Init 对称，可重复调用）。
     void Finalize();
@@ -266,6 +299,10 @@ void main() {
     //   view_proj       : Proj*View（列主序 16 float）。
     //   params          : 取 z_near / z_far / nz / tile_px（须与构建场时同一份）。
     //   layers          : 本帧透明层集合（可为空；空 = 全雾路径）。
+    //   medium          : 可选的全局均质介质（水体）。非空且 Init 时提供了 MediumAt 片段时：
+    //                     ① 场 = froxel + 介质（前缀累加，逐通道）；
+    //                     ② 输出改为**逐通道透射**：发两次 draw（dst *= T，再 dst += L），
+    //                        因为固定管线没法在一次 draw 里同时做 `dst·T(rgb) + L`。
     // Pre-conditions: Init 已调用；调用方已绑定目标 HDR FBO；
     //                 scene_depth_tex 不是当前 draw FBO 的附件（否则采样↔写入反馈环）。
     void Draw(const FogField& field,
@@ -273,7 +310,8 @@ void main() {
               const Camera& cam,
               const float view_proj[16],
               const FogParams& params,
-              const TransparentLayerSet& layers);
+              const TransparentLayerSet& layers,
+              const water::WaterMediumSample* medium = nullptr);
 
 private:
     ShaderManager* shader_mgr_ = nullptr;

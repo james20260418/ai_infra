@@ -115,6 +115,22 @@ public:
     bool water_skin_on_ = true;
     void SetWaterSkin(bool on) { water_skin_on_ = on; }
 
+    // ── 水体介质（2026-11-15 M1）：吸收/散射 + 可调深度的岩板 ──
+    //
+    // σ 默认值 = 纯水 20°C 的吸收谱（650nm 0.349 / 550nm 0.054 / 450nm 0.014 1/m，
+    // Pope & Fry 1997 量级）—— 所以红光 10 m 后只剩 3%、蓝光剩 87%，水自己就是蓝的。
+    // 散射取 0.05（清澈偏浊）：既能看出介质发光，又不把水下东西糊掉。
+    bool water_medium_on_ = true;
+    float water_sigma_a_r_ = 0.35f;
+    float water_sigma_a_g_ = 0.054f;
+    float water_sigma_a_b_ = 0.014f;
+    float water_sigma_s_ = 0.05f;
+    float water_phase_g_ = 0.35f;
+    // 岩板（30×30 m，顶面深度可调）：验收用的均匀底面 —— 颜色梯度/衰减对照。
+    float slab_top_depth_m_ = 5.0f;
+    void SetWaterMedium(bool on) { water_medium_on_ = on; }
+    void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
+
     struct IslandBox {
         jpov::Vec3f center;
         jpov::Vec3f front;
@@ -359,9 +375,13 @@ public:
         const bool water_scene = IsWaterScene();
         jpov::SkyCommand sky = nl.sky;
         if (water_scene) {
-            // 水场景里「地平线以下的半球」就是水体本身：本轮还没有消光/散射，
-            // 先用深海色占位（下一步体积雾接上后，这一项会被介质积分替代）。
-            sky.ground_color = jpov_skylight::kSeaGroundColor;
+            // 水场景里「地平线以下的半球」就是水体本身。
+            //   · 介质**关**：没有消光/散射 ⇒ 只能用深海色占位，否则水下是“黑地板”；
+            //   · 介质**开**：颜色由 σ 算出来（合成趟的注入项），此时若再垫一块地色
+            //     就是“垫底 + 介质注入”双计（见 known_issue §11.3）。
+            if (!water_medium_on_) {
+                sky.ground_color = jpov_skylight::kSeaGroundColor;
+            }
         }
         cmds->sky     = sky;
         cmds->sun     = nl.dir_light;
@@ -419,10 +439,23 @@ public:
                 cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
                                            person_material_, island_people_);
             }
+            // 水下岩板（30×30 m）：顶面在 −slab_top_depth_m_，随滑条升降。
+            cmds->DrawObject3D(ground_mesh_, jpov_skylight::SlabMaterial(),
+                               /*center*/ {0.0f, -slab_top_depth_m_, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  jpov_skylight::kSlabSizeM /
+                                          jpov_skylight::kSlabGroundMeshSizeM);
             if (water_skin_on_) {
                 jpov::WaterSkinCommand w;
                 w.level_y = jpov_skylight::kWaterLevelY;
                 w.ior = jpov_skylight::kWaterIor;
+                // 水体介质：合成趟在“水皮 composite 之前”把它积分进画面。
+                w.medium.enabled = water_medium_on_;
+                w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_,
+                                    water_sigma_a_b_};
+                w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
+                w.medium.phase_g = water_phase_g_;
                 cmds->water = w;
             }
         } else if (draw_scene && scene_index_ == 1) {
@@ -596,6 +629,17 @@ private:
             ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 4), 0.0f, 360.0f, 0);
             ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 5), 0.0f, 1.0f, 2);
             ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 6), 0.0f, 1.0f, 2);
+
+            // ── 右列：水体介质 + 岩板（2026-11-15 M1 验收）──
+            //  σ 逐通道是水的核心：默认值就是纯水 20°C 的吸收谱（650/550/450nm），
+            //  所以“10 m 后只剩蓝”不是调出来的，是参数自然结果。
+            ui_.Checkbox("水体介质 (吸收+散射)", &water_medium_on_, row(1, 0));
+            ui_.SliderFloat("吸收 R 1/m", &water_sigma_a_r_, row(1, 1), 0.0f, 1.0f, 3);
+            ui_.SliderFloat("吸收 G 1/m", &water_sigma_a_g_, row(1, 2), 0.0f, 1.0f, 3);
+            ui_.SliderFloat("吸收 B 1/m", &water_sigma_a_b_, row(1, 3), 0.0f, 1.0f, 3);
+            ui_.SliderFloat("散射 1/m (灰)", &water_sigma_s_, row(1, 4), 0.0f, 1.0f, 3);
+            ui_.SliderFloat("相位 g (前向散射)", &water_phase_g_, row(1, 5), 0.0f, 0.9f, 2);
+            ui_.SliderFloat("岩板顶面深度 m", &slab_top_depth_m_, row(1, 6), 0.5f, 20.0f, 2);
             ui_.End();
             return;
         }

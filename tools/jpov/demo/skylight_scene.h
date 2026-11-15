@@ -219,6 +219,18 @@ inline constexpr float kWaterLevelY = 0.0f;
 inline constexpr float kWaterIor = 1.333f;
 inline constexpr jpov::Color kSeaGroundColor = {0.02f, 0.05f, 0.065f, 1.0f};
 
+// ── 水下岩板（2026-11-15 M1 验收工件）──
+// 30×30 m 的均匀亮灰底：俯视时看得清“随深度的颜色渐变 + 背景衰减”，而且颜色变化只可能
+// 来自水体（材质是中性的，不和水的染色混淆）。
+// ground_mesh_ 是 40×40 的 quad ⇒ scale = kSlabSizeM / kSlabGroundMeshSizeM。
+inline constexpr float kSlabSizeM = 30.0f;
+inline constexpr float kSlabGroundMeshSizeM = 40.0f;
+inline constexpr float kSlabTopDepthDefM = 5.0f;
+inline jpov::PBRMaterial SlabMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.72f, 0.70f, 0.66f, 1.0f},
+                                          /*metallic*/ 0.0f, /*roughness*/ 0.9f);
+}
+
 // 岛屿方块材质阶梯：颜色/粗糙度/金属度都不同，用来一眼看出“水线切在不同材质上”
 // 的观感差别（粗糙的露头、湿岩的镜面边、金属矿的亮斑）。
 inline constexpr int kIslandMaterialCount = 5;
