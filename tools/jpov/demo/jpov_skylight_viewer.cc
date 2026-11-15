@@ -59,6 +59,9 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.mat_ground_ = jpov_skylight::GroundMaterial();
     app.mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
     app.mat_mirror_skin_ = jpov_skylight::MirrorSkinMaterial();
+    for (int i = 0; i < jpov_skylight::kIslandMaterialCount; ++i) {
+        app.island_material_[i] = jpov_skylight::IslandMaterial(i);
+    }
     app.BuildClutter(/*count=*/24);
 }
 
@@ -764,6 +767,85 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 水皮验收拍摄（2026-11-15）：--capture-water <out_dir>
+//
+// 出图（同一个固定岛屿布局，只动机位/天光）：
+//   water_off.png           关水皮的 A/B（同一机位，水面位置只剩下天球地色）
+//   water_above_low.png     贴水面掠射（菲涅尔 → 近 1，倒影最亮的一档）
+//   water_above_high.png    俯视（F≈2%，应该接近“透明玻璃”而不是白板）
+//   water_sunset.png        低太阳（2°）：看掠射的天空色/地平线是否有硬边
+//   water_under_window.png  相机在水下：仰视 —— 下部 Snell 窗（透出天空/岛）+ 上部全内反射
+//
+// 注：这一轮没有波浪/太阳高光/消光，所以“水面看起来平”是预期，不是缺失。
+int RunCaptureWater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水皮验收（headless）";
+    cfg.width = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallPerson(app);   // 蓝人：岛顶站着的人
+    app.BuildWaterIslands();
+
+    jpov::WindowInfo winfo;
+    winfo.width = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.scene_index_ = jpov_skylight::SkylightApp::kSceneWater;
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_ = jpov_viewer::DefaultView();
+
+    // (a) 关水皮：同一机位，看“水面位置到底有没有东西”（地色带对照）。
+    app.view_.phi = 0.10;   // ≈5.7° 仰角
+    app.view_.theta = 0.6;
+    app.view_.R = 24.0;
+    app.SetWaterSkin(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_off.png").c_str());
+
+    // (b) 开水皮，贴水面掠射。
+    app.SetWaterSkin(true);
+    app.RunOnce(input, winfo, (out_dir + "/water_above_low.png").c_str());
+
+    // (c) 俯视：F 最小的一档（不应该比天空更亮）。
+    app.view_.phi = 0.55;   // ≈31.5°
+    app.view_.theta = 0.9;
+    app.view_.R = 26.0;
+    app.RunOnce(input, winfo, (out_dir + "/water_above_high.png").c_str());
+
+    // (d) 日落：仰角 2° + 贴水面 —— 看反射里的太阳方向是否还在水面上方（夹到地平线）。
+    app.deg_.sun_elev_deg = 2.0f;
+    app.view_.phi = 0.08;
+    app.view_.theta = 0.6;
+    app.view_.R = 22.0;
+    app.RunOnce(input, winfo, (out_dir + "/water_sunset.png").c_str());
+
+    // (e) 相机在水下：仰视 34.4°，垂直 FOV 60° ⇒
+    //     画面顶部 ≈ 64° 仰角（离竖直 26° < 48.6° ⇒ **Snell 窗内**，透出天空/岛）；
+    //     画面底部 ≈ 4° 仰角（离竖直 86° > 48.6° ⇒ **全内反射**，只有常量地色）。
+    //     一帧同时看到两段，窗边界应是一条平滑的圆锥曲线（本轮无波浪，所以很硬）。
+    app.deg_.sun_elev_deg = 35.0f;
+    app.view_.phi = -0.60;   // ≈−34.4°（相机在水下，目标仍是原点 ⇒ 仰视）
+    app.view_.theta = 0.6;
+    app.view_.R = 20.0;      // 相机 y ≈ −11.3 m
+    app.RunOnce(input, winfo, (out_dir + "/water_under_window.png").c_str());
+
+    LOG(INFO) << "水皮验收图已写到 " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -772,6 +854,7 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
+    std::string water_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -784,6 +867,8 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
             mat_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
+            water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -793,6 +878,9 @@ int main(int argc, char** argv) {
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);
+    }
+    if (!water_out_dir.empty()) {
+        return RunCaptureWater(water_out_dir);
     }
     if (!ssr_out_dir.empty()) {
         return RunCaptureSsr(ssr_out_dir);
@@ -842,6 +930,8 @@ int main(int argc, char** argv) {
     LOG(INFO) << "[stage] InstallPerson 开始（骨骼/实例）";
     InstallPerson(app);
     LOG(INFO) << "[stage] InstallPerson 完成";
+    LOG(INFO) << "[stage] BuildWaterIslands（水场景的随机岛屿）";
+    app.BuildWaterIslands();
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();

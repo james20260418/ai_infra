@@ -105,6 +105,87 @@ public:
         }
     }
 
+    // ── 水场景（2026-11-15）───────────────────────────────────────
+    //
+    // 场景 = 随机岛屿（不同材质的单位方块堆 1~2 层）+ 岛顶蓝人 + 水皮。
+    // 水皮只吃「天体光照」：面板在该场景下只画天光自由度（见 DrawLightPanel）。
+    static constexpr int kSceneWater = 3;
+    bool IsWaterScene() const { return scene_index_ == kSceneWater; }
+    // headless 拍摄需要 A/B（开水 / 关水），交互里恒 true。
+    bool water_skin_on_ = true;
+    void SetWaterSkin(bool on) { water_skin_on_ = on; }
+
+    struct IslandBox {
+        jpov::Vec3f center;
+        jpov::Vec3f front;
+        float scale = 1.0f;   // 单位方块的统一缩放（边长 = 1 × scale）
+        int material = 0;
+    };
+    std::vector<IslandBox> island_boxes_;
+    std::vector<jpov::SkinnedInstanceState> island_people_;
+    jpov::PBRMaterial island_material_[jpov_skylight::kIslandMaterialCount];
+
+    // 随机岛屿：每座岛 = 1~2 块叠起来的单位方块（材质各自不同），露出水面 rise 米；
+    // 约六成岛上站一个蓝人（T-pose）。固定种子 ⇒ 每次拍摄/交互都是同一个布局。
+    // Pre-condition: InstallPerson() 已调用（需要 person_scale_ / person_min_y_）。
+    void BuildWaterIslands(int count = 7, uint32_t seed = 20261115u) {
+        CHECK_GE(count, 1);
+        island_boxes_.clear();
+        island_people_.clear();
+        uint32_t st = seed;
+        auto rnd = [&st]() {   // xorshift32：不引 <random>，且跨平台逐位一致
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            return static_cast<float>(st & 0xFFFFFFu) / static_cast<float>(0x1000000);
+        };
+        for (int i = 0; i < count; ++i) {
+            // 均匀铺在环上再加抖动：保证各个方位都有岛，不会全挤在一边。
+            const float ang = (static_cast<float>(i) / static_cast<float>(count)) * 6.2831853f
+                              + (rnd() - 0.5f) * 0.7f;
+            const float r = 9.0f + rnd() * 16.0f;
+            const float base = 2.2f + rnd() * 3.8f;   // 底块边长（米）
+            const float cx = r * std::cos(ang);
+            const float cz = r * std::sin(ang);
+            const float yaw = rnd() * 6.2831853f;
+            const jpov::Vec3f front = {std::sin(yaw), 0.0f, std::cos(yaw)};
+
+            // 底块：露出水面 (0.35·base + 0.4) 米，其余浸在水下（浸入部分本轮不可见 —— 没有消光）。
+            const float rise = 0.35f * base + 0.4f;
+            IslandBox b;
+            b.scale = base;
+            b.front = front;
+            b.center = {cx, jpov_skylight::kWaterLevelY - 0.5f * base + rise, cz};
+            b.material = static_cast<int>(rnd() * jpov_skylight::kIslandMaterialCount);
+            island_boxes_.push_back(b);
+            float top = b.center.y() + 0.5f * base;
+
+            // 约一半的岛再叠一块小顶石（材质重新抽，制造“水线切在不同材质上”的对照）。
+            if (rnd() < 0.5f) {
+                const float top_scale = base * (0.30f + 0.25f * rnd());
+                IslandBox t;
+                t.scale = top_scale;
+                t.front = front;
+                t.center = {cx, top + 0.5f * top_scale, cz};
+                t.material = static_cast<int>(rnd() * jpov_skylight::kIslandMaterialCount);
+                island_boxes_.push_back(t);
+                top += top_scale;
+            }
+
+            if (person_mesh_ != 0 && rnd() < 0.6f) {
+                jpov::SkinnedInstanceState inst;
+                inst.transform.center = {cx, top - person_scale_ * person_min_y_, cz};
+                inst.transform.up = {0.0f, 1.0f, 0.0f};
+                inst.transform.front = front;
+                inst.transform.scale = person_scale_;
+                inst.pose_a = 0;   // 唯一一帧 = identity = T-pose
+                inst.pose_b = 0;
+                inst.ratio = 0.0f;
+                island_people_.push_back(inst);
+            }
+        }
+    }
+
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
     struct ModelSlot {
@@ -275,7 +356,14 @@ public:
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
         // moon_season 与夜空蓝覆盖默认值。
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
-        cmds->sky     = nl.sky;
+        const bool water_scene = IsWaterScene();
+        jpov::SkyCommand sky = nl.sky;
+        if (water_scene) {
+            // 水场景里「地平线以下的半球」就是水体本身：本轮还没有消光/散射，
+            // 先用深海色占位（下一步体积雾接上后，这一项会被介质积分替代）。
+            sky.ground_color = jpov_skylight::kSeaGroundColor;
+        }
+        cmds->sky     = sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
@@ -283,7 +371,8 @@ public:
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
         // 三块方块的 index 2（metallic=1, “无漫反射，纯环境反射”）是验收工件。
-        if (env_specular_on_) {
+        // 水场景强制开环境镜面：水皮的反射源就是它，关掉水面直接变黑（不是可选项）。
+        if (env_specular_on_ || water_scene) {
             jpov::EnvSpecular es;
             es.sky_scale = env_specular_scale_;
             cmds->env_specular = es;
@@ -319,7 +408,24 @@ public:
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
-        if (draw_scene && scene_index_ == 1) {
+        if (draw_scene && water_scene) {
+            // 随机岛屿（不同材质的单位方块堆）+ 岛顶蓝人。水面由水皮 pass 负责，
+            // 场景里**不画地面** —— 水下本轮什么都没有（消光/散射还没接）。
+            for (const IslandBox& b : island_boxes_) {
+                cmds->DrawObject3D(box_mesh_, island_material_[b.material], b.center,
+                                   /*up*/ {0.0f, 1.0f, 0.0f}, b.front, b.scale);
+            }
+            if (person_mesh_ != 0 && !island_people_.empty()) {
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           person_material_, island_people_);
+            }
+            if (water_skin_on_) {
+                jpov::WaterSkinCommand w;
+                w.level_y = jpov_skylight::kWaterLevelY;
+                w.ior = jpov_skylight::kWaterIor;
+                cmds->water = w;
+            }
+        } else if (draw_scene && scene_index_ == 1) {
             // 地面：按档位选材质。四段拼接时每段各画一遍（材质不同 ⇒ 必须是不同命令；
             // 属性 pass 会逐物体上传该段的 F0/roughness，合成层逐像素取 —— 这正是
             // 2026-11-02 那两条修正要验证的东西）。
@@ -384,7 +490,7 @@ public:
 
         // SSR：把配置交给 Renderer（属性 pass / 降采样 / 模块 / 合成都在那边）。
         // 必须同时开环境镜面 —— 没有 env 就没有"可替换的那一项"（Renderer 会 FATAL）。
-        if (ssr_on_ && env_specular_on_) {
+        if (ssr_on_ && env_specular_on_ && !water_scene) {
             jpov::SsrConfig sc;
             sc.enabled = true;
             sc.resolution_scale = ssr_scale_;
@@ -454,10 +560,13 @@ private:
         // 放在列首（2026-10-30 Danis：「下拉菜单不要放下面，一旦下拉会出屏幕」）：
         // Ui::Combo 的下拉列表恒朝下展开（框底 = 列表顶），贴底的行一展开就出屏；
         // 列首下方空间充足，两个下拉都能完整展开。
+        //
+        // 场景下拉在**所有场景**都画（包括水场景）—— 否则切过去就切不回来。
         {
             const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
                                                      "场景1 镜面地板+随机模型",
-                                                     "场景2 只天空"};
+                                                     "场景2 只天空",
+                                                     "场景3 水场景（岛+蓝人）"};
             int sel = scene_index_;
             if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
@@ -466,10 +575,34 @@ private:
                     view_.phi = 0.21;   // ≈12° 仰角
                     view_.theta = 0.0;
                     view_.R = 45.0;
+                } else if (sel == kSceneWater) {
+                    // 贴着水面看：掠射最能看出菲涅尔、地平线与水线处理。
+                    view_.phi = 0.10;   // ≈5.7° 仰角
+                    view_.theta = 0.6;
+                    view_.R = 24.0;
                 }
             }
-            ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
-            // 5 档与 SsrConfig::debug_coverage 一一对应（3/4 以前只能在拍摄脚本里用）。
+        }
+
+        // 水场景：面板只留天体光照（Danis 2026-11-15）。水皮的水位/折射率不开放调节 ——
+        // 这一轮验收的是物理口径（菲涅尔 / 临界角 / 地平线），不是调参手感。
+        if (IsWaterScene()) {
+            ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 1),
+                            kTurbidityMin, kTurbidityMax, 1);
+            ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
+                            row(0, 2), -1.0f, 1.0f, 2);
+            ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                            row(0, 3), -90.0f, 90.0f, 0);
+            ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 4), 0.0f, 360.0f, 0);
+            ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 5), 0.0f, 1.0f, 2);
+            ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 6), 0.0f, 1.0f, 2);
+            ui_.End();
+            return;
+        }
+
+        ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
+        // 5 档与 SsrConfig::debug_coverage 一一对应（3/4 以前只能在拍摄脚本里用）。
+        {
             const std::vector<const char*> dbg = {"SSR 调试：关",
                                                   "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）",
@@ -480,7 +613,6 @@ private:
             if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
             }
-
         }
 
         // ── 左列 3..13：天光自由度 ──

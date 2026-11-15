@@ -33,6 +33,8 @@
 
 #include <cmath>
 
+#include <glog/logging.h>
+
 #include "tools/jpov/include/jpov/jpov.h"
 
 namespace jpov_skylight {
@@ -205,6 +207,42 @@ inline constexpr float kLadderCenterX(int i) {
     return -30.0f + 20.0f * static_cast<float>(i);
 }
 inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左→右
+
+// ── 水场景（2026-11-15）：随机岛屿 = 不同材质的方块堆 + 岛顶蓝人 ──
+//
+// 水面是 `y = kWaterLevelY` 的无限平面（引擎里的水皮只认高度，不认尺寸）：场景里
+// **不画地面**，水下什么都没有 —— 这一轮水体的吸收/注入还没接（下一步交给体积雾），
+// 所以“看下去”的背景就是天球下半球的 ground 色。这里刻意把它设成深海色，
+// 让画面读起来是“深水”而不是“黑色地板”。
+inline constexpr float kWaterLevelY = 0.0f;
+// 水的折射率（20°C 纯水）：只影响菲涅尔反射率与全内反射临界角（≈48.6°）。
+inline constexpr float kWaterIor = 1.333f;
+inline constexpr jpov::Color kSeaGroundColor = {0.02f, 0.05f, 0.065f, 1.0f};
+
+// 岛屿方块材质阶梯：颜色/粗糙度/金属度都不同，用来一眼看出“水线切在不同材质上”
+// 的观感差别（粗糙的露头、湿岩的镜面边、金属矿的亮斑）。
+inline constexpr int kIslandMaterialCount = 5;
+inline jpov::PBRMaterial IslandMaterial(int index) {
+    CHECK_GE(index, 0);
+    CHECK_LT(index, kIslandMaterialCount);
+    switch (index) {
+        case 0:  // 沙洲：亮、全粗糙
+            return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.62f, 0.55f, 0.40f, 1.0f},
+                                                   /*metallic*/ 0.0f, /*roughness*/ 1.0f);
+        case 1:  // 岩石：中性灰、粗糙
+            return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.35f, 0.34f, 0.32f, 1.0f},
+                                                   /*metallic*/ 0.0f, /*roughness*/ 0.85f);
+        case 2:  // 苔岩：暗绿、极粗糙
+            return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.24f, 0.33f, 0.21f, 1.0f},
+                                                   /*metallic*/ 0.0f, /*roughness*/ 0.95f);
+        case 3:  // 湿岩：暗、光滑（贴水面的那一圈应该有明显天光反光）
+            return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.20f, 0.22f, 0.24f, 1.0f},
+                                                   /*metallic*/ 0.0f, /*roughness*/ 0.25f);
+        default:  // 金属矿：纯环境反射（水面上唯一会“亮”的方块）
+            return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.72f, 0.72f, 0.76f, 1.0f},
+                                                   /*metallic*/ 1.0f, /*roughness*/ 0.30f);
+    }
+}
 
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //

@@ -618,6 +618,7 @@ Renderer::~Renderer() {
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
+    water_skin_renderer_.Finalize();
     smaa_renderer_.Finalize();
     debug_overlay_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
@@ -1362,6 +1363,7 @@ void Renderer::Init(
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
+    water_skin_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     ssr_integration_.Init(&shader_mgr_);
     CreateStreamVBO();
@@ -1919,6 +1921,51 @@ void Renderer::Render(const RenderCommandList& cmds,
                 strip_renderer_.Composite(fbo_3d_w, fbo_3d_h);
                 const GLenum mrt_bufs_s[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_s);
+            }
+
+            // ── 水皮（界面层）—— 粒子/火/条带之后、froxel 之前（Danis 2026-11-15 定）。──
+            //    只画界面：菲涅尔反射 + 透射（水上）/ Snell 窗 + 全内反射（水下）。
+            //    水体的吸收与注入**不在本 pass**（下一步交给体积雾按「雾段 + 层」积分）。
+            //    结果先写自持 WBO 覆盖集（accum/reveal + att3 代表深度），再 over 合成进 HDR
+            //    —— 走层而不是直接拌色，是为了将来能被雾当成一层来积分。
+            if (cmds.water.has_value()) {
+                CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
+                CHECK(cmds.sky.has_value())
+                    << "水皮需要 sky：水下全内反射色取 SkyCommand::ground_color";
+                CHECK(cmds.env_specular.has_value())
+                    << "水皮需要 env_specular：水面唯一的反射源是天光探针";
+                CHECK_GT(cmds.env_specular->sky_scale, 0.0f)
+                    << "env_specular.sky_scale = 0 时探针不建，水面没有反射源";
+                CHECK_LE(cmds.env_specular->sky_scale, 1.0f)
+                    << "env_specular.sky_scale 必须 <= 1";
+                CHECK_NE(sky_env_tex_, 0u)
+                    << "水皮需要天光 cubemap（env_specular 开启时应已在天空 pass 建好）";
+
+                WaterSkinRenderer::Inputs wsi;
+                wsi.camera = cmds.camera;
+                wsi.full_w = fbo_3d_w;
+                wsi.full_h = fbo_3d_h;
+                wsi.scene_depth_tex = hdr_scene_depth_tex;   // 本帧 MRT#1
+                wsi.env_cube_tex = sky_env_tex_;
+                wsi.env_scale = cmds.env_specular->sky_scale;
+                // 天空探针的下半球用 ground_color × intensity（与 sky shader 同口径），
+                // 水下全内反射也必须是同一个量，否则水面与地色的亮度会差一截。
+                wsi.tir_color = {cmds.sky->ground_color.r * cmds.sky->intensity,
+                                 cmds.sky->ground_color.g * cmds.sky->intensity,
+                                 cmds.sky->ground_color.b * cmds.sky->intensity};
+                wsi.level_y = cmds.water->level_y;
+                wsi.ior = cmds.water->ior;
+
+                water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                water_skin_renderer_.Draw(wsi);
+                // Composite 写回 HDR 颜色附件 0（不碰 MRT#1）：
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                const GLenum wdraw[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, wdraw);
+                water_skin_renderer_.Composite(fbo_3d_w, fbo_3d_h);
+                const GLenum mrt_bufs_w[2] = {GL_COLOR_ATTACHMENT0,
+                                              GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_w);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

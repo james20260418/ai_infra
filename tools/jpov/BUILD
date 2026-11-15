@@ -187,7 +187,10 @@ cc_library(
     name = "skylight_scene",
     hdrs = ["demo/skylight_scene.h"],
     visibility = ["//visibility:public"],
-    deps = ["//tools/jpov/include/jpov:jpov"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
     copts = ["-std=c++20"],
 )
 

@@ -20,6 +20,7 @@
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
+#include "tools/jpov/src/water/water_skin_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/ssr/ssr_integration.h"
@@ -388,6 +389,8 @@ private:
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。
     StripRenderer strip_renderer_;
+    // 水皮（界面层；条带之后、远景雾/froxel 之前）。见 src/water/。
+    WaterSkinRenderer water_skin_renderer_;
     VolumeManager volume_mgr_;
     // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
     SmaaRenderer smaa_renderer_;

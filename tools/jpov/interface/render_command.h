@@ -835,6 +835,43 @@ struct SsrConfig {
     int debug_coverage = 0;
 };
 
+// ==================== 水皮（Water Skin）====================
+//
+// 语义：世界 `y = level_y` 的一张**无限水平平面**，只负责「界面」那一层，
+// 不负责水体介质（吸收/散射/注入由体积雾按层积分，见 docs/jpov_lux_glass_design.md 的分工）：
+//   · 相机在水上：菲涅尔反射天光（环境立方体探针）+ 透射背景；
+//   · 相机在水下：Snell 窗内透射背景、窗外全内反射（常量地色）。
+//
+// 链路位置（见 renderer.cc 的 water 段）：不透明 3D（含 SSR）→ 粒子 → 体积火 → 条带
+// → **水皮** → 远景雾 / froxel。先写自持 WBO 覆盖集，再 over 合成进 HDR：
+//   accum  = 反射色 × F      （预乘；w = 1）
+//   reveal = 写入 α = F      （WBO 的 revealage 混合 ⇒ 单层后纹理里是 1 − F）
+//   depth  = z_view × F      （att3；将来交给雾做「雾段 + 层」交替积分）
+// 走 WBO 而不是直接 alpha 混合，是为了下一步与体积雾的分段合成 —— 水皮必须是
+// 一个**带代表深度的层**，而不是已经拌进画面的像素。
+//
+// 本版**不做**（写在前面，免得当成 bug）：
+//   · 波浪：法线恒 (0,1,0)，反射不抖、没有太阳路；
+//   · 折射：窗内不压缩天球（按原视线方向看天），水面之下也不位移；
+//   · 消光 / 散射：水下段不衰减（下一步交给体积雾）；
+//   · 平面反射：倒影只有天光探针（映不出岛屿/人）；
+//   · 太阳高光：探针按设计不含日月盘 ⇒ 水面上没有太阳的像。
+//
+// Pre-condition（Renderer 会 CHECK，不静默退化）：
+//   · `tone_mapping = true`（需要 HDR + MRT#1 场景深度）；
+//   · `sky` 已设置（水下全内反射色取 `SkyCommand::ground_color`）；
+//   · `env_specular` 已设置且 `sky_scale > 0`（水面的唯一反射源）。
+struct WaterSkinCommand {
+    // 水面世界高度（米，y-up）。相机高于它 = 从上看；低于它 = 从下看。
+    // 没有「平面尺寸」这个参数：视线越接近水平，交点距离 → ∞，几何上必须解析求交。
+    float level_y = 0.0f;
+
+    // 水的折射率。**只**用于菲涅尔反射率与全内反射临界角 `asin(1/ior)`（≈48.6°），
+    // 不产生任何折射位移。1.0 = 界面在物理上消失（R ≡ 0）。
+    // 物理值：1.333（20°C 纯水）。取值必须 > 0。
+    float ior = 1.333f;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -2403,6 +2440,11 @@ struct RenderCommandList {
     // 未设置 / enabled=false ⇒ 一次都不跑，零开销零回归。
     // Pre-condition: 必须同时设置 env_specular（合成要重算并替换那一项）。
     std::optional<SsrConfig> ssr;
+
+    // 水皮（水/海面界面）。有值时在粒子/火/条带之后、froxel 之前画一次水面 pass，
+    // 结果写自持 WBO 覆盖集再 over 合成进 HDR。未设置 ⇒ 一次都不跑（零开销零回归）。
+    // Pre-condition 见 WaterSkinCommand 的注释（需要 env_specular + sky + tone_mapping）。
+    std::optional<WaterSkinCommand> water;
 
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
