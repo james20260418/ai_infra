@@ -47,6 +47,7 @@
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
+#include "tools/jpov/src/water/water_underwater_shading.h"   // WaterShade 共享片段
 #include "tools/jpov/src/texture_manager.h"
 
 namespace jpov {
@@ -867,7 +868,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         total_specular += light.color * light.intensity * spec * NdotL_s * attenuation;
     }
 }
-)glsl") + kEnvSpecularGlsl + R"glsl(
+)glsl") + kEnvSpecularGlsl + water::kUnderwaterShadingGlsl + R"glsl(
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -941,6 +942,14 @@ void main() {
         num_lights = readTileLights(tile_col, tile_row, light_indices);
     }
 
+    // ── 水下光照衰减（主 pass 共用水片段；水上恒等）──
+    //    直射：方向换成折射后的、辐照度乘 (1−R)·e^{−σt·d/cosθw}（逐通道）；
+    //    环境：乘 (1−R̄)·e^{−K_d·d}（逐通道）。不做则水下物体按空气照明 ⇒ 偏亮偏暖。
+    vec3 w_sun_prop;
+    vec3 w_sun_gain;
+    vec3 w_amb_gain;
+    WaterShade(vWorldPos, uSunDir, w_sun_prop, w_sun_gain, w_amb_gain);
+
     // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
     vec3 ambient;
     if (uAmbientTricolorEnabled == 1) {
@@ -948,9 +957,9 @@ void main() {
         vec3 amb3 = (ambient_up >= 0.0)
             ? mix(uAmbientTricolor[1], uAmbientTricolor[0], ambient_up)    // 天际线→天
             : mix(uAmbientTricolor[1], uAmbientTricolor[2], -ambient_up);  // 天际线→地
-        ambient = amb3 * uAmbientIntensity;
+        ambient = amb3 * uAmbientIntensity * w_amb_gain;
     } else {
-        ambient = uAmbientColor * uAmbientIntensity;
+        ambient = uAmbientColor * uAmbientIntensity * w_amb_gain;
     }
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
@@ -958,12 +967,12 @@ void main() {
     // ── 太阳平行光（直射 GGX diffuse + specular，× 级联阴影因子）──
     // 平行光无衰减、方向全局，独立于 tile culling 的点光源循环。
     if (uHasSun == 1) {
-        vec3 L = normalize(-uSunDir);       // 从片元指向光源
+        vec3 L = normalize(-w_sun_prop);   // 从片元指向光源（水下 = 折射后）
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL > 0.0) {
             float frag_dist = length(uCameraPos - vWorldPos);
             float shadow = computeSunShadow(vWorldPos, N, L, frag_dist);
-            vec3 light_col = uSunColor * uSunIntensity * shadow;
+            vec3 light_col = uSunColor * uSunIntensity * shadow * w_sun_gain;
 
             // diffuse（Lambert + 菲涅尔去金属部分）
             vec3 Hd = normalize(L + V);

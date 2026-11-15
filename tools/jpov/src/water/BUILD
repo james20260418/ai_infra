@@ -31,6 +31,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# 水下光照衰减（三个 PBR 主 pass 共用）：GLSL 片段 + uniform 上传。
+# 只做“照明侧”（折射方向 / 太阳路径衰减 / 环境随深度衰减）；视线侧在合成趟。
+cc_library(
+    name = "water_underwater_shading",
+    srcs = ["water_underwater_shading.cc"],
+    hdrs = ["water_underwater_shading.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":water_medium_math",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 水皮渲染器：全屏三角形 + 解析求交 → WBO 覆盖集（accum/reveal/depth）→ over 合成。
 cc_library(
     name = "water_skin_renderer",

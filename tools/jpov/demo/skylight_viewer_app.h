@@ -131,6 +131,29 @@ public:
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
 
+    // ── 水下三件验收物（2026-11-15）：分别走 **object3d / instanced / skinned** 三个主 pass ──
+    //
+    // 目的：水下光照衰减（折射方向 + 太阳路径衰减 + 环境随深度衰减）是在**主 pass** 里算的，
+    // 而主 pass 有三份 PBR 片元（各自一份拷贝）。这三件东西各自走一条，一眼能看出
+    // “哪条没接上”：同一深度/同一材质下，三条的颜色应该一致，只差形状。
+    // 全部坐在岩板上 ⇒ 拉一个滑条整组一起下沉，颜色应一起变。
+    //
+    // instanced 用橡树 mesh（场景里已装载）：树影是“有机遮罩 + 上下面法线差异大”的形状，
+    // 折射方向错了会最先在这里看出来（叶子/树干的比色变化）。
+    uint32_t water_tree_mesh_ = 0;            // 橡树 mesh（instanced pass）
+    jpov::PBRMaterial water_tree_material_;
+    float water_tree_min_y_ = 0.0f;           // 模型局部包围盒 min.y（把树根坐到岩板上）
+    float water_tree_local_h_ = 0.0f;         // 模型局部高度（按目标世界高度归一缩放）
+    // 目标世界高度（米）：验收件要**完全没入水中**（深度滑条最小 0.5m 时也尽量不露出）。
+    static constexpr float kWaterTreeTargetH = 2.8f;
+    void SetWaterTree(uint32_t mesh_id, const jpov::PBRMaterial& mat, float local_min_y,
+                      float local_height) {
+        water_tree_mesh_ = mesh_id;
+        water_tree_material_ = mat;
+        water_tree_min_y_ = local_min_y;
+        water_tree_local_h_ = local_height;
+    }
+
     struct IslandBox {
         jpov::Vec3f center;
         jpov::Vec3f front;
@@ -457,6 +480,55 @@ public:
                 w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
                 w.medium.phase_g = water_phase_g_;
                 cmds->water = w;
+            }
+
+            // ── 水下三件验收物：分别走 object3d / instanced / skinned 三个主 pass ──
+            //    都坐在岩板顶面（−slab_top_depth_m_）⇒ 一个滑条整组下沉。
+            const float top = -slab_top_depth_m_;
+            // ⚠️ 三件东西用**同一份材质**（同一 baseColor/roughness）：这样"三条 pass 是否
+            //    都消费了水下衰减"可以一眼判定 —— 同一深度/同一材质，颜色必须一样；
+            //    谁没接上，谁就会明显偏亮偏暖。材质不同会让"路径漏接"混进"材质差异"里。
+            const jpov::PBRMaterial rig_mat = jpov::PBRMaterial::SolidColorMR(
+                /*color*/ {0.78f, 0.70f, 0.52f, 1.0f}, /*metallic*/ 0.0f,
+                /*roughness*/ 0.6f);
+            // (1) 普通 object3d。
+            cmds->DrawObject3D(box_mesh_, rig_mat,
+                               /*center*/ {3.0f, top + 0.8f, 2.5f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  1.6f);
+            // (2) instanced：三棵橡树（同一 mesh、一次 instanced draw）。
+            if (water_tree_mesh_ != 0) {
+                // 按目标世界高度归一（资产原始尺寸未知，见 InstallModels 的同一套路）。
+                const float ts = (water_tree_local_h_ > 1.0e-6f)
+                    ? (kWaterTreeTargetH / water_tree_local_h_) : 1.0f;
+                std::vector<jpov::InstanceState> trees;
+                for (int i = 0; i < 3; ++i) {
+                    const float ang = static_cast<float>(i) * 2.09f + 0.6f;
+                    const float r = 5.0f + 1.2f * static_cast<float>(i);
+                    jpov::InstanceState st;
+                    st.transform.center = {r * std::cos(ang), top - water_tree_min_y_ * ts,
+                                           r * std::sin(ang)};
+                    st.transform.up = {0.0f, 1.0f, 0.0f};
+                    st.transform.front = {std::sin(ang), 0.0f, std::cos(ang)};
+                    st.transform.scale = ts;
+                    trees.push_back(st);
+                }
+                cmds->DrawInstancedObject(water_tree_mesh_, rig_mat, trees);
+            }
+            // (3) skinned：一个站在岩板上的人（与岛顶的蓝人同一套 mesh/骨架）。
+            if (person_mesh_ != 0) {
+                jpov::SkinnedInstanceState wp;
+                wp.transform.center = {-4.5f, top - person_scale_ * person_min_y_, 3.0f};
+                wp.transform.up = {0.0f, 1.0f, 0.0f};
+                wp.transform.front = {0.0f, 0.0f, 1.0f};
+                wp.transform.scale = person_scale_;
+                wp.pose_a = 0;
+                wp.pose_b = 0;
+                wp.ratio = 0.0f;
+                std::vector<jpov::SkinnedInstanceState> one{wp};
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           rig_mat, one);
             }
         } else if (draw_scene && scene_index_ == 1) {
             // 地面：按档位选材质。四段拼接时每段各画一遍（材质不同 ⇒ 必须是不同命令；

@@ -110,8 +110,22 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
         return;
     }
 
+    // ── 视线在水里的**真实方向**（L0）：水上 = 折射后，水下 = 原方向 ──
+    // 只修正路径长度，不位移图像（屏幕空间折射 gather 未做）。
+    bool from_air = ro.y > uWaterLevelY;
+    float dy_w = rd.y;
+    if (from_air) {
+        float sin2_i = max(0.0, 1.0 - rd.y * rd.y);
+        float sin2_w = sin2_i / (uWaterIor * uWaterIor);
+        dy_w = -sqrt(max(0.0, 1.0 - sin2_w));
+    }
+    if (abs(dy_w) < 1.0e-6) {
+        return;
+    }
+    float len_w = len * (abs(rd.y) / abs(dy_w));
+
     vec3 st = uWaterSigmaA + uWaterSigmaS;
-    tau = st * len;
+    tau = st * len_w;
 
     // ── 直射项（闭式）：指数 = σt·[(t−t0) + d(t)/u_w.y]，对 t 线性 ──
     int sun_ok = 0;
@@ -120,17 +134,17 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
         float cos_i = uWaterSunToward.y;
         float fres = WmFresnel(cos_i, 1.0, uWaterIor);
         float gain = (1.0 - fres) / (uWaterIor * uWaterIor);
-        float B = 1.0 - rd.y / toward.y;
+        float B = 1.0 - dy_w / toward.y;   // 真实路径上的指数斜率
         float d0 = uWaterLevelY - (ro.y + rd.y * t0);
         float phase = WmHgPhase(clamp(dot(rd, toward), -1.0, 1.0), uWaterPhaseG);
         vec3 exp_sun = exp(-st * (d0 / toward.y));
         S = uWaterSigmaS * uWaterSunColor * (phase * gain) * exp_sun *
-            WmDecayLength(st, B, len);
+            WmDecayLength(st, B, len_w);
     }
 
     // ── 环境项（各向同性：无相位、无太阳路径衰减）──
     S += uWaterSigmaS * (uWaterAmbient * kWmAmbientT) *
-         WmDecayLength(st, 1.0, len);
+         WmDecayLength(st, 1.0, len_w);
 }
 )glsl";
 

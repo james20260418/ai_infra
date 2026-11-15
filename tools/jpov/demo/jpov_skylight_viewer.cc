@@ -111,6 +111,13 @@ void InstallModels(jpov_skylight::SkylightApp& app) {
     // 高模橡树：放到右侧，目标高 ~6 m（成熟橡树）。
     jpov::GltfObject oak = load(kOakModelPath);
     const float oak_scale = scale_to_height(oak, 6.0f);
+    // 水场景的 instanced 验收件复用这份橡树 mesh（同一条 instanced PBR pass）：
+    //   必须在 move 之前抽出 mesh_id / 材质 / 局部包围盒 min.y。
+    if (!oak.primitives.empty()) {
+        app.SetWaterTree(oak.primitives[0].mesh_id, oak.primitives[0].material,
+                         oak.bounds_valid ? oak.bounds_min[1] : 0.0f,
+                         oak.bounds_valid ? (oak.bounds_max[1] - oak.bounds_min[1]) : 0.0f);
+    }
     app.AddModel(std::move(oak), /*center*/ {3.2f, 0.0f, -0.6f},
                  /*up*/ {0, 1, 0}, /*front*/ {-1, 0, 0}, oak_scale);
 }
@@ -793,6 +800,7 @@ int RunCaptureWater(const std::string& out_dir) {
     app.SetShowPanel(false);
     app.Init();
     InstallScene(app);
+    InstallModels(app);   // 橡树 mesh：水场景的 instanced 验收件复用它（模型本身不画）
     InstallPerson(app);   // 蓝人：岛顶站着的人
     app.BuildWaterIslands();
 
@@ -860,6 +868,18 @@ int RunCaptureWater(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/water_medium_on_d2.png").c_str());
     app.SetSlabDepth(10.0f);
     app.RunOnce(input, winfo, (out_dir + "/water_medium_on_d10.png").c_str());
+
+    // ── (j) 水下三件验收物（object3d / instanced / skinned 三条主 pass）──
+    //    A/B 同一机位：介质开 vs 关。三条 pass 各自消费水下光照衰减，颜色应该一致：
+    //    “同一个深度、同一个材质 → 同一个颜色”，只差形状。
+    app.SetSlabDepth(5.0f);
+    app.view_.phi = 1.02;    // ≈58.4° 俯角（三件东西落在画面中央，背景尽量少压到岛）
+    app.view_.theta = 0.55;
+    app.view_.R = 13.0;
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_testrig_off.png").c_str());
+    app.SetWaterMedium(true);
+    app.RunOnce(input, winfo, (out_dir + "/water_testrig_on.png").c_str());
 
     LOG(INFO) << "水皮验收图已写到 " << out_dir;
     app.Finalize();

@@ -58,18 +58,27 @@ double NumericSunTerm(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& 
     const float sun = channel == 0 ? m.sun_color.x()
                                    : (channel == 1 ? m.sun_color.y() : m.sun_color.z());
     const float st = sa + ss;
+    // 水内真实方向（与 WaterAt 的 L0 同一条规则）：相机在水上时视线折射。
+    double dy_w = rd.y();
+    if (ro.y() > m.level_y) {
+        const double sin2_i = std::max(0.0, 1.0 - static_cast<double>(rd.y()) * rd.y());
+        const double sin2_w = sin2_i / (static_cast<double>(m.ior) * m.ior);
+        dy_w = -std::sqrt(std::max(0.0, 1.0 - sin2_w));
+    }
+    const double len_w = (static_cast<double>(t1) - t0) *
+                         (std::fabs(static_cast<double>(rd.y())) / std::fabs(dy_w));
     const int kSteps = 200000;
-    const double h = (static_cast<double>(t1) - t0) / kSteps;
+    const double h = len_w / kSteps;
     double sum = 0.0;
     for (int i = 0; i <= kSteps; ++i) {
-        const double t = t0 + i * h;
-        const double d = d0 - static_cast<double>(rd.y()) * (t - t0);
-        const double e_view = std::exp(-static_cast<double>(st) * (t - t0));
+        const double sp = i * h;                       // 沿真实路径的长度
+        const double d = d0 - dy_w * sp;               // 该点的深度（dy_w<0 ⇒ 变深）
+        const double e_view = std::exp(-static_cast<double>(st) * sp);
         const double e_sun = std::exp(-static_cast<double>(st) * d / toward.y());
         const double w = (i == 0 || i == kSteps) ? 1.0 : (i % 2 == 0 ? 2.0 : 4.0);
         sum += w * e_view * e_sun;
     }
-    const double integral = sum * h / 3.0;   // Simpson
+    const double integral = sum * h / 3.0;   // Simpson（沿真实路径）
     return static_cast<double>(ss) * sun * phase * gain * integral;
 }
 
@@ -161,9 +170,17 @@ TEST(WaterMediumMath, ClosedFormMatchesNumericIntegration) {
                                              : m.sigma_a.z() + m.sigma_s.z()));
         const float ss = ch == 0 ? m.sigma_s.x() : (ch == 1 ? m.sigma_s.y() : m.sigma_s.z());
         const float amb = ch == 0 ? m.ambient.x() : (ch == 1 ? m.ambient.y() : m.ambient.z());
+        double dy_w2 = rd.y();
+        if (ro.y() > m.level_y) {
+            const double sin2_i = std::max(0.0, 1.0 - static_cast<double>(rd.y()) * rd.y());
+            const double sin2_w = sin2_i / (static_cast<double>(m.ior) * m.ior);
+            dy_w2 = -std::sqrt(std::max(0.0, 1.0 - sin2_w));
+        }
+        const double len_w2 = (static_cast<double>(t1) - t0) *
+                              (std::fabs(static_cast<double>(rd.y())) / std::fabs(dy_w2));
         const double amb_numeric =
             static_cast<double>(ss) * amb * amb_t *
-            (1.0 - std::exp(-static_cast<double>(st) * (t1 - t0))) / st;
+            (1.0 - std::exp(-static_cast<double>(st) * len_w2)) / st;
         const double expected = sun_numeric + amb_numeric;
         const double actual = ch == 0 ? S.x() : (ch == 1 ? S.y() : S.z());
         // 防止“直射项为 0 ⇒ 比的是环境项”这种空测：直射项必须真的非零且占主导。
@@ -270,6 +287,33 @@ TEST(WaterMediumMath, DecayLengthLimits) {
     const float rate = 1.8f;
     const float expected = (1.0f - std::exp(-sigma * rate * len)) / (sigma * rate);
     EXPECT_NEAR(DecayLength(sigma, rate, len), expected, 1e-6f);
+}
+
+// L0：水上视线在水里的**路径长度**要按折射后的角度算（τ 比值 = cosθi/cosθw < 1）。
+// 这条守的是"掠射时不要多算 50% 衰减"——曾经的实现偏差（见 known_issue §11.4）。
+TEST(WaterMediumMath, RefractedViewPathIsShorter) {
+    WaterMediumSample m = PureWater();
+    m.has_sun = false;   // 只看 τ，不看 S
+    const Vec3f ro = {0.0f, 2.0f, 0.0f};
+    // 斜 60° 入射（rd.y = −cos60 = −0.5）
+    const Vec3f rd = {0.8660254f, -0.5f, 0.0f};
+    Vec3f tau;
+    Vec3f S;
+    WaterAt(m, ro, rd, /*z*/ 12.0f, &tau, &S);
+    const float t0 = (m.level_y - ro.y()) / rd.y();       // 水面交点（直走参数）
+    const float straight = 12.0f - t0;
+    // cosθw = sqrt(1 − (sinθi/n)²)，sinθi = 0.8660254
+    const float sin2_w = (1.0f - rd.y() * rd.y()) / (m.ior * m.ior);
+    const float cos_w = std::sqrt(1.0f - sin2_w);
+    const float expect_ratio = std::fabs(rd.y()) / cos_w;   // < 1
+    EXPECT_LT(expect_ratio, 1.0f);
+    const float st = m.sigma_a.x() + m.sigma_s.x();
+    EXPECT_NEAR(tau.x(), st * straight * expect_ratio, 1e-4f);
+    // 竖直视线（θi=0）不受影响：折射不改路径
+    Vec3f tau_v;
+    Vec3f S_v;
+    WaterAt(m, {0.0f, 2.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 12.0f, &tau_v, &S_v);
+    EXPECT_NEAR(tau_v.x(), st * 10.0f, 1e-4f);
 }
 
 // 空指针不 crash（防御式：公开函数）。

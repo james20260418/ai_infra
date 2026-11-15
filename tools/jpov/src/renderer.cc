@@ -1662,6 +1662,51 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
         }
 
+        // ── 水体介质（**光照侧**，2026-11-15 定）──
+        //    三个 PBR 主 pass（object3d / instanced / skinned）都要消费：
+        //      · 太阳：方向换成折射后的、辐照度乘 (1−R)·e^{−σt·d/cosθw}（逐通道）；
+        //      · 环境：乘 (1−R̄)·e^{−K_d·d}（逐通道）。
+        //    不做的后果：水下物体按“空气中的太阳”照明，只有相机→物体那段被介质衰减
+        //    ⇒ 偏亮且偏暖（5m 纯水红通道高估 ≈9 倍）。
+        //    视线侧（吸收 + 注入）不在这里，在合成趟的 MediumAt 里 —— 两侧共用同一组参数。
+        water::WaterMediumSample water_medium;
+        const water::WaterMediumSample* water_medium_ptr = nullptr;
+        if (cmds.water.has_value() && cmds.water->medium.enabled) {
+            const WaterMedium& wm = cmds.water->medium;
+            CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_a.z(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_s.x(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
+            CHECK_LT(wm.phase_g, 0.95f) << "WaterMedium::phase_g 必须 < 0.95";
+            CHECK_GT(cmds.water->ior, 0.0f) << "WaterSkinCommand::ior 必须 > 0";
+            water_medium.level_y = cmds.water->level_y;
+            water_medium.ior = cmds.water->ior;
+            water_medium.sigma_a = wm.sigma_a;
+            water_medium.sigma_s = wm.sigma_s;
+            water_medium.phase_g = wm.phase_g;
+            if (eff_ambient.has_value()) {
+                water_medium.ambient = {eff_ambient->color.r * eff_ambient->intensity,
+                                        eff_ambient->color.g * eff_ambient->intensity,
+                                        eff_ambient->color.b * eff_ambient->intensity};
+            }
+            if (eff_sun.has_value()) {
+                const Vec3f sd = eff_sun->direction;   // 传播方向
+                const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
+                                           sd.z() * sd.z());
+                if (sl > 1e-8f) {
+                    water_medium.has_sun = true;
+                    water_medium.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
+                    water_medium.sun_color = {eff_sun->color.r * eff_sun->intensity,
+                                              eff_sun->color.g * eff_sun->intensity,
+                                              eff_sun->color.b * eff_sun->intensity};
+                }
+            }
+            water_medium_ptr = &water_medium;
+        }
+
         // 太阳平行光 + 级联阴影贴图 uniform（总是上传，无 sun 时置 uHasSun=0）。
         // 绑各级联 shadow 深度纹理到 PBR shader，供直射光的 PCF 阴影采样。
         if (!cmds.object3d.empty() || !cmds.instanced_object.empty() ||
@@ -1713,6 +1758,22 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(), ambient);
             InstancedObjectRenderer::UploadAmbient(shader_mgr_,
                 DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(), ambient);
+            // 水下光照衰减（与 ambient 同批 program，同一个“每帧必传”的理由）。
+            water::UploadUnderwaterShading(shader_mgr_, DrawObject3DProg(), water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawObject3DProgFull(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawObject3DProgCutout(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawObject3DProgFullCutout(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawInstancedObjectProg(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawInstancedObjectProgFull(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawInstancedObjectProgCutout(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, DrawInstancedObjectProgFullCutout(),
+                                           water_medium_ptr);
         }
         if (!cmds.skinned_mesh.empty()) {
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
@@ -1720,6 +1781,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                 SkinnedMeshProg(), ambient);
             SkeletonRenderer::UploadAmbient(shader_mgr_,
                 SkinnedMeshProgCutout(), ambient);
+            water::UploadUnderwaterShading(shader_mgr_, SkinnedMeshProg(),
+                                           water_medium_ptr);
+            water::UploadUnderwaterShading(shader_mgr_, SkinnedMeshProgCutout(),
+                                           water_medium_ptr);
         }
 
         // 环境镜面（IBL specular）uniform。
@@ -2054,38 +2119,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                                         ff_params, ff_light, &fog_field);
                 }
 
-                // ── 水体介质（若有）：光照口径与 fog 一致（ambient 走 sky 推导）──
-                //    介质在合成趟里作为「场的第二个来源」，不需要单独 pass。
-                water::WaterMediumSample wm_sample;
-                const water::WaterMediumSample* wm_ptr = nullptr;
-                if (water_medium_on) {
-                    const WaterMedium& wm = cmds.water->medium;
-                    wm_sample.level_y = cmds.water->level_y;
-                    wm_sample.ior = cmds.water->ior;
-                    wm_sample.sigma_a = wm.sigma_a;
-                    wm_sample.sigma_s = wm.sigma_s;
-                    wm_sample.phase_g = wm.phase_g;
-                    wm_sample.ambient = {ambient_color.r * ambient_intensity,
-                                         ambient_color.g * ambient_intensity,
-                                         ambient_color.b * ambient_intensity};
-                    if (eff_sun.has_value()) {
-                        const Vec3f sd = eff_sun->direction;   // 传播方向
-                        const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
-                                                   sd.z() * sd.z());
-                        if (sl > 1e-8f) {
-                            wm_sample.has_sun = true;
-                            // 指向太阳 = −传播方向（与 fog 的 SunPhase 同口径）
-                            wm_sample.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
-                            wm_sample.sun_color = {eff_sun->color.r * eff_sun->intensity,
-                                                   eff_sun->color.g * eff_sun->intensity,
-                                                   eff_sun->color.b * eff_sun->intensity};
-                        }
-                    }
-                    wm_ptr = &wm_sample;
-                }
-
+                // 水体介质：光样本已在主 pass 之前建好（water_medium_ptr），
+                // 这里直接复用 —— 视线侧与照明侧必须共用同一份参数，不许各建一份。
                 fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
-                                    ff_params, TransparentLayerSet{}, wm_ptr);
+                                    ff_params, TransparentLayerSet{}, water_medium_ptr);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

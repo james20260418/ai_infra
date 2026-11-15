@@ -136,12 +136,29 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
         return;
     }
 
+    // ── 视线在水里的**真实方向**（2026-11-15 L0）──
+    // 相机在水上：光线在界面折射后才进水，θw = asin(sinθi/n) ⇒ 竖直方向余弦 dy_w = −cosθw；
+    // 相机在水下：水内就是原方向（折射只发生在**出水**那一步，与水段无关）。
+    // 水段的真实长度 = 竖直跨度 / |dy_w|；直走参数下的长度 len 要乘 |rd.y|/|dy_w|。
+    //   ⚠️ 只修正**路径长度**，不位移图像（后者要靠屏幕空间折射 gather，未做，见 §11.4）。
+    const bool from_air = (ro.y() > m.level_y);
+    float dy_w = rd.y();
+    if (from_air) {
+        const float sin2_i = std::max(0.0f, 1.0f - rd.y() * rd.y());
+        const float sin2_w = sin2_i / (m.ior * m.ior);
+        dy_w = -std::sqrt(std::max(0.0f, 1.0f - sin2_w));
+    }
+    if (std::fabs(dy_w) < 1.0e-6f) {
+        return;
+    }
+    const float len_w = len * (std::fabs(rd.y()) / std::fabs(dy_w));
+
     const float st_r = m.sigma_a.x() + m.sigma_s.x();
     const float st_g = m.sigma_a.y() + m.sigma_s.y();
     const float st_b = m.sigma_a.z() + m.sigma_s.z();
-    tau->x() = st_r * len;
-    tau->y() = st_g * len;
-    tau->z() = st_b * len;
+    tau->x() = st_r * len_w;
+    tau->y() = st_g * len_w;
+    tau->z() = st_b * len_w;
 
     // ── 直射项（闭式）：∫ exp(−σt·[(t−t0) + d(t)/u_w.y]) dt ──
     //   d(t) = level − p(t).y 是「该点到水面」的深度，沿折射后的太阳方向上去的路程 = d/u_w.y。
@@ -152,7 +169,8 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
         // 界面透射：辐亮度按 (1−R)/n² 缩放（n² 是辐亮度跨介质守恒，不是能量损失）。
         const float fresnel = FresnelDielectric(cos_i, 1.0f, m.ior);
         const float gain = (1.0f - fresnel) / (m.ior * m.ior);
-        const float B = 1.0f - rd.y() / toward.y();
+        // 真实路径上的指数斜率：视线衰减 1、太阳衰减 (−dy_w)/u_y ⇒ B = 1 − dy_w/u_y。
+        const float B = 1.0f - dy_w / toward.y();
         const float d0 = m.level_y - (ro.y() + rd.y() * t0);
         const float cos_theta = std::clamp(rd.Dot(toward), -1.0f, 1.0f);
         const float phase = HgPhase(cos_theta, m.phase_g);
@@ -162,11 +180,11 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
         const float exp_sun_g = std::exp(-st_g * d0 / toward.y());
         const float exp_sun_b = std::exp(-st_b * d0 / toward.y());
         S->x() = m.sigma_s.x() * m.sun_color.x() * sun_gain * exp_sun_r *
-                 DecayLength(st_r, B, len);
+                 DecayLength(st_r, B, len_w);
         S->y() = m.sigma_s.y() * m.sun_color.y() * sun_gain * exp_sun_g *
-                 DecayLength(st_g, B, len);
+                 DecayLength(st_g, B, len_w);
         S->z() = m.sigma_s.z() * m.sun_color.z() * sun_gain * exp_sun_b *
-                 DecayLength(st_b, B, len);
+                 DecayLength(st_b, B, len_w);
     }
 
     // ── 环境项（各向同性，无相位、无方向衰减）──
@@ -174,9 +192,9 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
     const float amb_r = m.ambient.x() * kAmbientInterfaceTransmittance;
     const float amb_g = m.ambient.y() * kAmbientInterfaceTransmittance;
     const float amb_b = m.ambient.z() * kAmbientInterfaceTransmittance;
-    S->x() += m.sigma_s.x() * amb_r * DecayLength(st_r, 1.0f, len);
-    S->y() += m.sigma_s.y() * amb_g * DecayLength(st_g, 1.0f, len);
-    S->z() += m.sigma_s.z() * amb_b * DecayLength(st_b, 1.0f, len);
+    S->x() += m.sigma_s.x() * amb_r * DecayLength(st_r, 1.0f, len_w);
+    S->y() += m.sigma_s.y() * amb_g * DecayLength(st_g, 1.0f, len_w);
+    S->z() += m.sigma_s.z() * amb_b * DecayLength(st_b, 1.0f, len_w);
 }
 
 }  // namespace water
