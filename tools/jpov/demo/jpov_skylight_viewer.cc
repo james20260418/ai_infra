@@ -524,6 +524,62 @@ int RunCaptureWater(const std::string& out_dir) {
     return 0;
 }
 
+// 水体连续性扫描（诊断用）：固定相机/光照，沿岩板深度做细步扫描。
+// 用法：jpov_skylight_viewer --capture-water-sweep <out_dir>
+// 出图：sweep_d000.png … sweep_d600.png（0.00 ~ 6.00 m，步长 0.25）
+//
+// 为什么需要：掠射角下物体“入水/出水”的过渡是不是**连续**的，胉眼看容易被帧率+
+// 屏幕位移骗过去（红通道半衰 ~0.2 m，而屏幕只动十几像素）。把中间帧存下来逐帧量像素，
+// 就能区分“物理上本来就陡”与“积分真断了”。
+int RunCaptureWaterSweep(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体连续性扫描（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 用户报告问题时的机位（CAM pos (−60.4857, 4.1991, −41.6154) -> (0,0,0)）：
+    // R = 73.54、仰角 3.27°、方位 4.1095 rad。掠射 5.8°，正好是“看着像瞬间”的角度。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 73.54f;
+    app.view_.phi   = 0.05715f;
+    app.view_.theta = 4.1095f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+
+    for (int i = 0; i <= 24; ++i) {
+        const float depth = 0.25f * static_cast<float>(i);
+        app.SetSlabDepth(depth);
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s/sweep_d%03d.png", out_dir.c_str(),
+                      static_cast<int>(depth * 100.0f + 0.5f));
+        app.RunOnce(input, winfo, name);
+    }
+
+    LOG(INFO) << "water continuity sweep captured to " << out_dir
+              << " (0.00 .. 6.00 m / step 0.25)";
+    app.Finalize();
+    return 0;
+}
+
 // SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
 //   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
 //   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
@@ -858,6 +914,7 @@ int main(int argc, char** argv) {
     std::string ssr_out_dir;
     std::string mat_out_dir;
     std::string water_out_dir;
+    std::string water_sweep_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -872,6 +929,8 @@ int main(int argc, char** argv) {
             mat_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
             water_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-sweep") == 0 && i + 1 < argc) {
+            water_sweep_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -881,6 +940,9 @@ int main(int argc, char** argv) {
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);
+    }
+    if (!water_sweep_out_dir.empty()) {
+        return RunCaptureWaterSweep(water_sweep_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);
