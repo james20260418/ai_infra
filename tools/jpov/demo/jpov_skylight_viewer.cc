@@ -632,6 +632,55 @@ int RunCaptureCameraCross(const std::string& out_dir) {
     return 0;
 }
 
+// 天球折射鉴定（水下抬头看天）：同一机位/光照，只切折射开关。
+// 用法：jpov_skylight_viewer --capture-sky-refract <out_dir>
+// 出图：refract_off.png / refract_on.png
+//
+// 机位在水下 4.5 m（R=8、phi=−0.6），视线向上 34° —— 正好把 Snell 窗（半角 48.6°）
+// 与太阳（气侧 45° → 水内应出现在 58° 仰角）都装进画面。
+int RunCaptureSkyRefract(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 天球折射鉴定（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 8.0f;
+    app.view_.phi   = -0.87f;   // 相机在水下 ≈6.1 m，视线向上 ≈50°（窗与太阳都在画面内）
+    app.view_.theta = 0.70f + 3.14159265f;   // 相机在太阳的对侧看回去（否则太阳在身后）
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(5.0f);
+
+    app.SetSkyRefract(false);
+    app.RunOnce(input, winfo, (out_dir + "/refract_off.png").c_str());
+    app.SetSkyRefract(true, jpov_skylight::kWaterIor);
+    app.RunOnce(input, winfo, (out_dir + "/refract_on.png").c_str());
+
+    LOG(INFO) << "sky refraction A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 // SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
 //   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
 //   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
@@ -968,6 +1017,7 @@ int main(int argc, char** argv) {
     std::string water_out_dir;
     std::string water_sweep_out_dir;
     std::string camera_cross_out_dir;
+    std::string sky_refract_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -986,6 +1036,8 @@ int main(int argc, char** argv) {
             water_sweep_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-camera-cross") == 0 && i + 1 < argc) {
             camera_cross_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
+            sky_refract_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -1001,6 +1053,9 @@ int main(int argc, char** argv) {
     }
     if (!camera_cross_out_dir.empty()) {
         return RunCaptureCameraCross(camera_cross_out_dir);
+    }
+    if (!sky_refract_out_dir.empty()) {
+        return RunCaptureSkyRefract(sky_refract_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);

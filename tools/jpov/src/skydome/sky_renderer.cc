@@ -179,6 +179,19 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 sky_cmd.moon_set_angle_ratio);
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyOutput"), static_cast<int>(output));
 
+    // 天球折射（鉴定开关）：缺省关 ⇒ uSkyBendOn=0，shader 里恒等（逐字节零回归）。
+    int bend_on = 0;
+    float bend_ior = 1.0f;
+    float bend_level = 0.0f;
+    if (sky_cmd.water_refraction.has_value() && sky_cmd.water_refraction->enabled) {
+        bend_on = 1;
+        bend_ior = sky_cmd.water_refraction->ior;
+        bend_level = sky_cmd.water_refraction->level_y;
+    }
+    glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendOn"), bend_on);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendIor"), bend_ior);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendLevelY"), bend_level);
+
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -225,7 +238,10 @@ void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
         face_cam.fov      = 90.0f;
         face_cam.near     = 0.1f;
         face_cam.far      = 10.0f;
-        DrawSky(sky_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
+        // 探针**不弯**（契约 §3.3）：它是纯方向函数，没有“相机在水下”这件事。
+        SkyCommand cube_cmd = sky_cmd;
+        cube_cmd.water_refraction.reset();
+        DrawSky(cube_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
     }
 
     // mip 链：粗糙度→mip 级的“廉价预滤波”（见 src/env_specular.h）。

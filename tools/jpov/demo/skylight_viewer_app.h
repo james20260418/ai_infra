@@ -191,6 +191,14 @@ public:
     float water_sigma_s_ = 0.05f;
     float water_phase_g_ = 0.35f;
     float slab_top_depth_m_ = jpov_skylight::kSlabTopDepthDefM;
+    // 天球折射（鉴定开关）：把天空采样方向换成折射后的方向（含 ×n²）。
+    // 尚未区分水上/水下与 TIR 区 —— 目的只是肉眼鉴定“天体/天空是否被正确扭转”。
+    bool sky_refract_on_ = false;
+    float sky_refract_ior_ = jpov_skylight::kWaterIor;
+    void SetSkyRefract(bool on, float ior = jpov_skylight::kWaterIor) {
+        sky_refract_on_ = on;
+        sky_refract_ior_ = ior;
+    }
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
     void SetWaterScene(bool on) { scene_index_ = on ? kSceneWater : 0; }
@@ -311,6 +319,13 @@ public:
             sky.ground_color = {deep.x(), deep.y(), deep.z(), 1.0f};
         }
         cmds->sky     = sky;
+        if (sky_refract_on_) {
+            jpov::SkyCommand::WaterRefraction wr;
+            wr.enabled = true;
+            wr.ior = sky_refract_ior_;
+            wr.level_y = jpov_skylight::kWaterLevelY;
+            cmds->sky->water_refraction = wr;
+        }
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
@@ -559,6 +574,8 @@ private:
                                 -1.0f, 1.0f, 2);
                 ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 3),
                                 kTurbidityMin, kTurbidityMax, 1);
+                ui_.Checkbox("天球折射（鉴定）", &sky_refract_on_, row(1, 4));
+                ui_.SliderFloat("折射率 ior", &sky_refract_ior_, row(1, 5), 1.0f, 2.0f, 3);
                 return;
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));

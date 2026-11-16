@@ -1478,6 +1478,22 @@ struct SkyCommand {
     Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
     Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
 
+    // ── 天球方向的水面折射（**后处理方向变换**，鉴定开关）──
+    //
+    // 契约（docs/jpov_water_contract.md §3）：折射必须在天空程序的**方向入口**做一次，
+    // 不进入天空逻辑（Preetham / 日盘 / 光晕 / 地色一行不改）。
+    //
+    // 开启后，只要射线真的穿过水面（`t = (level−camY)/dir.y > 0`），就把采样方向换成
+    // 折射后的方向，并乘 `n²`（辐射度跨介质）。全内反射段保持原方向（留给水皮处理）。
+    // 尚未做：水下/水上分流、环边 padding、与远景雾收敛色的一致性（kAtmoOnly 已同步变换）。
+    // 缺省 `nullopt` / `enabled=false` ⇒ 逐字节零回归。
+    struct WaterRefraction {
+        bool enabled = false;
+        float ior = 1.333f;      // 界面折射率（> 1；= 1 时方向不变）
+        float level_y = 0.0f;    // 水面世界高度（米，y-up）
+    };
+    std::optional<WaterRefraction> water_refraction;
+
     // ── 夜间 ambient：由夜色亮度推导 ──
     //
     // 夜间环境光强度由夜空的夜色亮度 night_lum 推导，而非独立配置：两者同源才能
