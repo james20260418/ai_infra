@@ -326,20 +326,8 @@ public:
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         const bool water_scene = IsWaterScene();
         jpov::SkyCommand sky = nl.sky;
-        if (water_scene) {
-            // 天空下半球 = **深海渐近色**，由当前 σ / ambient 算出（同一个公式，单一出处）。
-            // 为何不能用无关的“地色”：相机从上往下看时，贴地平线的射线要跑很远才入水
-            //（甚至超出远平面）⇒ 那几像素的背景几乎没被介质衰减 ⇒ 会露一条与水体截然不同的黑带。
-            // 长路径处背景本来就被 T→0 吃掉，所以这里填“渐近色”**不会**双计。
-            jpov::water::WaterMediumSample wm;
-            wm.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
-            wm.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
-            wm.ambient = {nl.ambient.color.r * nl.ambient.intensity,
-                          nl.ambient.color.g * nl.ambient.intensity,
-                          nl.ambient.color.b * nl.ambient.intensity};
-            const jpov::Vec3f deep = jpov::water::AsymptoticAmbientRadiance(wm);
-            sky.ground_color = {deep.x(), deep.y(), deep.z(), 1.0f};
-        }
+        // 地平线以下的填充色与探针下半球**不在这里配**：Renderer 在有水面时统一按
+        // 「深海渐近色 + 水面 Fresnel」自动填（单一出处，见 renderer.cc 的天空段）。
         cmds->sky     = sky;
         // 天球折射不再由场景配置：Renderer 在「有水面 + 相机在水下」时自动填
         // （折射率取 WaterCommand::ior，与水体/水皮同一份配置）。

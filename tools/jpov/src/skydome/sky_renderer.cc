@@ -188,6 +188,11 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
         bend_ior = sky_cmd.water_refract_ior;
         bend_level = sky_cmd.water_refract_level_y;
     }
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaterEnvIor"),
+                sky_cmd.water_env_ior);
+    glUniform3f(shader_mgr.GetUniform(prog, "uWaterEnvDeep"),
+                sky_cmd.water_env_deep.x(), sky_cmd.water_env_deep.y(),
+                sky_cmd.water_env_deep.z());
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendOn"), bend_on);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendIor"), bend_ior);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendLevelY"), bend_level);
@@ -240,7 +245,7 @@ void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
         face_cam.far      = 10.0f;
         // 探针**不弯**（契约 §3.3）：它是纯方向函数，没有“相机在水下”这件事。
         SkyCommand cube_cmd = sky_cmd;
-        cube_cmd.water_refract_ior = 0.0f;
+        cube_cmd.water_refract_ior = 0.0f;   // 探针不弯（水面的角度依赖由 uWaterEnv* 负责）
         DrawSky(cube_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
     }
 

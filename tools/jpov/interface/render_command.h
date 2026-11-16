@@ -1490,6 +1490,17 @@ struct SkyCommand {
     float water_refract_ior = 0.0f;
     float water_refract_level_y = 0.0f;
 
+    // ── 环境探针的**下半球是什么**（由 Renderer 在有水面时填）──
+    //
+    // 探针（kEnvProbe）默认下半球 = `ground_color × intensity`（一个与方向无关的常量）。
+    // 有水时这是错的：从上面看水面，**掠射是天空的倒影（亮）、正视是深水（暗）**，
+    // 常量会让镜面球的下半球变成一块死色（2026-11-16 Danis 实测反馈）。
+    //   ior > 0 ⇒ 按水面算：`F(θ)·sky(镜像方向) + (1−F)·n²·deep`；
+    //   ior = 0 ⇒ 旧行为（ground_color），逐字节零回归。
+    // `deep` 是**水内**的深海渐近辐射度（= AsymptoticAmbientRadiance），探针里再 ×n²。
+    float water_env_ior = 0.0f;
+    Vec3f water_env_deep = {0.0f, 0.0f, 0.0f};
+
     // ── 夜间 ambient：由夜色亮度推导 ──
     //
     // 夜间环境光强度由夜空的夜色亮度 night_lum 推导，而非独立配置：两者同源才能
