@@ -617,6 +617,7 @@ Renderer::~Renderer() {
     DestroySkyEnvCube();
     fog_renderer_.Finalize();
     fog_composite_.Finalize();
+    water_skin_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1361,6 +1362,7 @@ void Renderer::Init(
     CompileShaders();
     fog_renderer_.Init(&shader_mgr_);
     fog_composite_.Init(&shader_mgr_, water::kWaterMediumGlsl);
+    water_skin_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
@@ -1572,7 +1574,19 @@ void Renderer::Render(const RenderCommandList& cmds,
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
 
-            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+            // 天球折射（契约 §3）：由 Renderer 自动填 —— 有水面且相机在水面以下。
+            // 两趟（kFull / kAtmoOnly）必须用**同一份**命令，否则窗内远景雾会朝未折射天色收敛。
+            SkyCommand sky_cmd_for_draw = *cmds.sky;
+            if (cmds.water.has_value() &&
+                cmds.camera.position.y() < cmds.water->level_y) {
+                CHECK_GT(cmds.water->ior, 0.0f) << "WaterCommand::ior 必须 > 0";
+                sky_cmd_for_draw.water_refract_ior = cmds.water->ior;
+                sky_cmd_for_draw.water_refract_level_y = cmds.water->level_y;
+            } else {
+                sky_cmd_for_draw.water_refract_ior = 0.0f;
+            }
+
+            SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_);
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
@@ -1581,7 +1595,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             EnsureSkyColorFBO(fbo_3d_w, fbo_3d_h);
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+            SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
@@ -1834,10 +1848,61 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
             const bool run_fog = !cmds.point_fogs.empty();
-            // 水体介质：由合成趟（与雾同一个）消费。它不依赖雾场，所以合成趟必须能单独跑。
-            const bool water_medium_on =
-                cmds.water.has_value() && cmds.water->medium.enabled;
-            const bool run_medium_composite = run_fog || water_medium_on;
+            // 水体：`water` 命令存在 = 有界面层要画（层由合成器消费）；介质可单独开关。
+            const bool water_present = cmds.water.has_value();
+            const bool water_medium_on = water_present && cmds.water->medium.enabled;
+            // 合成趟的触发条件：有雾场 **或** 有水体（层必须有人消费，否则水皮白画）。
+            const bool run_medium_composite = run_fog || water_present;
+
+            // 天光 ambient 的**单一出处**：雾场 / 水体介质 / 水皮三处共用同一份推导，
+            // 否则各算一份迟早会漂（这类漂移在画面上很难看出来）。
+            Color ambient_color{0.9f, 0.9f, 0.9f, 1.0f};
+            float ambient_intensity = 1.0f;
+            if (cmds.sky.has_value()) {
+                ambient_color = cmds.sky->AmbientColor();
+                ambient_intensity = cmds.sky->AmbientIntensity();
+            } else if (cmds.ambient.has_value()) {
+                ambient_color = cmds.ambient->color;
+                ambient_intensity = cmds.ambient->intensity;
+            }
+
+            // 水体介质样本：视线侧（合成趟）、水皮的「深海积分反射」、镜面环境项共用这一份。
+            // 不合法直接 crash（不静默退化）。
+            water::WaterMediumSample water_medium;
+            const water::WaterMediumSample* water_medium_ptr = nullptr;
+            if (water_medium_on) {
+                const WaterMedium& wm = cmds.water->medium;
+                CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+                CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+                CHECK_GE(wm.sigma_a.z(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+                CHECK_GE(wm.sigma_s.x(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+                CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+                CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+                CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
+                CHECK_LT(wm.phase_g, 0.95f) << "WaterMedium::phase_g 必须 < 0.95";
+                CHECK_GT(cmds.water->ior, 0.0f) << "WaterCommand::ior 必须 > 0";
+                water_medium.level_y = cmds.water->level_y;
+                water_medium.ior = cmds.water->ior;
+                water_medium.sigma_a = wm.sigma_a;
+                water_medium.sigma_s = wm.sigma_s;
+                water_medium.phase_g = wm.phase_g;
+                water_medium.ambient = {ambient_color.r * ambient_intensity,
+                                        ambient_color.g * ambient_intensity,
+                                        ambient_color.b * ambient_intensity};
+                if (eff_sun.has_value()) {
+                    const Vec3f sd = eff_sun->direction;   // 传播方向
+                    const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
+                                               sd.z() * sd.z());
+                    if (sl > 1e-8f) {
+                        water_medium.has_sun = true;
+                        water_medium.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
+                        water_medium.sun_color = {eff_sun->color.r * eff_sun->intensity,
+                                                  eff_sun->color.g * eff_sun->intensity,
+                                                  eff_sun->color.b * eff_sun->intensity};
+                    }
+                }
+                water_medium_ptr = &water_medium;
+            }
 
             // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
             //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
@@ -1952,6 +2017,46 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    与 horizon_fog 同为「其它 3D 渲染之后、HDR 后处理之前」，就地合成到 3D HDR FBO。
             //    只读 MRT#1 场景深度做 z 裁剪；不采样场景颜色。见 docs/jpov_froxel_design.md。
             //    水体介质与雾场是同一趟里的两个「场来源」：前缀 (τ, S) 直接相加。
+            // ── 水皮（界面层）—— 只画进自持 WBO，**不合成**。──
+            //    合成由下面的介质合成趟做（段 ↔ 层交替）：这样「相机 → 水面」那段水体的注入
+            //    不会被层盖掉（环外 α=1 时尤其明显）。
+            TransparentLayerSet layers;
+            if (water_present) {
+                CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
+                CHECK(cmds.sky.has_value())
+                    << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
+                const bool cam_underwater = cmds.camera.position.y() < cmds.water->level_y;
+                if (!cam_underwater) {
+                    CHECK(cmds.env_specular.has_value())
+                        << "水上水皮需要 env_specular：水面唯一的反射源是天光探针";
+                    CHECK_GT(cmds.env_specular->sky_scale, 0.0f)
+                        << "env_specular.sky_scale = 0 时探针不建，水面没有反射源";
+                    CHECK_NE(sky_env_tex_, 0u)
+                        << "水上水皮需要天光 cubemap（env_specular 开启时应已在天空 pass 建好）";
+                }
+                WaterSkinRenderer::Inputs wsi;
+                wsi.camera = cmds.camera;
+                wsi.full_w = fbo_3d_w;
+                wsi.full_h = fbo_3d_h;
+                wsi.scene_depth_tex = hdr_scene_depth_tex;   // 本帧 MRT#1
+                wsi.env_cube_tex = sky_env_tex_;
+                wsi.env_scale = cmds.env_specular.has_value()
+                                    ? cmds.env_specular->sky_scale : 0.0f;
+                wsi.level_y = cmds.water->level_y;
+                wsi.ior = cmds.water->ior;
+                wsi.medium = water_medium_ptr;
+
+                water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                water_skin_renderer_.Draw(wsi);
+                layers.Add(water_skin_renderer_.layer());
+
+                // Draw 改了 FBO / viewport / 纹理单元：恢复主 3D 目标。
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                const GLenum mrt_w[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_w);
+            }
+
             if (run_medium_composite) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
@@ -1962,17 +2067,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
-                // 天光 ambient 的**单一出处**：雾场与水体介质共用同一份推导，
-                // 否则两边各算一次迟早会漂（这类漂移在画面上很难看出来）。
-                Color ambient_color{0.9f, 0.9f, 0.9f, 1.0f};
-                float ambient_intensity = 1.0f;
-                if (cmds.sky.has_value()) {
-                    ambient_color = cmds.sky->AmbientColor();
-                    ambient_intensity = cmds.sky->AmbientIntensity();
-                } else if (cmds.ambient.has_value()) {
-                    ambient_color = cmds.ambient->color;
-                    ambient_intensity = cmds.ambient->intensity;
-                }
+                // 天光 ambient 已在上面统一推导（ambient_color / ambient_intensity）。
                 const FogParams ff_params = cmds.fog.value_or(FogParams{});
 
                 // 烘场只在真有雾团时跑（无水体的空白场不能拿来当「空场」用）。
@@ -2000,45 +2095,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                                         ff_params, ff_light, &fog_field);
                 }
 
-                // 水体介质样本：视线侧（合成趟）只消费这一份；不合法直接 crash（不静默退化）。
-                water::WaterMediumSample water_medium;
-                const water::WaterMediumSample* water_medium_ptr = nullptr;
-                if (water_medium_on) {
-                    const WaterMedium& wm = cmds.water->medium;
-                    CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-                    CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-                    CHECK_GE(wm.sigma_a.z(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-                    CHECK_GE(wm.sigma_s.x(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-                    CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-                    CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-                    CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
-                    CHECK_LT(wm.phase_g, 0.95f) << "WaterMedium::phase_g 必须 < 0.95";
-                    CHECK_GT(cmds.water->ior, 0.0f) << "WaterCommand::ior 必须 > 0";
-                    water_medium.level_y = cmds.water->level_y;
-                    water_medium.ior = cmds.water->ior;
-                    water_medium.sigma_a = wm.sigma_a;
-                    water_medium.sigma_s = wm.sigma_s;
-                    water_medium.phase_g = wm.phase_g;
-                    water_medium.ambient = {ambient_color.r * ambient_intensity,
-                                            ambient_color.g * ambient_intensity,
-                                            ambient_color.b * ambient_intensity};
-                    if (eff_sun.has_value()) {
-                        const Vec3f sd = eff_sun->direction;   // 传播方向
-                        const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
-                                                   sd.z() * sd.z());
-                        if (sl > 1e-8f) {
-                            water_medium.has_sun = true;
-                            water_medium.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
-                            water_medium.sun_color = {eff_sun->color.r * eff_sun->intensity,
-                                                      eff_sun->color.g * eff_sun->intensity,
-                                                      eff_sun->color.b * eff_sun->intensity};
-                        }
-                    }
-                    water_medium_ptr = &water_medium;
-                }
-
                 fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
-                                    ff_params, TransparentLayerSet{}, water_medium_ptr);
+                                    ff_params, layers, water_medium_ptr);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

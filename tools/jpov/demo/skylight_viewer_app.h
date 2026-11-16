@@ -191,13 +191,35 @@ public:
     float water_sigma_s_ = 0.05f;
     float water_phase_g_ = 0.35f;
     float slab_top_depth_m_ = jpov_skylight::kSlabTopDepthDefM;
-    // 天球折射（鉴定开关）：把天空采样方向换成折射后的方向（含 ×n²）。
-    // 尚未区分水上/水下与 TIR 区 —— 目的只是肉眼鉴定“天体/天空是否被正确扭转”。
-    bool sky_refract_on_ = false;
-    float sky_refract_ior_ = jpov_skylight::kWaterIor;
-    void SetSkyRefract(bool on, float ior = jpov_skylight::kWaterIor) {
-        sky_refract_on_ = on;
-        sky_refract_ior_ = ior;
+    // 水配置：水位 + 折射率。**天空折射也消费这一份**（没有独立的天球折射开关）。
+    float water_level_y_ = jpov_skylight::kWaterLevelY;
+    float water_ior_ = jpov_skylight::kWaterIor;
+    void SetWaterLevel(float y) { water_level_y_ = y; }
+    void SetWaterIor(float ior) { water_ior_ = ior; }
+
+    // ── 水下验收物体：蓝人（skinned）──
+    // 用 InstancedInstanceState 的静态语义（pose_a = pose_b = 0 = 恒等 pose）：一次 instanced
+    // draw 画出多个人；脚点对齐岩板顶面（-person_scale_*person_min_y_ 是 InstallPerson 的脚点偏移）。
+    // Pre-condition: InstallPerson() 已调用（需要 person_scale_ / person_min_y_）。
+    std::vector<jpov::SkinnedInstanceState> water_people_;
+    // center.y 按“岩板顶面 = 0”算；真正出图时整组平移到岩板顶面（滑条可动）。
+    void BuildWaterPeople(int count = 3) {
+        CHECK_GE(count, 1);
+        water_people_.clear();
+        const float xs[3] = {-4.0f, 0.0f, 4.5f};
+        const float zs[3] = {-2.0f, -4.0f, -1.0f};
+        for (int i = 0; i < count; ++i) {
+            jpov::SkinnedInstanceState inst;
+            inst.transform.center = {xs[i % 3], -person_scale_ * person_min_y_,
+                                     zs[i % 3]};
+            inst.transform.up = {0.0f, 1.0f, 0.0f};
+            inst.transform.front = {0.0f, 0.0f, 1.0f};
+            inst.transform.scale = person_scale_;
+            inst.pose_a = 0;
+            inst.pose_b = 0;
+            inst.ratio = 0.0f;
+            water_people_.push_back(inst);
+        }
     }
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
@@ -319,13 +341,8 @@ public:
             sky.ground_color = {deep.x(), deep.y(), deep.z(), 1.0f};
         }
         cmds->sky     = sky;
-        if (sky_refract_on_) {
-            jpov::SkyCommand::WaterRefraction wr;
-            wr.enabled = true;
-            wr.ior = sky_refract_ior_;
-            wr.level_y = jpov_skylight::kWaterLevelY;
-            cmds->sky->water_refraction = wr;
-        }
+        // 天球折射不再由场景配置：Renderer 在「有水面 + 相机在水下」时自动填
+        // （折射率取 WaterCommand::ior，与水体/水皮同一份配置）。
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
@@ -370,9 +387,9 @@ public:
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
         if (draw_scene && water_scene) {
-            // 水下岩板（30×30 m）：顶面在 −slab_top_depth_m_，随滑条升降。
+            // 水下岩板（30×30 m）：顶面在「水位 − 深度」，随两条滑条升降。
             // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
-            const float top = -slab_top_depth_m_;
+            const float top = water_level_y_ - slab_top_depth_m_;
             cmds->DrawObject3D(ground_mesh_, jpov_skylight::SlabMaterial(),
                                /*center*/ {0.0f, top, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
@@ -390,6 +407,23 @@ public:
             cmds->DrawObject3D(box_mesh_, mat_metal_, {1.0f, top + 1.4f, -6.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
                                /*scale*/ 2.2f);
+            // 蓝人（skinned pass）：三个人站在岩板上 —— 水下看人的轮廓/颜色最能暴露
+            // 「水的消光是否作用在正确的地方」。
+            if (person_mesh_ != 0 && !water_people_.empty()) {
+                std::vector<jpov::SkinnedInstanceState> people = water_people_;
+                for (jpov::SkinnedInstanceState& inst : people) {
+                    inst.transform.center = {inst.transform.center.x(),
+                                              inst.transform.center.y() + top,
+                                              inst.transform.center.z()};
+                }
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           person_material_, people);
+            }
+            // 树：复用标定场已装载的 glTF 模型，整体平移到岩板顶上（不额外加资源）。
+            for (const ModelSlot& m : models_) {
+                cmds->DrawGltfObject(m.obj, {m.center.x(), top + m.center.y(), m.center.z()},
+                                     m.up, m.front, m.scale);
+            }
         } else if (draw_scene && scene_index_ == 1) {
             // 地面：按档位选材质。四段拼接时每段各画一遍（材质不同 ⇒ 必须是不同命令；
             // 属性 pass 会逐物体上传该段的 F0/roughness，合成层逐像素取 —— 这正是
@@ -456,8 +490,8 @@ public:
         // 水体（介质）：世界属性，与“画不画场景”无关 —— 天空那两张图也必须带上介质的吸收。
         if (water_scene && water_medium_on_) {
             jpov::WaterCommand w;
-            w.level_y = jpov_skylight::kWaterLevelY;
-            w.ior = jpov_skylight::kWaterIor;
+            w.level_y = water_level_y_;
+            w.ior = water_ior_;
             w.medium.enabled = true;
             w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
             w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
@@ -574,8 +608,8 @@ private:
                                 -1.0f, 1.0f, 2);
                 ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 3),
                                 kTurbidityMin, kTurbidityMax, 1);
-                ui_.Checkbox("天球折射（鉴定）", &sky_refract_on_, row(1, 4));
-                ui_.SliderFloat("折射率 ior", &sky_refract_ior_, row(1, 5), 1.0f, 2.0f, 3);
+                ui_.SliderFloat("水折射率 ior", &water_ior_, row(1, 4), 1.0f, 2.0f, 3);
+                ui_.SliderFloat("水位 y (m)", &water_level_y_, row(1, 5), -6.0f, 6.0f, 2);
                 return;
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));

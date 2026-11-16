@@ -471,6 +471,9 @@ int RunCaptureWater(const std::string& out_dir) {
     app.SetWaterScene(true);
     app.Init();
     InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -508,6 +511,26 @@ int RunCaptureWater(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/water_on_d10.png").c_str());
     app.SetSlabDepth(20.0f);
     app.RunOnce(input, winfo, (out_dir + "/water_on_d20.png").c_str());
+
+    // ── 水下两张（M2 水皮验收）──
+    // (a) 水下俯视：把**水位**抬到 +6 m（相机 4.2 m ⇒ 水下 1.8 m），目标仍是原点 ⇒ 看下去。
+    //     岩板顶面 = 水位 − 5 m = +1 m（水面下 5 m）。
+    app.SetShowScene(true);
+    app.SetWaterLevel(6.0f);
+    app.SetSlabDepth(5.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_under_down.png").c_str());
+
+    // (b) 水下抬头：水位回 0、相机在原点下方（phi<0）⇒ 直视上方的 Snell 窗与 TIR 环。
+    app.SetWaterLevel(0.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = -0.60f;
+    app.view_.theta = 0.70f + 3.14159265f;
+    app.view_.R     = 8.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_under_up.png").c_str());
 
     // 天色吸收：不画任何几何 + 近水平机位 ⇒ 上半屏是空气里的天，下半屏是“被水柱吃掉的天色”。
     app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
@@ -547,6 +570,9 @@ int RunCaptureWaterSweep(const std::string& out_dir) {
     app.SetWaterScene(true);
     app.Init();
     InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -602,6 +628,9 @@ int RunCaptureCameraCross(const std::string& out_dir) {
     app.SetWaterScene(true);
     app.Init();
     InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -654,6 +683,9 @@ int RunCaptureSkyRefract(const std::string& out_dir) {
     app.SetWaterScene(true);
     app.Init();
     InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -671,9 +703,11 @@ int RunCaptureSkyRefract(const std::string& out_dir) {
     app.SetWaterMedium(true);
     app.SetSlabDepth(5.0f);
 
-    app.SetSkyRefract(false);
+    // 没有独立开关：折射由「有水面 + 相机在水下」自动开，折射率取水配置。
+    // ior = 1.0 ⇒ 折射恒等、n² = 1 ⇒ 等价于“不折射”，作为 A/B 的基线。
+    app.SetWaterIor(1.0f);
     app.RunOnce(input, winfo, (out_dir + "/refract_off.png").c_str());
-    app.SetSkyRefract(true, jpov_skylight::kWaterIor);
+    app.SetWaterIor(jpov_skylight::kWaterIor);
     app.RunOnce(input, winfo, (out_dir + "/refract_on.png").c_str());
 
     LOG(INFO) << "sky refraction A/B captured to " << out_dir;

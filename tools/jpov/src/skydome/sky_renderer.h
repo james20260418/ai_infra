@@ -305,6 +305,8 @@ float discGlow(float ang, float disc_radius, float strength, float glow_width_sc
     return strength * exp(-(d * d) / (2.0 * glow_sigma * glow_sigma));
 }
 
+const float kPadSin = 0.0523359562;   // sin(3°)：环边气侧仰角下限（契约 §3.4）
+
 // 天球方向的水面折射：**只在方向入口做一次**，其余天空逻辑（Preetham / 盘 / 光晕 /
 // 地色）一行不改。输出的 gain 是能量因子（水内观察到的天球要 ×n²）。
 //   · 射线没穿过水面（t ≤ 0）或与水面平行 ⇒ 原样返回；
@@ -331,10 +333,22 @@ vec3 SkyBendDir(vec3 raw, out float gain) {
     }
     float cos_t = sqrt(max(0.0, 1.0 - sin2_t));
     float k = (sin2_i > 1.0e-12) ? sqrt(sin2_t / sin2_i) : eta;
+    vec3 out_dir = normalize(vec3(raw.x * k, sign(raw.y) * cos_t, raw.z * k));
+    // 环边 padding（契约 §3.4）：气侧仰角钳到 ≥3°，避开天空模型的地平线奇点与窗缘硬边。
+    // **钳方向不钳颜色**：C0 连续，且保留方位依赖（太阳侧白天顶侧暗）。
+    if (out_dir.y < kPadSin) {
+        float xz = length(out_dir.xz);
+        if (xz > 1.0e-6) {
+            float s = sqrt(1.0 - kPadSin * kPadSin) / xz;
+            out_dir = vec3(out_dir.x * s, kPadSin, out_dir.z * s);
+        } else {
+            out_dir = vec3(0.0, kPadSin, 0.0);
+        }
+    }
     if (from_water) {
         gain = uSkyBendIor * uSkyBendIor;   // 辐射度跨介质：L_water = n²·L_air
     }
-    return normalize(vec3(raw.x * k, sign(raw.y) * cos_t, raw.z * k));
+    return out_dir;
 }
 
 void main() {

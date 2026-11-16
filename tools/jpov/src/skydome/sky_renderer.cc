@@ -179,14 +179,14 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 sky_cmd.moon_set_angle_ratio);
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyOutput"), static_cast<int>(output));
 
-    // 天球折射（鉴定开关）：缺省关 ⇒ uSkyBendOn=0，shader 里恒等（逐字节零回归）。
+    // 天球折射：由 Renderer 按「有水面 + 相机在水下」自动填；0 ⇒ 关闭（逐字节零回归）。
     int bend_on = 0;
     float bend_ior = 1.0f;
     float bend_level = 0.0f;
-    if (sky_cmd.water_refraction.has_value() && sky_cmd.water_refraction->enabled) {
+    if (sky_cmd.water_refract_ior > 0.0f) {
         bend_on = 1;
-        bend_ior = sky_cmd.water_refraction->ior;
-        bend_level = sky_cmd.water_refraction->level_y;
+        bend_ior = sky_cmd.water_refract_ior;
+        bend_level = sky_cmd.water_refract_level_y;
     }
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendOn"), bend_on);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendIor"), bend_ior);
@@ -240,7 +240,7 @@ void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
         face_cam.far      = 10.0f;
         // 探针**不弯**（契约 §3.3）：它是纯方向函数，没有“相机在水下”这件事。
         SkyCommand cube_cmd = sky_cmd;
-        cube_cmd.water_refraction.reset();
+        cube_cmd.water_refract_ior = 0.0f;
         DrawSky(cube_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
     }
 

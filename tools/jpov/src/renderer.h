@@ -17,6 +17,7 @@
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/fog/fog_composite_renderer.h"
 #include "tools/jpov/src/fog/fog_renderer.h"
+#include "tools/jpov/src/water/water_skin_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
@@ -384,6 +385,8 @@ private:
     // 雾的合成趟（雾场 + 0..N 个透明层交替积分）。与「烘场」分开两个类，
     // 见 src/fog/fog_composite_renderer.h。
     FogCompositeRenderer fog_composite_;
+    // 水皮（界面层）：只产层，合成交给 fog_composite_ 的「场段 ↔ 层」交替积分。
+    WaterSkinRenderer water_skin_renderer_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。
