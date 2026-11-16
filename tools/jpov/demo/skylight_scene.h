@@ -213,8 +213,8 @@ inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左�
 // 验收两件事：① 凝胶对物体的遮挡 ② 对天色/日光的吸收。
 inline constexpr float kWaterLevelY = 0.0f;
 inline constexpr float kWaterIor = 1.333f;   // 20°C 纯水（菲涅尔 / 临界角 / 太阳折射）
-// 介质关掉时的占位色（否则水下是“黑地板”）。介质**开**时不能垫它，否则“垫底 + 注入”双计。
-inline constexpr jpov::Color kSeaGroundColor = {0.02f, 0.05f, 0.065f, 1.0f};
+// 介质关时的占位色不在这里 —— 天空下半球的填充色由 `AsymptoticAmbientRadiance()`
+// 从当前 σ / ambient 算出（与渲染端同一个公式，避免“手填一个海色”与介质渐近值漂开）。
 
 // 水下岩板：30×30 m 的均匀亮灰底，随深度滑条整组下沉 —— 颜色变化只可能来自水体
 // （材质中性，不和水的染色混淆）。ground_mesh_ 是 40×40 的 quad ⇒ scale = 30/40。

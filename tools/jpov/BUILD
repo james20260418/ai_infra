@@ -202,6 +202,7 @@ cc_library(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
+        "//tools/jpov/src/water:water_medium_math",   # 深海渐近色（与渲染同一公式）
     ],
     copts = ["-std=c++20"],
 )
