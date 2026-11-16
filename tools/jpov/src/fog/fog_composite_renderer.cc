@@ -114,18 +114,16 @@ void FogCompositeRenderer::Draw(const FogField& field,
         << "FogCompositeRenderer: 相机矩阵不可逆（near/far 非法或退化）";
 
     // ── 保存调用方状态（见头文件「GL 状态机契约」）──
-    //    混合因子按 RGB / alpha 分开保存（glBlendFuncSeparate）：逐通道透射只改 rgb 因子，
-    //    不动 alpha，否则会把 HDR 的 alpha 写成 2.0 之类的垃圾值。
-    GLint prev_blend_src_rgb = 0;
-    GLint prev_blend_dst_rgb = 0;
-    GLint prev_blend_src_a = 0;
-    GLint prev_blend_dst_a = 0;
+    //    ⚠️ 只用 glBlendFunc / GL_BLEND_SRC_ALPHA（**不用** glBlendFuncSeparate）：
+    //    Windows 的 MinGW GL 扩展加载器没声明它，交叉编译会 undefined reference。
+    //    alpha 不变靠**片元输出的 alpha** 保证（见 kFsComposite：乘 T 的趟输出 a=1、
+    //    加 L 的趟输出 a=0），而不是靠分开的混合因子。
+    GLint prev_blend_src = 0;
+    GLint prev_blend_dst = 0;
     GLint prev_vp[4] = {0, 0, 0, 0};
     GLint prev_active_tex = 0;
-    glGetIntegerv(GL_BLEND_SRC_RGB, &prev_blend_src_rgb);
-    glGetIntegerv(GL_BLEND_DST_RGB, &prev_blend_dst_rgb);
-    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src_a);
-    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst_a);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_blend_src);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_blend_dst);
     glGetIntegerv(GL_VIEWPORT, prev_vp);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
     std::vector<GLint> prev_tex_binding(static_cast<size_t>(kUnitsTouched), 0);
@@ -252,10 +250,10 @@ void FogCompositeRenderer::Draw(const FogField& field,
         // 逐通道透射：固定管线无法一次做 `dst·T(rgb) + L` ⇒ 两次 draw。
         // 顺序必须是「先乘后加」（反了会得到 (dst+L)·T）；alpha 因子取 ZERO/ONE ⇒ alpha 不变。
         glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSpectralOutput"), 1);
-        glBlendFuncSeparate(GL_ZERO, GL_SRC_COLOR, GL_ZERO, GL_ONE);   // rgb *= T
+        glBlendFunc(GL_ZERO, GL_SRC_COLOR);   // rgb *= T（片元 a=1 ⇒ dst 的 a 不变）
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uSpectralOutput"), 2);
-        glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);          // rgb += L
+        glBlendFunc(GL_ONE, GL_ONE);          // rgb += L（片元 a=0 ⇒ dst 的 a 不变）
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
@@ -266,11 +264,7 @@ void FogCompositeRenderer::Draw(const FogField& field,
     glDisable(GL_CULL_FACE);
     // ⭐ 回写混合函数：GL_BLEND_SRC/DST_* 属 GL_COLOR_BUFFER_BIT，**不在** enable 位里，
     //   必须显式复原成本趟进入前的值（否则混合模式会沿用到 2D/字体）。
-    //   按 RGB / alpha 分开复原 —— 逐通道透射只改 rgb 因子，alpha 因子保持不变。
-    glBlendFuncSeparate(static_cast<GLenum>(prev_blend_src_rgb),
-                        static_cast<GLenum>(prev_blend_dst_rgb),
-                        static_cast<GLenum>(prev_blend_src_a),
-                        static_cast<GLenum>(prev_blend_dst_a));
+    glBlendFunc(static_cast<GLenum>(prev_blend_src), static_cast<GLenum>(prev_blend_dst));
     glUseProgram(0);
     // 回写 viewport 与纹理单元绑定，再复原活动单元。
     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);

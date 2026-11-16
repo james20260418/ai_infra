@@ -74,8 +74,10 @@ out vec4 oColor;   // 语义随 uSpectralOutput：0=(S.rgb, T.r)、1=(T.rgb, ·)
 
 // 输出选择（C++ 侧按帧决定，见 fog_composite_renderer.cc 的 Draw）：
 //   0 = 旧路径：标量 a（雾 gold 逐字节不变），混合 GL_ONE / GL_SRC_ALPHA；
-//   1 = 只输出**逐通道透射率** T，混合 GL_ZERO / GL_SRC_COLOR ⇒ dst *= T；
-//   2 = 只输出**注入亮度** L，混合 GL_ONE / GL_ONE       ⇒ dst += L。
+//   1 = 只输出**逐通道透射率** T（alpha 写 1），混合 GL_ZERO / GL_SRC_COLOR ⇒ dst *= T；
+//   2 = 只输出**注入亮度** L（alpha 写 0），混合 GL_ONE / GL_ONE       ⇒ dst += L。
+//   ⚠️ alpha 的写法不是随意：混合因子对 RGB 与 alpha 同时生效，靠"输出 alpha 1/0"
+//      才能让 dst 的 alpha 在两次 draw 后保持不变（Windows 侧没有 glBlendFuncSeparate）。
 // 1+2 是「逐通道透射」的必需形式：固定管线的混合只有一个标量 alpha 或一个颜色因子，
 // 无法在一次 draw 里同时做 `dst·T(逐通道) + L`。水体存在时由 C++ 发两次 draw。
 uniform int uSpectralOutput;
@@ -270,7 +272,9 @@ void main() {
     } else if (uSpectralOutput == 1) {
         oColor = vec4(T, 1.0);   // 乘 T（blend: ZERO / SRC_COLOR）
     } else {
-        oColor = vec4(L, 1.0);   // 加 L（blend: ONE / ONE）
+        // 加 L（blend: ONE / ONE）。**alpha 必须写 0**：blend 对 alpha 也用同一组因子
+        //（GL_ONE/GL_ONE）⇒ 写 1 会把 dst 的 alpha 累加成 2.0 之类的垃圾值。
+        oColor = vec4(L, 0.0);
     }
 }
 )glsl";

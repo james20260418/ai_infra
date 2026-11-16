@@ -270,6 +270,10 @@ TEST(WaterMediumGpu, MatchesCpuReferencePerPixel) {
                     << "px=" << px << " py=" << py << " channel " << c
                     << " tau=[" << tau.x() << "," << tau.y() << "," << tau.z() << "]";
             }
+            // 两次 draw 必须**不改 dst 的 alpha**（靠片元输出 a=1/a=0 实现）：
+            // 若哪天有人把加 L 的趟 alpha 写回 1.0，这里会立刻红（alpha 会被累加成 2.0）。
+            EXPECT_NEAR(f.pixels[base + 3], 1.0f, 2.0e-3f)
+                << "两次 draw 改动了 dst alpha（px=" << px << " py=" << py << "）";
         }
     }
     EXPECT_GT(compared, kWidth * kHeight / 4) << "落进水体的像素太少，用例没有覆盖面";
