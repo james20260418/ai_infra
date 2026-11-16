@@ -439,6 +439,91 @@ int RunCaptureEnv(const std::string& out_dir) {
 
 }  // namespace
 
+// 水体介质（水凝胶）A/B 拍摄：固定机位/光照，只切介质开关与岩板深度。
+// 用法：jpov_skylight_viewer --capture-water <out_dir>
+//
+// 出图（同一机位；前五张是“凝胶对物体的遮挡”，后两张是“对天色的吸收”）：
+//   water_off.png      介质关 —— 岩板/三件方块的原色（对照基线）
+//   water_on_d2.png    介质开，岩板深度 2 m
+//   water_on_d5.png    5 m（默认）
+//   water_on_d10.png   10 m
+//   water_on_d20.png   20 m（红通道应该基本没了，只剩蓝）
+//   water_sky_off.png  无几何 + 介质关：天空下半球的原始地色
+//   water_sky_on.png   无几何 + 介质开：整段水柱把天色吃掉 + 注入自身颜色
+//
+// 为什么这组就够：
+//   · 遮挡 = **逐通道衰减**：岩板是中性灰材质，颜色只会在灰度线上变暗 + 向蓝偏；
+//   · 天色吸收：射线向下穿过整段水体到远平面 ⇒ 背景 = 地平线以下天空色被 exp(−τ) 吞掉，
+//     剩下的只能是介质自己的注入项（σs 越大越亮）。
+int RunCaptureWater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体介质（水凝胶）A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 机位 A（俯视 35°）：看“凝胶对物体的遮挡”—— 岩板 + 三件方块。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62;
+    app.view_.theta = 0.6;
+    app.view_.R     = 26.0;
+    // 太阳：侧上方，能看出“逐通道吸收 + 相位方向性”的差别。
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+
+    // 机位 B（近水平 9°）：看“凝胶对天色的吸收”—— 地平线以上是空气里的天，
+    // 以下要穿过整段水体 ⇒ 天色被 exp(−τ) 吞掉，只剩介质自己的注入色。
+    const auto setCameraB = [&app]() {
+        app.view_.phi   = 0.16;
+        app.view_.theta = 0.6;
+        app.view_.R     = 30.0;
+    };
+
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_off.png").c_str());
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d2.png").c_str());
+    app.SetSlabDepth(5.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d5.png").c_str());
+    app.SetSlabDepth(10.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d10.png").c_str());
+    app.SetSlabDepth(20.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d20.png").c_str());
+
+    // 天色吸收：不画任何几何 + 近水平机位 ⇒ 上半屏是空气里的天，下半屏是“被水柱吃掉的天色”。
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetShowScene(false);
+    setCameraB();
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_sky_off.png").c_str());
+    app.SetWaterMedium(true);
+    app.RunOnce(input, winfo, (out_dir + "/water_sky_on.png").c_str());
+
+    LOG(INFO) << "water medium A/B captured to " << out_dir
+              << " (water_off / on_d2,5,10,20 / sky_off,on)";
+    app.Finalize();
+    return 0;
+}
+
 // SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
 //   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
 //   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
@@ -772,6 +857,7 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
+    std::string water_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -784,12 +870,17 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
             mat_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
+            water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!water_out_dir.empty()) {
+        return RunCaptureWater(water_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);

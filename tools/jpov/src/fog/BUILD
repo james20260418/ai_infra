@@ -46,6 +46,7 @@ cc_library(
         "//tools/jpov/src:matrix_util",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",
+        "//tools/jpov/src/water:water_medium_math",   # WaterMediumSample + MediumAt 片段
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

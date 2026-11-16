@@ -835,6 +835,54 @@ struct SsrConfig {
     int debug_coverage = 0;
 };
 
+// ==================== 水体（Water）====================
+//
+// 水体介质：水面 `y <= level_y` 的半空间里充满**均质**介质（逐通道 σa / σs + HG 相位）。
+// 它**不是一层**，没有代表深度 —— 在合成趟里以「场的第二个来源」身份参与：
+// 与 froxel 雾场的前缀 (τ, S) 直接相加（见 src/fog/fog_composite_renderer.h）。
+//
+// 为什么逐通道：水的 σ 跨通道差 20 倍以上（纯水 450nm ≈ 0.014 / 650nm ≈ 0.35 1/m）。
+// 只有逐通道，才会有「红光先被吃掉、10 m 后只剩蓝」这种自然结果，而不是后期染色。
+//
+// 为什么是解析闭式（2026-11-15 Danis 定，别改成网格）：
+//   均质 + 半空间 ⇒ 视线在水里那段长度对参数线性、太阳衰减对深度指数 ⇒ 两个指数合并成
+//   一个能直接积出来的式子。没有需要摊销的 3D 场，所以不需要 froxel 的屏幕空间网格。
+//   前提是「σ 沿视线为常数 + 定义域是平面」：一旦水体变体素/任意形状，这套闭式作废。
+//
+// 本版**不做**（写在前面，免得当成 bug，详见 known_issue §10）：
+//   · CSM 阴影：太阳项按「全受照」积分（无 god ray / 无岛影）；
+//   · 多次散射：单次散射 + 常量 ambient（会偏暗、对比偏高）；
+//   · 折射：视线**不偏折**（只修路径长度，表观深度仍是几何深度）；
+//   · 环境项按常量积分（不考虑 ambient 场自身随深度衰减）。
+struct WaterMedium {
+    // false（默认）= 彻底关闭：合成趟不跑、逐字节零回归。
+    // 不用 σ=0 当作“关”：那会把“忘了设参数”当成合法行为（见接口设计原则）。
+    bool enabled = false;
+
+    // 吸收 / 散射系数（1/m，逐通道，均 >= 0）。物理参考（纯水 20°C）：
+    //   σa ≈ (0.35, 0.054, 0.014)  对应 (650nm, 550nm, 450nm)
+    //   σs ≈ 0.002 ~ 0.02（清澈）～ 1+（浑浊）
+    Vec3f sigma_a = {0.0f, 0.0f, 0.0f};
+    Vec3f sigma_s = {0.0f, 0.0f, 0.0f};
+
+    // Henyey-Greenstein 各向异性 g ∈ [0, 0.95)；0 = 各向同性。水 ≈ 0.3~0.5（强前向散射）。
+    float phase_g = 0.0f;
+};
+
+// 水体命令：目前只描述「介质」（界面层是后续 milestone，见 docs/jpov_water_contract.md）。
+struct WaterCommand {
+    // 水面世界高度（米，y-up）。相机高于它 = 从上看；低于它 = 从下看。
+    // 没有「平面尺寸」这个参数：视线越接近水平，交点距离 → ∞，几何上必须解析求交。
+    float level_y = 0.0f;
+
+    // 水的折射率。用于菲涅尔、全内反射临界角、太阳折射方向。
+    // 物理值：1.333（20°C 纯水）。取值必须 > 0。
+    float ior = 1.333f;
+
+    // 水体介质（吸收/散射）。enabled = true 时合成趟会把介质积分进画面。
+    WaterMedium medium;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -2407,6 +2455,11 @@ struct RenderCommandList {
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
     std::optional<SkyCommand> sky;
+
+    // 水体（介质）。有值且 medium.enabled 时，合成趟（与雾同一个）沿视线积分
+    // 「吸收 + 注入」。未设置 / enabled=false ⇒ 合成趟不因它而跑，零开销零回归。
+    // Pre-condition: tone_mapping = true（需要 HDR + MRT#1 场景深度）。
+    std::optional<WaterCommand> water;
 
     // Object3D 跳过点光源（默认 false）。
     // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；

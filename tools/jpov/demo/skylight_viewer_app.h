@@ -175,6 +175,24 @@ public:
     //   1 = **镜面地板 + 随机模型**：SSR 的验收场景（地表大镜子，上方随机摆方块/模型）
     //   2 = 只天空：不画任何几何（headless 拍天光用）
     int scene_index_ = 0;
+
+    // ── 水凝胶场景（M1 验收）：水体介质 + 水下岩板/三件物体 ──
+    //
+    // σ 默认值 = 纯水 20°C 的吸收谱（650nm 0.349 / 550nm 0.054 / 450nm 0.014 1/m，
+    // Pope & Fry 1997 量级）—— 所以“10 m 后只剩蓝”不是调出来的，是参数自然结果。
+    // 散射取 0.05（清澈偏浊）：既能看出介质注入，又不把水下东西糊掉。
+    static constexpr int kSceneWater = 3;
+    bool IsWaterScene() const { return scene_index_ == kSceneWater; }
+    bool water_medium_on_ = true;
+    float water_sigma_a_r_ = 0.35f;
+    float water_sigma_a_g_ = 0.054f;
+    float water_sigma_a_b_ = 0.014f;
+    float water_sigma_s_ = 0.05f;
+    float water_phase_g_ = 0.35f;
+    float slab_top_depth_m_ = jpov_skylight::kSlabTopDepthDefM;
+    void SetWaterMedium(bool on) { water_medium_on_ = on; }
+    void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
+    void SetWaterScene(bool on) { scene_index_ = on ? kSceneWater : 0; }
     // 镜面地板这一场景里随机摆放的方块（固定种子，装配一次；不逐帧随机）。
     struct Clutter {
         jpov::Vec3f center;
@@ -275,7 +293,18 @@ public:
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
         // moon_season 与夜空蓝覆盖默认值。
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
-        cmds->sky     = nl.sky;
+        const bool water_scene = IsWaterScene();
+        jpov::SkyCommand sky = nl.sky;
+        if (water_scene) {
+            // 水场景里「地平线以下的半球」就是水体本身。
+            //   · 介质**关**：没有消光/注入 ⇒ 只能用深海色占位，否则水下是“黑地板”；
+            //   · 介质**开**：颜色由 σ 算出来（合成趟的注入项），此时若再垫一块地色
+            //     就是“垫底 + 介质注入”双计（见 known_issue §10）。
+            if (!water_medium_on_) {
+                sky.ground_color = jpov_skylight::kSeaGroundColor;
+            }
+        }
+        cmds->sky     = sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
@@ -319,7 +348,28 @@ public:
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
-        if (draw_scene && scene_index_ == 1) {
+        if (draw_scene && water_scene) {
+            // 水下岩板（30×30 m）：顶面在 −slab_top_depth_m_，随滑条升降。
+            // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
+            const float top = -slab_top_depth_m_;
+            cmds->DrawObject3D(ground_mesh_, jpov_skylight::SlabMaterial(),
+                               /*center*/ {0.0f, top, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  jpov_skylight::kSlabSizeM /
+                                          jpov_skylight::kSlabGroundMeshSizeM);
+            // 三件物体坐在岩板上：低反 / 高光 / 金属。
+            // 验收“凝胶对物体的遮挡”：随滑条下沉，三件的颜色应整组变暗、逐渐只剩蓝。
+            cmds->DrawObject3D(box_mesh_, mat_low_,   {6.0f, top + 1.0f, 5.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 2.4f);
+            cmds->DrawObject3D(box_mesh_, mat_high_,  {-5.5f, top + 1.0f, 6.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 2.4f);
+            cmds->DrawObject3D(box_mesh_, mat_metal_, {1.0f, top + 1.4f, -6.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 2.2f);
+        } else if (draw_scene && scene_index_ == 1) {
             // 地面：按档位选材质。四段拼接时每段各画一遍（材质不同 ⇒ 必须是不同命令；
             // 属性 pass 会逐物体上传该段的 F0/roughness，合成层逐像素取 —— 这正是
             // 2026-11-02 那两条修正要验证的东西）。
@@ -380,6 +430,18 @@ public:
                 cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
                                            person_material_, person_instances_);
             }
+        }
+
+        // 水体（介质）：世界属性，与“画不画场景”无关 —— 天空那两张图也必须带上介质的吸收。
+        if (water_scene && water_medium_on_) {
+            jpov::WaterCommand w;
+            w.level_y = jpov_skylight::kWaterLevelY;
+            w.ior = jpov_skylight::kWaterIor;
+            w.medium.enabled = true;
+            w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
+            w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
+            w.medium.phase_g = water_phase_g_;
+            cmds->water = w;
         }
 
         // SSR：把配置交给 Renderer（属性 pass / 降采样 / 模块 / 合成都在那边）。
@@ -457,7 +519,8 @@ private:
         {
             const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
                                                      "场景1 镜面地板+随机模型",
-                                                     "场景2 只天空"};
+                                                     "场景2 只天空",
+                                                     "场景3 水凝胶（水体介质）"};
             int sel = scene_index_;
             if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
@@ -466,7 +529,31 @@ private:
                     view_.phi = 0.21;   // ≈12° 仰角
                     view_.theta = 0.0;
                     view_.R = 45.0;
+                } else if (sel == kSceneWater) {
+                    // 水场景：俯视看岩板（深度 × 颜色的梯度最好看），太阳偏侧。
+                    view_.phi = 0.62;   // ≈35° 仰角
+                    view_.theta = 0.6;
+                    view_.R = 26.0;
                 }
+            }
+
+            // 水场景：面板只留「水体介质 + 天体光照」（验收物理口径，不是调参手感）。
+            if (IsWaterScene()) {
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 1));
+                ui_.SliderFloat("吸收 R 1/m", &water_sigma_a_r_, row(0, 2), 0.0f, 1.0f, 3);
+                ui_.SliderFloat("吸收 G 1/m", &water_sigma_a_g_, row(0, 3), 0.0f, 1.0f, 3);
+                ui_.SliderFloat("吸收 B 1/m", &water_sigma_a_b_, row(0, 4), 0.0f, 1.0f, 3);
+                ui_.SliderFloat("散射 1/m (灰)", &water_sigma_s_, row(0, 5), 0.0f, 1.0f, 3);
+                ui_.SliderFloat("相位 g (前向散射)", &water_phase_g_, row(0, 6), 0.0f, 0.9f, 2);
+                ui_.SliderFloat("岩板顶面深度 m", &slab_top_depth_m_, row(0, 7), 0.5f, 20.0f, 2);
+                ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                                row(1, 0), -90.0f, 90.0f, 0);
+                ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(1, 1), 0.0f, 360.0f, 0);
+                ui_.SliderFloat("季节色温 日光", &deg_.daylight_season, row(1, 2),
+                                -1.0f, 1.0f, 2);
+                ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 3),
+                                kTurbidityMin, kTurbidityMax, 1);
+                return;
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
             // 5 档与 SsrConfig::debug_coverage 一一对应（3/4 以前只能在拍摄脚本里用）。
