@@ -524,6 +524,16 @@ int RunCaptureWater(const std::string& out_dir) {
     app.view_.R     = 26.0f;
     app.RunOnce(input, winfo, (out_dir + "/water_under_down.png").c_str());
 
+    // (a2) 半浸方块：水位 +6、岩板深度 0.5 ⇒ 岩板顶面 +5.5 m（水面下 0.5 m），
+    //      2.2 m 高的方块露出水面 —— 用来看「水线上下的物体」的地色/反射是否各归各位。
+    app.SetWaterLevel(6.0f);
+    app.SetSlabDepth(0.5f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.55f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 16.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_halfbox.png").c_str());
+
     // (b) 水下抬头：水位回 0、相机在原点下方（phi<0）⇒ 直视上方的 Snell 窗与 TIR 环。
     app.SetWaterLevel(0.0f);
     app.view_ = jpov_viewer::DefaultView();

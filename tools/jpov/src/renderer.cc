@@ -1648,7 +1648,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
             // 「地平线以下是什么」由场景的水面决定（深海渐近色，单一出处）：
             //   · 背景填充：贴地平线的射线可能落在远平面之外（水面交点不可达）⇒ 必须有个色兜底；
-            //   · 探针下半球：水面（掠射是天空倒影、正视是深水），常量会让镜面球下半变死色。
+            //   · **只用于背景填充**：探针（IBL）的下半球仍然是 ground_color（水无关，Danis 定）。
             if (water_present) {
                 // ground_color 在 shader 里还要 × intensity ⇒ 这里先除回去（deep 已含 intensity）。
                 const float inv_intensity =
@@ -1657,8 +1657,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                 sky_cmd_for_draw.ground_color = {water_deep.x() * inv_intensity,
                                                  water_deep.y() * inv_intensity,
                                                  water_deep.z() * inv_intensity, 1.0f};
-                sky_cmd_for_draw.water_env_ior = cmds.water->ior;
-                sky_cmd_for_draw.water_env_deep = water_deep;
             }
 
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,

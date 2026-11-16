@@ -79,11 +79,6 @@ uniform int   uSkyBendOn;     // 0 = 关
 uniform float uSkyBendIor;    // 界面折射率（> 0）
 uniform float uSkyBendLevelY; // 水面世界高度（米，y-up）
 
-// 环境探针的下半球：> 0 ⇒ 按**水面**算（掠射是天空倒影、正视是深水）；
-// = 0 ⇒ 旧行为（uGroundColor 常量）。由 Renderer 在有水面时填。
-uniform float uWaterEnvIor;
-uniform vec3  uWaterEnvDeep;  // 深海渐近辐射度（**水内**单位；探针里再 ÷n²）
-
 uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_FragCoord→NDC
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
 uniform vec3  uCamPos;        // 相机世界位置（方向 = 反投影点 - 相机）
@@ -312,19 +307,6 @@ float discGlow(float ang, float disc_radius, float strength, float glow_width_sc
 
 const float kPadSin = 0.0523359562;   // sin(3°)：环边气侧仰角下限（契约 §3.4）
 
-// 无偏振电介质菲涅尔（与 src/water/water_optics.h 同源；这里只用于探针的水面下半球）。
-float skyFresnel(float cos_i, float n1, float n2) {
-    float eta = n1 / n2;
-    float sin2_t = eta * eta * (1.0 - cos_i * cos_i);
-    if (sin2_t >= 1.0) {
-        return 1.0;
-    }
-    float cos_t = sqrt(1.0 - sin2_t);
-    float rs = (n1 * cos_i - n2 * cos_t) / (n1 * cos_i + n2 * cos_t);
-    float rp = (n1 * cos_t - n2 * cos_i) / (n1 * cos_t + n2 * cos_i);
-    return 0.5 * (rs * rs + rp * rp);
-}
-
 // 天球方向的水面折射：**只在方向入口做一次**，其余天空逻辑（Preetham / 盘 / 光晕 /
 // 地色）一行不改。输出的 gain 是能量因子（水内观察到的天球要 ×n²）。
 //   · 射线没穿过水面（t ≤ 0）或与水面平行 ⇒ 原样返回；
@@ -520,24 +502,10 @@ void main() {
         sky_atmo *= sky_bend_gain;
     }
 
-    // 环境反射探针的下半球：
-    //   · 无水（uWaterEnvIor == 0）⇒ ground_color 常量（旧行为，零回归）；
-    //   · 有水 ⇒ **水面**：F(θ)·sky(镜像方向) + (1−F)·deep/n²。
-    //     常量下半球会让镜面球的下半部分变成一块死色（2026-11-16 Danis 实测反馈）。
-    vec3 sky_env;
-    if (dir.y >= 0.0) {
-        sky_env = sky_atmo;
-    } else if (uWaterEnvIor > 0.0) {
-        vec3 mir = normalize(vec3(dir.x, -dir.y, dir.z));   // 水面镜像 → 指向上方
-        vec3 solar_m = preethamSky(mir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
-        vec3 sky_m = mix(vec3(0.0), solar_m, daylight) * uDaylightSeason * uIntensity;
-        sky_m += nightSkyColor(clamp(mir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
-        float F = skyFresnel(max(0.0, -dir.y), 1.0, uWaterEnvIor);   // 空气 → 水
-        float n2 = uWaterEnvIor * uWaterEnvIor;
-        sky_env = F * sky_m + (1.0 - F) * uWaterEnvDeep / n2;
-    } else {
-        sky_env = uGroundColor * uIntensity;
-    }
+    // 环境反射探针的下半球 = **ground_color × intensity**（与水面无关）。
+    // 2026-11-16 Danis 定：陆地是主场 ⇒ 物体的下侧反射/环境光按陆地配，
+    // 不能因为场景里有水就把深海色漏到 IBL 里。（水体只影响背景填充色。）
+    vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
     vec3 out_color = (uSkyOutput == 1) ? sky_atmo
                    : (uSkyOutput == 2) ? sky_env
                    : sky;

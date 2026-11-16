@@ -188,11 +188,6 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
         bend_ior = sky_cmd.water_refract_ior;
         bend_level = sky_cmd.water_refract_level_y;
     }
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaterEnvIor"),
-                sky_cmd.water_env_ior);
-    glUniform3f(shader_mgr.GetUniform(prog, "uWaterEnvDeep"),
-                sky_cmd.water_env_deep.x(), sky_cmd.water_env_deep.y(),
-                sky_cmd.water_env_deep.z());
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendOn"), bend_on);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendIor"), bend_ior);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendLevelY"), bend_level);
