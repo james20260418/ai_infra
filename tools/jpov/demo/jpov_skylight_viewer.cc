@@ -580,6 +580,58 @@ int RunCaptureWaterSweep(const std::string& out_dir) {
     return 0;
 }
 
+// 相机跨越水面的连续性扫描（诊断用）：相机高度从水上 → 水面 → 水下，其他参数不变。
+// 用法：jpov_skylight_viewer --capture-camera-cross <out_dir>
+// 出图：cross_p+100.png … cross_p-100.png（view_.phi = +0.10 … −0.10 rad，步长 0.01）
+//
+// 为什么单独一个：岩板深度扫描检的是“物体入水”，这里检的是**介质分支本身**
+// 在 ro.y = level 两侧是不是连续的（水上要走“先穿水面”，水下从 t=0 开始）。
+int RunCaptureCameraCross(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 相机跨越水面（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 固定 theta / R，只动 phi：R=20 ⇒ phi=0.10 时相机高度 +2.00 m，−0.10 时 −2.00 m。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 20.0f;
+    app.view_.theta = 0.6f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(5.0f);
+
+    for (int i = 10; i >= -10; --i) {
+        app.view_.phi = 0.01f * static_cast<float>(i);
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s/cross_p%+03d.png", out_dir.c_str(), i);
+        app.RunOnce(input, winfo, name);
+    }
+
+    LOG(INFO) << "camera-cross captured to " << out_dir
+              << " (phi +0.10 .. −0.10 rad, step 0.01)";
+    app.Finalize();
+    return 0;
+}
+
 // SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
 //   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
 //   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
@@ -915,6 +967,7 @@ int main(int argc, char** argv) {
     std::string mat_out_dir;
     std::string water_out_dir;
     std::string water_sweep_out_dir;
+    std::string camera_cross_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -931,6 +984,8 @@ int main(int argc, char** argv) {
             water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-sweep") == 0 && i + 1 < argc) {
             water_sweep_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-camera-cross") == 0 && i + 1 < argc) {
+            camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -943,6 +998,9 @@ int main(int argc, char** argv) {
     }
     if (!water_sweep_out_dir.empty()) {
         return RunCaptureWaterSweep(water_sweep_out_dir);
+    }
+    if (!camera_cross_out_dir.empty()) {
+        return RunCaptureCameraCross(camera_cross_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);
