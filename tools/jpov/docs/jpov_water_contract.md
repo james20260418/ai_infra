@@ -183,6 +183,31 @@ out = L + T · bg
 
 三个 cos 别串：`cosθa` / `cosθw` 是**视线**的（进 `ds/dt`）；`toward.y` 是**太阳**的水内角（进 `exp(−σt·d/toward.y)`、`B`）。
 
+### 5.1 照明来源（唯一，2026-11-17 定）
+
+水体介质与水皮的照明**只消费 `RenderCommandList` 的光源**：
+
+| 项 | 来源 | 备注 |
+|---|---|---|
+| 直射 | `cmds.sun`（`DirectionalLight`） | `color × intensity` 是**辐照度** `E`；介质用 `σs·p(θ)·E`（太阳立体角在 `∮p·L dω = p·E` 里已消去，**不需要角尺度**） |
+| 环境 | `cmds.ambient`（`AmbientLight`） | `color × intensity`；三色时先经 `AmbientLight::IsotropicColor()` 塔成纯色 |
+
+**不从 `SkyCommand` 推导**：sky 只负责「画出来的天」；把天光换算成 ambient/sun 是**场景的职责**
+（`demo/skylight_scene.h::MakeSkyLighting` 就是先算好再填进 `cmds.sun` / `cmds.ambient`）。
+渲染侧再推一份，等于同一个物理量有两个来源 —— 而 PBR 吃的是 `cmds.ambient`，两者一旦分叉，
+“物体一个亮度、水另一个亮度”在画面上几乎看不出来，只能查代码。
+
+**没配 = 没光 = 暗**：不给默认亮度兜底。缺 `ambient` 时环境注入为 0，只剩吸收（背景被衰减）。
+
+**三色 → 纯色的权重**：体积没有法线，只有「周围各方向的入射」；内散射源 `∮p(ω',ω)L(ω')dω'`
+在各向同性相位下等于 `L` 的**球面平均**。`tricolor` 定义为 `L` 随方向余弦 `μ=N.y` 分段线性，
+而 `μ` 在球面上均匀 ⇒ 权重 **天 : 天际线 : 地 = 1 : 2 : 1**（推导见 `AmbientLight::IsotropicColor()`）。
+⚠️ `AmbientTricolor()` 的归一化是对**算术均值**做的 ⇒ 1:2:1 的结果与单色 `AmbientColor()`
+有 `(s−g)/12` 量级的亮度差（约 5%），这是球面平均与算术平均的固有差别，不再额外归一化掩盖。
+
+**不属于照明**：水皮水上支路的反射仍取 `env_specular` 的环境探针（那是**图像源**，
+金属用的是同一张；不是“用天光当光照”）；水下支路的 `S_P(∞)` 走的就是本节的 `cmds.sun`/`cmds.ambient`。
+
 ---
 
 ## 6. 明确不做

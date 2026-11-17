@@ -233,6 +233,23 @@ TEST(WaterMediumMath, NoSunIsAmbientOnly) {
     EXPECT_GT(S_b.x(), 0.0f);      // 环境项不为零
 }
 
+// 没有任何光（ambient = 0 且无太阳）⇒ 注入项必须**恒为零**，只剩吸收（tau > 0）。
+// 对应「没配光就该暗」：介质不得自己造出亮度（以前 ambient 会从 sky 推导，
+// 没配 ambient 也有天光注入）。
+TEST(WaterMediumMath, NoLightMeansNoInjection) {
+    WaterMediumSample m = PureWater();
+    m.ambient = {0.0f, 0.0f, 0.0f};
+    m.has_sun = false;
+    m.sun_color = {0.0f, 0.0f, 0.0f};
+    Vec3f tau;
+    Vec3f S;
+    WaterAt(m, {0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 8.0f, &tau, &S);
+    EXPECT_GT(tau.x(), 0.0f);   // 吸收还在（背景会被衰减）
+    EXPECT_FLOAT_EQ(S.x(), 0.0f);
+    EXPECT_FLOAT_EQ(S.y(), 0.0f);
+    EXPECT_FLOAT_EQ(S.z(), 0.0f);
+}
+
 // 太阳在地平线及以下 ⇒ 水下没有直射项（不是"照得很斜"，是"没有"）。
 TEST(WaterMediumMath, SunBelowHorizonHasNoDirectTerm) {
     WaterMediumSample m = PureWater();

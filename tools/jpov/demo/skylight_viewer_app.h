@@ -27,6 +27,7 @@
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -132,6 +133,14 @@ public:
     // 是否使用**三色环境光**（[天, 天际线, 地] 垂直梯度）替代单色 ambient。
     // 供肉眼对比：开=由 SkyCommand 推导的三色（AmbientTricolor），关=原来的单色（AmbientColor）。
     void SetTricolorAmbient(bool on) { tricolor_ambient_ = on; }
+
+    // ── 调试用光照覆盖（仅拍摄验证，不提供 UI）──
+    // 目的：固定 sky，只改 RenderCommandList 的光源，验证「水体/水皮消费的是光，不是 sky」。
+    // 不设 = 用天际推导的默认值。
+    void SetAmbientOverride(const jpov::AmbientLight& a) { ambient_override_ = a; }
+    void ClearAmbientOverride() { ambient_override_.reset(); }
+    void SetSunOverride(const jpov::DirectionalLight& d) { sun_override_ = d; }
+    void ClearSunOverride() { sun_override_.reset(); }
 
     // 是否开启 SMAA 后处理抗锯齿（供肉眼 A/B 对比）。headless 拍摄可显式设。
     void SetSmaa(bool on, float threshold = 0.1f) {
@@ -333,6 +342,14 @@ public:
         // （折射率取 WaterCommand::ior，与水体/水皮同一份配置）。
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
+        // 调试用覆盖（仅 headless 拍摄「水到底在消费谁」的 A/B）：放在推导之后，
+        // 保证「sky 不变、只换光」——旧实现里水的照明只认 sky，这种 A/B 根本做不出来。
+        if (ambient_override_.has_value()) {
+            cmds->ambient = *ambient_override_;
+        }
+        if (sun_override_.has_value()) {
+            cmds->sun = *sun_override_;
+        }
         cmds->tone_mapping = true;
 
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
@@ -711,6 +728,9 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
+    // 调试用光照覆盖（仅拍摄；见 SetAmbientOverride 的注释）。未设 = 用天际推导的默认值。
+    std::optional<jpov::AmbientLight> ambient_override_;
+    std::optional<jpov::DirectionalLight> sun_override_;
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）

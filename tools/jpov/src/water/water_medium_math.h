@@ -42,7 +42,8 @@ struct WaterMediumSample {
     Vec3f sigma_a = {0.0f, 0.0f, 0.0f};   // 吸收系数 (1/m)，逐通道，>= 0
     Vec3f sigma_s = {0.0f, 0.0f, 0.0f};   // 散射系数 (1/m)，逐通道，>= 0
     float phase_g = 0.0f;                 // HG 各向异性 ∈ [0, 0.95)
-    Vec3f ambient = {0.0f, 0.0f, 0.0f};   // 空气侧 ambient（已乘 intensity）
+    Vec3f ambient = {0.0f, 0.0f, 0.0f};   // 环境入射（= cmds.ambient，已乘 intensity；
+                                           //   三色已按球面权重塔成纯色；未配则为零 = 黑）
     Vec3f sun_color = {0.0f, 0.0f, 0.0f}; // 空气侧太阳（已乘 intensity）
     Vec3f sun_toward = {0.0f, 1.0f, 0.0f};// 指向太阳（空气侧，单位）
     bool has_sun = false;

@@ -28,7 +28,7 @@ uniform float uWaterIor;         // 界面折射率（只影响菲涅尔/折射�
 uniform vec3  uWaterSigmaA;      // 吸收系数 (1/m)，逐通道
 uniform vec3  uWaterSigmaS;      // 散射系数 (1/m)，逐通道
 uniform float uWaterPhaseG;      // HG 各向异性 ∈ [0, 0.95)
-uniform vec3  uWaterAmbient;     // 空气侧 ambient（已乘 intensity）
+uniform vec3  uWaterAmbient;     // 环境入射（cmds.ambient 已乘 intensity；三色已塔成球面平均纯色）
 uniform vec3  uWaterSunColor;    // 空气侧太阳（已乘 intensity）
 uniform vec3  uWaterSunToward;   // 指向太阳（空气侧，单位）
 uniform int   uWaterHasSun;      // 0 = 无太阳（只剩环境项）

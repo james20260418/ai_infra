@@ -33,7 +33,8 @@ inline constexpr float kWaterIorDefault = 1.333f;
 //
 // 漫射天空从整个上半球入射，菲涅尔平均反射率 ≈ 6%（水 n=1.333）⇒ 透射 ≈ 0.94。
 // ⚠️ 这是**常数近似**（不是对天空辐亮度分布做积分）：水下 ambient 取
-//    `SkyCommand::AmbientColor()/AmbientIntensity()` 再乘本值。
+//    `RenderCommandList::ambient`（三色时先经 AmbientLight::IsotropicColor() 塔成纯色）
+//    再乘本值。不从 SkyCommand 推导 —— 没配 ambient 就是没有环境注入。
 inline constexpr float kAmbientInterfaceTransmittance = 0.94f;
 
 // 水→空气的临界角余弦：cosθc = sqrt(1 − 1/ior²)。ior=1.333 ⇒ θc ≈ 48.6°（从法线量）。

@@ -1569,15 +1569,19 @@ void Renderer::Render(const RenderCommandList& cmds,
         const bool water_present = cmds.water.has_value();
         const bool water_medium_on = water_present && cmds.water->medium.enabled;
 
-        // 天光 ambient 的**单一出处**：雾场 / 水体介质 / 水皮三处共用同一份推导，
-        // 否则各算一份迟早会漂（这类漂移在画面上很难看出来）。
-        Color ambient_color{0.9f, 0.9f, 0.9f, 1.0f};
-        float ambient_intensity = 1.0f;
-        if (cmds.sky.has_value()) {
-            ambient_color = cmds.sky->AmbientColor();
-            ambient_intensity = cmds.sky->AmbientIntensity();
-        } else if (cmds.ambient.has_value()) {
-            ambient_color = cmds.ambient->color;
+        // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
+        //   直射 = cmds.sun，环境 = cmds.ambient —— 与 object3d 的 PBR 是同一份数据。
+        //
+        // 为什么**不从 SkyCommand 推导**（2026-11-17 Danis 定）：sky 只负责「画出来的天」，
+        //   把天光换算成 ambient/sun 是**场景的职责**（demo 的 MakeSkyLighting 就是先算好
+        //   再填 cmds.sun / cmds.ambient）。渲染侧再推一份，等于同一个物理量有两个来源。
+        // 没配 = 没光 = 暗：不给默认亮度兜底（否则“忘了配光”会被静默当成合法场景）。
+        // 三色 ambient 没有法线可依（体积不是面）⇒ 按球面权重塌成纯色，
+        //   推导见 AmbientLight::IsotropicColor()（天 : 天际线 : 地 = 1 : 2 : 1）。
+        Color ambient_color{0.0f, 0.0f, 0.0f, 1.0f};
+        float ambient_intensity = 0.0f;
+        if (cmds.ambient.has_value()) {
+            ambient_color = cmds.ambient->IsotropicColor();
             ambient_intensity = cmds.ambient->intensity;
         }
 
@@ -2074,7 +2078,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
-                // 天光 ambient 已在上面统一推导（ambient_color / ambient_intensity）。
+                // 环境光已在上方由 cmds.ambient 统一解析（ambient_color / ambient_intensity），
+                // 与 object3d、水体介质同一份；不从 sky 推导。
                 const FogParams ff_params = cmds.fog.value_or(FogParams{});
 
                 // 烘场只在真有雾团时跑（无水体的空白场不能拿来当「空场」用）。
