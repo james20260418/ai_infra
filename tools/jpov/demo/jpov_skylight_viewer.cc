@@ -669,8 +669,30 @@ int RunCaptureWaterSun(const std::string& out_dir) {
         app.RunOnce(input, winfo, (out_dir + name).c_str());
     }
 
+    // 诊断用：关掉**水体介质**（保留水皮与太阳）—— 用来分清亮点是「水皮的镜面项」
+    // 还是「水体体积的太阳内散射」。介质关掉后体积项消失；若亮点还在 ⇒ 它是水皮。
+    {
+        app.deg_.sun_azim_deg = 214.0f;
+        app.SetWaterMedium(false);
+        app.RunOnce(input, winfo, (out_dir + "/sun_medium_off.png").c_str());
+        app.SetWaterMedium(true);
+    }
+
+    // 诊断用：保持 sky / ambient 不变，只把**太阳强度**置零。
+    // 用来分辨「水面那个亮点」是太阳的解析镜面项（会消失），
+    // 还是天空里绘出的日盘透过水面 / 水体自身的散射（不会消失）。
+    {
+        jpov::DirectionalLight no_sun{};
+        no_sun.direction = {-0.5f, -0.7f, -0.5f};
+        no_sun.intensity = 0.0f;
+        app.SetSunOverride(no_sun);
+        app.deg_.sun_azim_deg = 214.0f;
+        app.RunOnce(input, winfo, (out_dir + "/sun_off.png").c_str());
+        app.ClearSunOverride();
+    }
+
     LOG(INFO) << "water sun-image captured to " << out_dir
-              << " (sun_azim34 对照 / 214 / 219 / 224)";
+              << " (34 对照 / 214 / 219 / 224 / sun_off / sun_medium_off)";
     app.Finalize();
     return 0;
 }
@@ -723,6 +745,18 @@ int RunCaptureWaterLight(const std::string& out_dir) {
 
     app.RunOnce(input, winfo, (out_dir + "/light_sky.png").c_str());
 
+    // 只关太阳强度（sky 不动、ambient 不动）：用来分辨「水面上的亮点」到底来自
+    // 太阳的解析项，还是天空里绘出的日盘透过水面（透射）。
+    // 前者会消失，后者会留下。
+    {
+        jpov::DirectionalLight no_sun{};
+        no_sun.direction = {-0.5f, -0.7f, -0.5f};
+        no_sun.intensity = 0.0f;
+        app.SetSunOverride(no_sun);
+        app.RunOnce(input, winfo, (out_dir + "/light_sunoff.png").c_str());
+        app.ClearSunOverride();
+    }
+
     // 只换 ambient（sky / sun 不动）：暖橙、强度略高，便于测像素。
     jpov::AmbientLight warm;
     warm.color = {0.90f, 0.35f, 0.12f, 1.0f};
@@ -742,7 +776,7 @@ int RunCaptureWaterLight(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/light_dark.png").c_str());
 
     LOG(INFO) << "water lighting A/B captured to " << out_dir
-              << " (light_sky / light_warm / light_dark)";
+              << " (light_sky / light_sunoff / light_warm / light_dark)";
     app.Finalize();
     return 0;
 }
