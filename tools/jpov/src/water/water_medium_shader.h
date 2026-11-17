@@ -133,7 +133,9 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
     if (uWaterHasSun != 0 && sun_ok != 0) {
         float cos_i = uWaterSunToward.y;
         float fres = WmFresnel(cos_i, 1.0, uWaterIor);
-        float gain = (1.0 - fres) / (uWaterIor * uWaterIor);
+        // 进散射源的是**法向辐照度** E⊥ ⇒ 按功率分账：gain = (1−R)·cosθa/cosθw（无 n²）。
+        // （与 water_medium_math.h 同源；2026-11-17 定稿，原为 (1−R)/n²）
+        float gain = (1.0 - fres) * (cos_i / toward.y);
         float B = 1.0 - dy_w / toward.y;   // 真实路径上的指数斜率
         float d0 = uWaterLevelY - (ro.y + rd.y * t0);
         float phase = WmHgPhase(clamp(dot(rd, toward), -1.0, 1.0), uWaterPhaseG);

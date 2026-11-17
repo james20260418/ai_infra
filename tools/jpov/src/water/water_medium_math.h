@@ -118,15 +118,15 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
     Vec3f toward;
     if (m.has_sun && RefractTowardSun(m.sun_toward, m.ior, &toward)) {
         const float cos_i = m.sun_toward.y();             // 入射角（法线 = +Y）
-        // 界面透射：能量按「辐亮度跨介质守恒 + 菲涅尔损失」缩放。
+        // 界面透射：进散射源的是**法向辐照度** E⊥（不是辐射度），故按**功率**分账：
+        //   同一块界面上的入射功率 = E⊥,air·cosθa，反射掉 R 后剩 (1−R)·E⊥,air·cosθa；
+        //   进水后的“垂直截面”变成 cosθw（光束被折弯）⇒ E⊥,water = (1−R)·cosθa/cosθw。
+        // ⇒ gain = (1−R)·cosθa/cosθw（**无 n²**；n² 只属于辐亮度口径）。
         //
-        // ⚠️ **口径待拍板**（docs/jpov_water_contract.md §7.2 / known_issue §10.2）：
-        //   按推导，进散射源要的是**法向辐照度** E⊥，正确系数应为
-        //       (1−R) · cosθa / cosθw        （无 n²）
-        //   而这里写的是 (1−R)/n²。垂直太阳下差 1.777×（偏暗）、低太阳时还差一个 cos 比。
-        //   本 PR 沿用原设计不变，免得和已有对拍基线同时动；待 Danis 拍板后改一处即可。
+        // ✅ 2026-11-17 Danis 拍板修正（原为 (1−R)/n²）：垂直太阳下差 1.777×（原来偏暗），
+        //    低太阳时还多一个 cos 比（原来低估倾斜入射）。推导见契约 §5 / known_issue §10.2b。
         const float fresnel = FresnelDielectric(cos_i, 1.0f, m.ior);
-        const float gain = (1.0f - fresnel) / (m.ior * m.ior);
+        const float gain = (1.0f - fresnel) * (cos_i / toward.y());
         // 真实路径上的指数斜率：视线衰减 1、太阳衰减 (−dy_w)/u_y ⇒ B = 1 − dy_w/u_y。
         const float B = 1.0f - dy_w / toward.y();
         const float d0 = m.level_y - (ro.y() + rd.y() * t0);

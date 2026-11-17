@@ -45,9 +45,14 @@ Vec3f MakeDir(float x, float y, float z) {
 //   S = ∫ σs·p(cosΘ)·L0·e^{−σt·(t−t0)}·e^{−σt·d(t)/u_w.y} dt
 double NumericSunTerm(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd,
                       float t0, float t1, float d0, const Vec3f& toward, int channel) {
-    const float cos_i = m.sun_toward.y();
-    const float fresnel = jpov::water::FresnelDielectric(cos_i, 1.0f, m.ior);
-    const float gain = (1.0f - fresnel) / (m.ior * m.ior);
+    // 界面增益按**功率流**独立推一遍（不照抄被测表达式）：
+    //   每单位界面面积的入射功率 = E⊥,air·cosθa；反射掉 R 后剩 (1−R)·cosθa；
+    //   进水后光束的垂直截面 = cosθw（Snell 折弯）⇒ E⊥,water = 功率 / cosθw。
+    const float cos_a = m.sun_toward.y();
+    const float cos_w = toward.y();
+    const float fresnel = jpov::water::FresnelDielectric(cos_a, 1.0f, m.ior);
+    const float power_in_per_area = (1.0f - fresnel) * cos_a;
+    const float gain = power_in_per_area / cos_w;
     const float cos_theta = rd.Dot(toward);
     const float phase = jpov::water::HgPhase(std::max(-1.0f, std::min(1.0f, cos_theta)),
                                              m.phase_g);
@@ -342,4 +347,61 @@ TEST(WaterMediumMath, NullOutputsDoNotCrash) {
     Vec3f S;
     WaterAt(m, {0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 8.0f, nullptr, &S);
     RefractTowardSun({0.0f, 1.0f, 0.0f}, 1.333f, nullptr);
+}
+
+// 界面增益口径（2026-11-17 修正）：进散射源的是**法向辐照度** E⊥，
+// 所以跨界面按**功率**分账 ⇒ (1−R)·cosθa/cosθw，**不是** (1−R)/n²。
+//
+// 这条同时钉住「垂直太阳下差 1.777×」这个回归点：如果谁把它改回 /n²，
+// 第一条断言立刻红。
+TEST(WaterMediumMath, SunInjectionGainUsesNormalIrradiance) {
+    const float ior = 1.333f;
+    // 垂直太阳（θa=0）：cos 比为 1 ⇒ gain = 1−R = 0.9796。
+    const Vec3f to_zenith{0.0f, 1.0f, 0.0f};
+    Vec3f toward_w;
+    ASSERT_TRUE(jpov::water::RefractTowardSun(to_zenith, ior, &toward_w));
+    const float r_zenith = jpov::water::FresnelDielectric(1.0f, 1.0f, ior);
+    const float gain_zenith = (1.0f - r_zenith) * (1.0f / toward_w.y());
+    EXPECT_NEAR(r_zenith, 0.0204f, 1e-3f);
+    EXPECT_NEAR(gain_zenith, 1.0f - r_zenith, 1e-5f);
+    // 与旧口径 (1−R)/n² 的比恰为 n² = 1.777（这就是当年那 1.777× 的来源）。
+    const float old_gain = (1.0f - r_zenith) / (ior * ior);
+    EXPECT_NEAR(gain_zenith / old_gain, ior * ior, 1e-4f);
+
+    // 物理不变量（与表达式无关的一条）：功率守恒
+    //   gain · cosθw 必须等于 (1−R)·cosθa。
+    //   —— 拿几个仰角扫一遍，任何“只改一处”的笔误都会红。
+    for (float elev_deg : {5.0f, 20.0f, 45.0f, 70.0f, 89.0f}) {
+        const float a = elev_deg * 3.14159265358979323846f / 180.0f;
+        const Vec3f to_sun{std::sin(a), std::cos(a), 0.0f};   // 仰角从“正上方”量起
+        Vec3f tw;
+        ASSERT_TRUE(jpov::water::RefractTowardSun(to_sun, ior, &tw)) << "elev=" << elev_deg;
+        const float cos_a = to_sun.y();
+        const float rr = jpov::water::FresnelDielectric(cos_a, 1.0f, ior);
+        const float g = (1.0f - rr) * (cos_a / tw.y());
+        EXPECT_NEAR(g * tw.y(), (1.0f - rr) * cos_a, 1e-6f) << "elev=" << elev_deg;
+    }
+}
+
+// 低太阳的注入必须**变小**（掠射时大部分被反射，且进水后被折向竖直、能量摊到更深的水柱里）。
+// 这条防「把 cos 比丢掉」——丢掉的话 gain 会随仰角下降反而变大（因为 (1−R) 在掠射变小、
+// 但抹掉 cosθa 后不再是“每单位垂直截面”的口径）。
+TEST(WaterMediumMath, SunInjectionFallsWithLowSun) {
+    const float ior = 1.333f;
+    // ⚠️ 参数是**离天顶的角**（0 = 太阳在头顶），不是仰角 —— 别混，第一版写反了。
+    const auto gain_at = [&](float from_zenith_deg) {
+        const float a = from_zenith_deg * 3.14159265358979323846f / 180.0f;
+        const Vec3f to_sun{std::sin(a), std::cos(a), 0.0f};
+        Vec3f tw;
+        if (!jpov::water::RefractTowardSun(to_sun, ior, &tw)) {
+            return 0.0f;
+        }
+        const float rr = jpov::water::FresnelDielectric(to_sun.y(), 1.0f, ior);
+        return (1.0f - rr) * (to_sun.y() / tw.y());
+    };
+    // 太阳越高（离天顶越近）⇒ 注入越大；贴着地平线 ⇒ 只剩 17%（大部分被反射掉）。
+    EXPECT_GT(gain_at(5.0f), gain_at(20.0f));
+    EXPECT_GT(gain_at(20.0f), gain_at(45.0f));
+    EXPECT_GT(gain_at(45.0f), gain_at(80.0f));
+    EXPECT_GT(gain_at(80.0f), 0.0f);
 }
