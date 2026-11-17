@@ -22,8 +22,8 @@
 namespace jpov {
 namespace water {
 
-// 水面法线（世界 y-up）。本版水皮是**纯平面**：没有波浪法线，也没有几何位移。
-inline constexpr float kWaterNormalY = 1.0f;
+// 水面法线恒为世界 +Y（本版水皮是**纯平面**：没有波浪法线，也没有几何位移）。
+// 实现上直接写进公式（翻转 y / 用 N=(0,1,0)），不需要单独常量。
 
 // 反射方向夹到地平线以上的最小 y（= sin 1°）。
 // 探针下半球是「地色」语义（见 SkyOutput::kEnvProbe）：掠射反射不夹的话会采到地色，

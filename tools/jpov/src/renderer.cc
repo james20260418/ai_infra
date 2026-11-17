@@ -1470,8 +1470,10 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
-    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty() ||
-                  !cmds.volume_fires.empty();
+    // 水体也必须在里面：水皮是 3D 空间里的一层（要 MRT#1 场景深度 + HDR），
+    // 漏掉会让「只配了 water、没有 sky/物体/粒子」的帧整块跳过 3D ⇒ 水**静默不画**。
+    bool has_3d = cmds.sky.has_value() || cmds.water.has_value() ||
+                  !cmds.particles.empty() || !cmds.volume_fires.empty();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||

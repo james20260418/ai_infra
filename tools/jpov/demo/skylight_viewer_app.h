@@ -27,6 +27,7 @@
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,7 +37,6 @@
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
-#include "tools/jpov/src/water/water_medium_math.h"   // 深海渐近色（与渲染同一公式）
 
 namespace jpov_skylight {
 
@@ -355,9 +355,14 @@ public:
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
         // 三块方块的 index 2（metallic=1, “无漫反射，纯环境反射”）是验收工件。
-        if (env_specular_on_) {
+        // ⚠️ 水场景**必须**有环境镜面：水面唯一的反射源是天光探针，Renderer 对
+        //    「有水面却没 env_specular / sky_scale=0 / 探针没建」直接 CHECK（宁可崩也不静默
+        //    退化成黑水面）。所以这里在水场景强制打开并把消费量抬到 (0,1]，避免用户在面板上
+        //    一勾就把进程打挂。
+        if (env_specular_on_ || water_scene) {
             jpov::EnvSpecular es;
-            es.sky_scale = env_specular_scale_;
+            es.sky_scale = water_scene ? std::max(env_specular_scale_, 0.05f)
+                                       : env_specular_scale_;
             cmds->env_specular = es;
         }
 
