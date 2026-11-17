@@ -29,6 +29,11 @@ namespace water {
 // 水的折射率（20°C 纯水）。全工程唯一一处数值。
 inline constexpr float kWaterIorDefault = 1.333f;
 
+// HG 各向异性的上限（g→1 时相位函数变成 δ，离散采样会爆）。
+// CPU 的 clamp / Renderer 的 CHECK / GLSL 的 clamp 必须**同一个数**，由
+// test/water:water_medium_math_test 的 GlslConstantsMatchCpu 守住。
+inline constexpr float kMaxPhaseG = 0.95f;
+
 // 界面（水平面）对**环境光辐照度**的平均透射率。
 //
 // 漫射天空从整个上半球入射，菲涅尔平均反射率 ≈ 6%（水 n=1.333）⇒ 透射 ≈ 0.94。
@@ -64,14 +69,14 @@ inline float FresnelDielectric(float cos_i, float n1, float n2) {
 // Henyey-Greenstein 相位函数（mu = 1 为前向散射）。
 // Pre-condition: g ∈ [0, 0.95]（超出会被夹住，不 crash）。
 inline float HgPhase(float mu, float g) {
-    const float gc = std::clamp(g, 0.0f, 0.95f);
+    const float gc = std::clamp(g, 0.0f, kMaxPhaseG);
     const float denom = std::max(1.0f + gc * gc - 2.0f * gc * mu, 1.0e-4f);
     return (1.0f - gc * gc) / (4.0f * 3.14159265f * denom * std::sqrt(denom));
 }
 
 // 折射：空气侧「指向太阳」的单位方向 → 水内「指向太阳」的单位方向（法线 = +Y）。
 // 返回 false = 太阳在地平线以下/与水面相切（水下没有直射项）。
-// Pre-condition: ior > 0；air_toward_sun 为单位向量。
+// Pre-condition: ior > 0（Renderer 端另 CHECK > 1：水必须比空气密）；air_toward_sun 为单位向量。
 inline bool RefractTowardSun(const Vec3f& air_toward_sun, float ior,
                              Vec3f* out /*output*/) {
     if (out == nullptr) {
@@ -86,6 +91,12 @@ inline bool RefractTowardSun(const Vec3f& air_toward_sun, float ior,
     }
     const float sin2_i = std::max(0.0f, 1.0f - cy * cy);
     const float sin2_w = sin2_i / (ior * ior);
+    // ior <= 1（比空气还疏）在物理上不存在，但 CHECK_GT(ior, 0) 会放行；
+    // 此时 sin²θw 可以 ≥ 1 ⇒ 没有折射解 ⇒ 必须返回 false。
+    // 若放过去：cosθw = 0 ⇒ 增益 1/toward.y = inf ⇒ 与 (1−R)=0 相乘得 **NaN**。
+    if (!(sin2_w < 1.0f)) {
+        return false;
+    }
     const float cos_w = std::sqrt(std::max(0.0f, 1.0f - sin2_w));
     // 水平分量缩放 = sinθw / sinθi（θi→0 时极限 = 1/ior，用 sin² 比值避免 0/0）。
     const float k = (sin2_i > 1.0e-12f) ? std::sqrt(sin2_w / sin2_i) : (1.0f / ior);

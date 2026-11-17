@@ -5,6 +5,7 @@ cc_test(
     name = "water_medium_math_test",
     srcs = ["water_medium_math_test.cc"],
     deps = [
+        "//tools/jpov/interface:render_command",
         "//tools/jpov/src/water:water_medium_math",
         "@gtest//:gtest_main",
     ],

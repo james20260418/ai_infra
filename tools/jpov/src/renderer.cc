@@ -1604,8 +1604,12 @@ void Renderer::Render(const RenderCommandList& cmds,
             CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
             CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
             CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
-            CHECK_LT(wm.phase_g, 0.95f) << "WaterMedium::phase_g 必须 < 0.95";
-            CHECK_GT(cmds.water->ior, 0.0f) << "WaterCommand::ior 必须 > 0";
+            CHECK_LT(wm.phase_g, water::kMaxPhaseG)
+                << "WaterMedium::phase_g 必须 < kMaxPhaseG(0.95)：g→1 会让相位函数变成 δ";
+            // ior <= 1 在物理上不存在（水必须比空气密）；放行会让 sin²θw ≥ 1 ⇒
+            // 没有折射解 ⇒ 增益 1/cosθw = inf 与 (1−R)=0 相乘得 NaN（known_issue §10 已记）。
+            CHECK_GE(cmds.water->ior, 1.0f)
+                << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
             water_medium.level_y = cmds.water->level_y;
             water_medium.ior = cmds.water->ior;
             water_medium.sigma_a = wm.sigma_a;
@@ -1643,7 +1647,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             SkyCommand sky_cmd_for_draw = *cmds.sky;
             if (cmds.water.has_value() &&
                 cmds.camera.position.y() < cmds.water->level_y) {
-                CHECK_GT(cmds.water->ior, 0.0f) << "WaterCommand::ior 必须 > 0";
+                CHECK_GE(cmds.water->ior, 1.0f)
+                    << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
                 sky_cmd_for_draw.water_refract_ior = cmds.water->ior;
                 sky_cmd_for_draw.water_refract_level_y = cmds.water->level_y;
             } else {

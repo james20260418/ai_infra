@@ -33,11 +33,13 @@ uniform vec3  uWaterSunColor;    // 空气侧太阳（已乘 intensity）
 uniform vec3  uWaterSunToward;   // 指向太阳（空气侧，单位）
 uniform int   uWaterHasSun;      // 0 = 无太阳（只剩环境项）
 
-const float kWmAmbientT = 0.94;  // 界面漫射透射率（与 CPU 侧同名常量对齐）
+const float kWmAmbientT = 0.94;  // 界面漫射透射率（= water_optics.h::kAmbientInterfaceTransmittance，
+                                 //   由 test/water GlslConstantsMatchCpu 锁一致性）
+const float kWmMaxG = 0.95;      // HG 上限（= water_optics.h::kMaxPhaseG，同上）
 
 // Henyey-Greenstein（与 fog 的 HgPhase 同一实现；此处独立命名避免与雾冲突）。
 float WmHgPhase(float mu, float g) {
-    float gc = clamp(g, 0.0, 0.95);
+    float gc = clamp(g, 0.0, kWmMaxG);
     float denom = max(1.0 + gc * gc - 2.0 * gc * mu, 1.0e-4);
     return (1.0 - gc * gc) / (4.0 * 3.14159265 * denom * sqrt(denom));
 }
@@ -77,6 +79,12 @@ vec3 WmRefractTowardSun(vec3 air_toward, float ior, out int ok) {
     }
     float sin2_i = max(0.0, 1.0 - cy * cy);
     float sin2_w = sin2_i / (ior * ior);
+    // ior <= 1 时可能没有折射解（sin²θw ≥ 1）⇒ 必须判失败，否则 cosθw=0 会让
+    // 增益 1/toward.y = inf，与 (1−R)=0 相乘得 NaN（与 CPU 版同一守卫）。
+    if (sin2_w >= 1.0) {
+        ok = 0;
+        return vec3(0.0, 1.0, 0.0);
+    }
     float cos_w = sqrt(max(0.0, 1.0 - sin2_w));
     int k = (sin2_i > 1.0e-12) ? 1 : 0;
     float scale_xz = (k != 0) ? sqrt(sin2_w / sin2_i) : (1.0 / ior);

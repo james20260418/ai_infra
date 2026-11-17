@@ -7,9 +7,13 @@
 //
 // 常量与语义见 src/water/water_medium_math.h 顶部。
 
+#include "tools/jpov/interface/render_command.h"   // WaterCommand（与 kWaterIorDefault 的一致性）
 #include "tools/jpov/src/water/water_medium_math.h"
+#include "tools/jpov/src/water/water_medium_shader.h"   // kWaterMediumGlsl（常量一致性）
 
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -404,4 +408,78 @@ TEST(WaterMediumMath, SunInjectionFallsWithLowSun) {
     EXPECT_GT(gain_at(20.0f), gain_at(45.0f));
     EXPECT_GT(gain_at(45.0f), gain_at(80.0f));
     EXPECT_GT(gain_at(80.0f), 0.0f);
+}
+
+// ───────────── 一致性 / corner case（2026-11-17 打扫战场时补的）─────────────
+
+namespace {
+
+// 从 GLSL 源码里摘一个数值常量：找到 name 后第一个 '=' 再 strtof。
+// 用途：着色器不能 include C++ 常量，同一物理常数不得不在两处各写一遍 —— 用测试锁住。
+float ParseGlslConst(const std::string& src, const std::string& name) {
+    const size_t pos = src.find(name);
+    if (pos == std::string::npos) {
+        ADD_FAILURE() << "GLSL 里找不到常量 " << name;
+        return 0.0f;
+    }
+    const size_t eq = src.find('=', pos + name.size());
+    if (eq == std::string::npos) {
+        ADD_FAILURE() << name << " 后面没有 '='";
+        return 0.0f;
+    }
+    return std::strtof(src.c_str() + eq + 1, nullptr);
+}
+
+}  // namespace
+
+// 同一个物理常数在 CPU 与 GLSL 各存一份（着色器没法 include）⇒ 必须由测试守住，
+// 否则改一边、另一边静默漂。这条覆盖目前全部两处：界面漫射透射率与 HG 上限。
+TEST(WaterMediumMath, GlslConstantsMatchCpu) {
+    const std::string glsl = jpov::water::kWaterMediumGlsl;
+    EXPECT_NEAR(ParseGlslConst(glsl, "kWmAmbientT"),
+                jpov::water::kAmbientInterfaceTransmittance, 1e-6f);
+    EXPECT_NEAR(ParseGlslConst(glsl, "kWmMaxG"), jpov::water::kMaxPhaseG, 1e-6f);
+    // 接口层的默认 ior 也不能另写一个数（WaterCommand 在 interface，常量在 src/water）。
+    EXPECT_FLOAT_EQ(jpov::WaterCommand{}.ior, jpov::water::kWaterIorDefault);
+}
+
+// Corner case：ior <= 1（比空气还疏）物理上不存在，但 `CHECK_GT(ior, 0)` 会放行。
+// 此时 sin²θw 可以 ≥ 1 ⇒ **没有折射解** ⇒ 若硬算下去：cosθw = 0 ⇒ 增益 1/toward.y = inf，
+// 和 (1−R)=0 相乘就是 **NaN**（实测过）。
+// 约定：RefractTowardSun 必须返回 false，WaterAt 不得产出 NaN/inf。
+TEST(WaterMediumMath, IorAtMostOneHasNoRefractionSolution) {
+    jpov::Vec3f toward{1.0f, 1.0f, 1.0f};
+    EXPECT_FALSE(RefractTowardSun({0.7071f, 0.7071f, 0.0f}, 0.5f, &toward));
+    // ior = 1.0（无界面/调试值）是合法的：不折弯、不反射，gain=1。
+    EXPECT_TRUE(RefractTowardSun({0.7071f, 0.7071f, 0.0f}, 1.0f, &toward));
+
+    WaterMediumSample m = PureWater();
+    m.ior = 0.5f;
+    m.sun_toward = {0.7071f, 0.7071f, 0.0f};   // 45°
+    jpov::Vec3f tau;
+    jpov::Vec3f S;
+    WaterAt(m, {0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 8.0f, &tau, &S);
+    EXPECT_FALSE(std::isnan(tau.x()) || std::isnan(S.x()));
+    EXPECT_FALSE(std::isinf(S.x()) || std::isinf(tau.x()));
+    // 没有折射解 ⇒ **直射项**为 0（环境项照旧，所以不能直接断言 S==0 —— 第一版就这么写错了）。
+    WaterMediumSample m_no_sun = m;
+    m_no_sun.has_sun = false;
+    jpov::Vec3f tau2;
+    jpov::Vec3f S2;
+    WaterAt(m_no_sun, {0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 8.0f, &tau2, &S2);
+    EXPECT_FLOAT_EQ(S.x(), S2.x());
+    EXPECT_FLOAT_EQ(S.y(), S2.y());
+    EXPECT_FLOAT_EQ(S.z(), S2.z());
+
+    // ior = 1.0：无界面 ⇒ 不折弯、不反射（gain = 1），注入必须为正。
+    WaterMediumSample m1 = PureWater();
+    m1.ior = 1.0f;
+    jpov::Vec3f tau1;
+    jpov::Vec3f S1;
+    WaterAt(m1, {0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 8.0f, &tau1, &S1);
+    EXPECT_GT(S1.x(), 0.0f);
+
+    // 水平面以上/正上方这些正常角度仍要能算（守卫不能误伤）。
+    EXPECT_TRUE(RefractTowardSun({0.0f, 1.0f, 0.0f}, 1.333f, &toward));
+    EXPECT_NEAR(toward.y(), 1.0f, 1e-6f);
 }
