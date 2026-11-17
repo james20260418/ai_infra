@@ -62,6 +62,7 @@ cc_library(
         "//tools/jpov/interface:camera",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",
+        "//tools/jpov/src/lighting:ggx_specular",
         "//tools/jpov/src/wbo:wbo_target",
         "@glog_static//:glog",
     ] + select({

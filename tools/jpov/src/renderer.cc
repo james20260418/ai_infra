@@ -1510,6 +1510,12 @@ void Renderer::Render(const RenderCommandList& cmds,
         // cmds.ambient，未配则用默认值）
         const std::optional<DirectionalLight> eff_sun = cmds.sun;
         std::optional<AmbientLight> eff_ambient = cmds.ambient;
+        // 天体必须有非零角半径：0 意味着「没有带宽」⇒ 镜面上 D 恒为 0（高光静默消失）
+        // 或极端值。按 known_issue §11 的口径，这是配置错误，不静默容忍。
+        if (eff_sun.has_value()) {
+            CHECK_GT(eff_sun->angular_radius, 0.0f)
+                << "DirectionalLight::angular_radius 必须 > 0（太阳 ≈0.00465 / 月亮 ≈0.00452）";
+        }
 
         // ---- 第 0 步：太阳阴影 pass（有 sun 时）----
         // 先渲染场景深度到阴影纹理，主 pass 的 PBR shader 才能采样做影子。
@@ -2056,6 +2062,20 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.level_y = cmds.water->level_y;
                 wsi.ior = cmds.water->ior;
                 wsi.medium = water_medium_ptr;
+                // 太阳的像：与介质分开传（介质可关，水面依然该有日盘像）。
+                if (eff_sun.has_value()) {
+                    const Vec3f sd = eff_sun->direction;   // 传播方向
+                    const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
+                                               sd.z() * sd.z());
+                    if (sl > 1e-8f) {
+                        wsi.has_sun = true;
+                        wsi.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
+                        wsi.sun_irradiance = {eff_sun->color.r * eff_sun->intensity,
+                                              eff_sun->color.g * eff_sun->intensity,
+                                              eff_sun->color.b * eff_sun->intensity};
+                        wsi.sun_angular_radius = eff_sun->angular_radius;
+                    }
+                }
 
                 water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 water_skin_renderer_.Draw(wsi);

@@ -36,6 +36,7 @@ cc_test(
     srcs = ["water_skin_gpu_test.cc"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/lighting:ggx_specular",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src/water:water_skin_math",
         "//tools/jpov/src/water:water_skin_renderer",
@@ -52,6 +53,7 @@ cc_test(
     name = "water_skin_math_test",
     srcs = ["water_skin_math_test.cc"],
     deps = [
+        "//tools/jpov/src/lighting:ggx_specular",
         "//tools/jpov/src/water:water_skin_math",
         "@gtest//:gtest_main",
     ],

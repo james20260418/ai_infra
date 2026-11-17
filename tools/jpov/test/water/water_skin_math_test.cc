@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/lighting/ggx_specular.h"
 #include "tools/jpov/src/water/water_skin_math.h"
 
 namespace {
@@ -175,6 +176,109 @@ TEST(WaterSkinMath, DepthBiasToleranceIsTight) {
     const float ndc2 = ((kFar + kNear) - 2.0f * kNear * kFar / z2) / (kFar - kNear);
     EXPECT_FALSE(EvaluateWaterPixel(cam, fwd, fwd, 0.0f, kWaterIorDefault,
                                     0.5f * ndc2 + 0.5f, kNear, kFar, &px));
+}
+
+// ─────────────── 太阳的像（解析 GGX，盘状光源）───────────────
+//
+// 这组断言对应 known_issue §11：镜面高光的带宽 = max(材质 roughness, 光源角半径, 像素足迹)。
+// 水皮没有 roughness ⇒ 带宽完全来自 θ 与足迹，所以这三条必须钉死。
+
+// 带宽 = (θ/2)²。写成 θ² 会过宽 4 倍，这条会立刻红。
+TEST(GgxSunDisk, BandwidthIsQuarterThetaSquared) {
+    const float theta = 0.004654f;
+    const float a2 = jpov::lighting::GgxDiskBandwidthA2(theta);
+    EXPECT_NEAR(a2, 0.25f * theta * theta, 1e-12f);
+    // 反向对照：与“直接用 θ²”差 4 倍（别把它们写成一样）。
+    EXPECT_NEAR(a2 * 4.0f, theta * theta, 1e-12f);
+}
+
+// GGX 的 D 归一化：∫ D(h)(n·h) dω_h = 1 —— 这就是「加带宽不会爆亮、只是摊开」的数学依据。
+// 用斜率换元 t = √a2·u 消除尖峰（小 a2 时直接积分会欠采样）。
+// 若把 D 里的 a2 换成 a、或漏掉 cos 项，这条会红。
+TEST(GgxSunDisk, DistributionIntegratesToOne) {
+    const float kA2[] = {1.0e-6f, 5.41e-6f, 1.0e-3f, 1.0e-1f};
+    for (float a2 : kA2) {
+        const float k = std::sqrt(a2);
+        // u ∈ [0, 200] 的 Simpson（尾项衰减为 1/u³，截断误差 < 1e-4）。
+        const int kN = 200000;
+        const float kUmax = 200.0f;
+        const float du = kUmax / kN;
+        double sum = 0.0;
+        for (int i = 0; i <= kN; ++i) {
+            const double u = i * static_cast<double>(du);
+            const double t = k * u;
+            const double no_h = 1.0 / std::sqrt(1.0 + t * t);
+            const double d = jpov::lighting::GgxDistribution(
+                static_cast<float>(no_h), a2);
+            // dθ/du = k / (1 + t²)；sinθ = t/√(1+t²)
+            const double dtheta_du = k / (1.0 + t * t);
+            const double sin_theta = t / std::sqrt(1.0 + t * t);
+            double w = (i == 0 || i == kN) ? 1.0 : ((i % 2 == 0) ? 2.0 : 4.0);
+            sum += w * 2.0 * 3.14159265358979323846 * d * no_h * sin_theta * dtheta_du;
+        }
+        sum *= du / 3.0;
+        // 容差 2%：float 在 NoH→1 处有 ~0.3% 的**抵消误差**（`1 − NoH²(1−a2)` 在小 a2 时
+        // 丢掉有效位），a2 越小越明显。这里测的是归一化，不是峰值的绝对精度。
+        EXPECT_NEAR(sum, 1.0, 2e-2) << "a2=" << a2;
+    }
+}
+
+// 正对太阳的镜面方向（法线=视线=太阳方向）：峰值必须是 E·F·D(1)/(4)。
+// 这条同时钉住「半边向量把角半径折半」与「÷(4 NoV NoL)×NoL」的口径。
+TEST(GgxSunDisk, PeakMatchesClosedForm) {
+    const Vec3f n{0.0f, 1.0f, 0.0f};
+    const Vec3f v{0.0f, 1.0f, 0.0f};
+    const Vec3f l{0.0f, 1.0f, 0.0f};
+    const float theta = 0.004654f;
+    const float fresnel = 0.02f;
+    const Vec3f e{2.0f, 2.0f, 2.0f};
+    const Vec3f got = jpov::lighting::SunDiskSpecularRadiance(
+        n, v, l, fresnel, theta, /*extra_a2=*/0.0f, e);
+
+    const float a2 = jpov::lighting::GgxDiskBandwidthA2(theta);
+    const float expected = 2.0f * fresnel * (1.0f / (3.14159265358979323846f * a2)) / 4.0f;
+    // 容差 1%：同上，float 抵消误差（实测 0.33%）。峰值本身是 HDR 值、tone map 后全白，
+    // 这点误差没有画面意义 —— 但**数量级**必须对，所以这里不能放宽到 10%。
+    EXPECT_NEAR(got.x(), expected, expected * 1e-2f);
+    EXPECT_NEAR(got.y(), expected, expected * 1e-2f);
+}
+
+// 太阳在地平线下 / 相机在水下看上方 ⇒ 没有日盘像（不是“很暗”，是恒 0）。
+TEST(GgxSunDisk, NoImageWhenSunOrViewIsBelowHorizon) {
+    const Vec3f n{0.0f, 1.0f, 0.0f};
+    const Vec3f v{0.0f, 1.0f, 0.0f};
+    const Vec3f e{2.0f, 2.0f, 2.0f};
+    const Vec3f sun_below{0.6f, -0.8f, 0.0f};
+    const Vec3f cam_below{0.0f, -1.0f, 0.0f};
+    const float theta = 0.004654f;
+    Vec3f got = jpov::lighting::SunDiskSpecularRadiance(
+        n, v, sun_below, 0.02f, theta, 0.0f, e);
+    EXPECT_EQ(got.x(), 0.0f);
+    got = jpov::lighting::SunDiskSpecularRadiance(
+        n, cam_below, v, 0.02f, theta, 0.0f, e);
+    EXPECT_EQ(got.x(), 0.0f);
+    // 角半径为 0（配置错误）也不得产出 inf/NaN。
+    got = jpov::lighting::SunDiskSpecularRadiance(
+        n, v, v, 0.02f, 0.0f, 0.0f, e);
+    EXPECT_EQ(got.x(), 0.0f);
+}
+
+// 像素足迹（掠射压缩的正解）只能让高光**变矮变宽**，绝不变亮。
+TEST(GgxSunDisk, FootprintLowersPeak) {
+    const Vec3f n{0.0f, 1.0f, 0.0f};
+    const Vec3f v{0.0f, 1.0f, 0.0f};
+    const Vec3f l{0.0f, 1.0f, 0.0f};
+    const Vec3f e{2.0f, 2.0f, 2.0f};
+    const float theta = 0.004654f;
+    const Vec3f no_fp = jpov::lighting::SunDiskSpecularRadiance(
+        n, v, l, 0.02f, theta, /*extra_a2=*/0.0f, e);
+    const Vec3f with_fp = jpov::lighting::SunDiskSpecularRadiance(
+        n, v, l, 0.02f, theta, /*extra_a2=*/1.0e-4f, e);
+    EXPECT_LT(with_fp.x(), no_fp.x());
+    // 峰值 ≈ 1/a2 ⇒ a2 扩了 (θ/2)²+1e-4 倍，峰值就该缩到 1/那倍。
+    const float a2_ref = jpov::lighting::GgxDiskBandwidthA2(theta);
+    const float ratio_expected = a2_ref / (a2_ref + 1.0e-4f);
+    EXPECT_NEAR(with_fp.x() / no_fp.x(), ratio_expected, ratio_expected * 2e-2f);
 }
 
 }  // namespace

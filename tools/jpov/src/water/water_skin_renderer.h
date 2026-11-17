@@ -16,6 +16,7 @@
 #define JPOV_SRC_WATER_WATER_SKIN_RENDERER_H_
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/lighting/ggx_specular.h"   // 天体角半径默认值（唯一出处）
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/transparent_layer.h"
 #include "tools/jpov/src/water/water_medium_math.h"
@@ -38,6 +39,18 @@ public:
         float ior = water::kWaterIorDefault;  // 水的折射率（> 0）
         // 水体介质（水下支路的「深海积分反射」要用它；nullptr = 无介质 ⇒ S_P(∞) = 0）。
         const water::WaterMediumSample* medium = nullptr;
+
+        // ── 太阳的像（解析 GGX，盘状光源）──
+        // 与介质那份 sun 分开：介质可以关，水面依然该有日盘像。
+        // has_sun = false ⇒ 这一项恒 0（不是“用强度 0 蹭过去”）。
+        bool has_sun = false;
+        Vec3f sun_toward = {0.0f, 1.0f, 0.0f};      // 指向太阳（气侧，单位）
+        Vec3f sun_irradiance = {0.0f, 0.0f, 0.0f};  // color × intensity（辐照度语义）
+        // 盘角半径（弧度，> 0）。默认太阳；场景覆盖。
+        float sun_angular_radius = lighting::kSunAngularRadiusRad;
+        // 像素足迹带宽开关：1 = 开（默认，掠射抗闪）；0 = 关（CPU 对拍测试用，
+        // 因为着色器里的 dFdx 无法在 CPU 复现）。
+        float sun_footprint = 1.0f;
     };
 
     WaterSkinRenderer();

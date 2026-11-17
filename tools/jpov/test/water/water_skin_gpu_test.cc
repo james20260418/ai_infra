@@ -32,6 +32,7 @@
 #include <gtest/gtest.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/src/lighting/ggx_specular.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/water/water_skin_math.h"
 #include "tools/jpov/src/water/water_medium_math.h"
@@ -293,7 +294,12 @@ struct Fixture {
     }
 
     void Render(const Camera& cam, unsigned int depth_tex, float level_y, float ior,
-                const jpov::water::WaterMediumSample* medium) {
+                const jpov::water::WaterMediumSample* medium,
+                bool has_sun = false,
+                jpov::Vec3f sun_toward = jpov::Vec3f{0.0f, 1.0f, 0.0f},
+                jpov::Vec3f sun_irradiance = jpov::Vec3f{0.0f, 0.0f, 0.0f},
+                float sun_angular_radius = jpov::lighting::kSunAngularRadiusRad,
+                float sun_footprint = 0.0f) {
         WaterSkinRenderer::Inputs in;
         in.camera = cam;
         in.full_w = kWidth;
@@ -304,6 +310,12 @@ struct Fixture {
         in.level_y = level_y;
         in.ior = ior;
         in.medium = medium;
+        in.has_sun = has_sun;
+        in.sun_toward = sun_toward;
+        in.sun_irradiance = sun_irradiance;
+        in.sun_angular_radius = sun_angular_radius;
+        // 测试里默认关足迹（着色器的 dFdx 无法在 CPU 复现）；专门验足迹的用例再开。
+        in.sun_footprint = sun_footprint;
         water.Begin(kWidth, kHeight);
         water.Draw(in);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -485,6 +497,134 @@ TEST(WaterSkinGpu, DepthRejectionLeavesLayerEmpty) {
         EXPECT_NEAR(reveal[i], 1.0f, 1.0e-3f) << "i=" << i;
         EXPECT_NEAR(accum[i * 4 + 3], 0.0f, 1.0e-3f) << "i=" << i;
     }
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// 水上：太阳的像（解析 GGX，盘状光源）必须逐像素等于 CPU 参考。
+//
+// 口径（known_issue §11.6）：
+//   · 带宽 = (θ/2)²（半向量只偏一半），不是 θ²；
+//   · 出射 = E·F·D·G/(4 NoV NoL)·NoL，F 用**同一个**界面菲涅尔（与探针支路同源）；
+//   · 太阳项是**加法**，不吃任何 SSR 权重（此刻还没有 SSR）。
+// footprint 置 0：着色器里的 dFdx 在 CPU 复现不了；足迹由下一条用例定性验证。
+TEST(WaterSkinGpu, AboveWaterSunDiskMatchesCpu) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, 9.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+    const float theta = jpov::lighting::kSunAngularRadiusRad;
+    const Vec3f sun_e{3.0f, 2.8f, 2.4f};
+
+    // 把太阳放在**屏幕中心像素**的反射方向上：保证至少有一个像素落在 lobe 内。
+    const Reference ref0 = BuildReference(cam);
+    const Vec3f rd_center = RayAt(ref0, kWidth / 2, kHeight / 2);
+    const Vec3f sun_toward = NormalizeOr(Vec3f{rd_center.x(), -rd_center.y(), rd_center.z()},
+                                        Vec3f{0.0f, 1.0f, 0.0f});
+    ASSERT_GT(sun_toward.y(), 0.0f) << "太阳必须在水平面以上，否则这一 frame 没有日盘像";
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr,
+             /*has_sun=*/true, sun_toward, sun_e, theta, /*sun_footprint=*/0.0f);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const Reference ref = BuildReference(cam);
+    const Vec3f normal{0.0f, 1.0f, 0.0f};
+
+    int compared = 0;
+    float peak = 0.0f;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            const Vec3f rd = RayAt(ref, x, y);
+            WaterPixel px;
+            // 无介质：水上支路的层色只取决于 F 与探针（+ 太阳项）。
+            if (!EvaluateWaterPixel(cam.position, ref.fwd, rd, level, ior, 1.0f,
+                                    cam.near, cam.far, &px)) {
+                continue;
+            }
+            const Vec3f toward_cam{-rd.x(), -rd.y(), -rd.z()};
+            const Vec3f sun = jpov::lighting::SunDiskSpecularRadiance(
+                normal, toward_cam, sun_toward, px.reflectance, theta,
+                /*extra_a2=*/0.0f, sun_e);
+            const float exp_r = kSkyR * kEnvScale * px.reflectance + sun.x();
+            const float exp_g = kSkyG * kEnvScale * px.reflectance + sun.y();
+            const float exp_b = kSkyB * kEnvScale * px.reflectance + sun.z();
+            // 相对容差：太阳峰值是 1e3 量级，绝对容差在这里没意义；float 在 NoH→1
+            // 处有 ~0.3% 抵消误差（见 ggx_specular.h）。
+            const float scale = std::max(1.0f, exp_r);
+            EXPECT_NEAR(accum[base * 4 + 0], exp_r, scale * 1.0e-2f) << "x=" << x << " y=" << y;
+            EXPECT_NEAR(accum[base * 4 + 1], exp_g, scale * 1.0e-2f) << "x=" << x << " y=" << y;
+            EXPECT_NEAR(accum[base * 4 + 2], exp_b, scale * 1.0e-2f) << "x=" << x << " y=" << y;
+            peak = std::max(peak, accum[base * 4 + 0]);
+            ++compared;
+        }
+    }
+    EXPECT_GT(compared, 500) << "水上像素太少，用例没有覆盖面";
+    // 日盘像必须**真的出现**（否则「全 0 也全对」，这条断言就是空测）。
+    // 峰值 ≈ E·F·D(1)/4 = 3·0.02·(1/(π·5.41e-6))/4 ≈ 880。
+    EXPECT_GT(peak, 100.0f) << "没有出现日盘像：>0 说明带宽/遮罩哪一步被关掉了";
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// 像素足迹（specular AA）：开启后 lobe 必须变宽（被点亮像素数增加）且峰值下降。
+// 这是「掠射时投影把像压回亚像素」的正解 —— 关掉它就该退化成稀疏亮点。
+TEST(WaterSkinGpu, SunFootprintWidensTheLobe) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, 9.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+    const float theta = jpov::lighting::kSunAngularRadiusRad;
+    const Vec3f sun_e{3.0f, 2.8f, 2.4f};
+
+    const Reference ref0 = BuildReference(cam);
+    const Vec3f rd_center = RayAt(ref0, kWidth / 2, kHeight / 2);
+    const Vec3f sun_toward = NormalizeOr(Vec3f{rd_center.x(), -rd_center.y(), rd_center.z()},
+                                        Vec3f{0.0f, 1.0f, 0.0f});
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+
+    struct Stats {
+        int lit = 0;
+        float peak = 0.0f;
+    };
+    const auto measure = [&](float footprint) {
+        f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr,
+                 /*has_sun=*/true, sun_toward, sun_e, theta, footprint);
+        const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+        Stats st;
+        for (int i = 0; i < kWidth * kHeight; ++i) {
+            const float r = accum[i * 4 + 0];
+            if (r > 2.0f) {   // 只数「明显比环境反射亮」的像素
+                ++st.lit;
+            }
+            st.peak = std::max(st.peak, r);
+        }
+        return st;
+    };
+
+    const Stats off = measure(0.0f);
+    const Stats on = measure(1.0f);
+    // 48×32 的小视口里一个像素 ≈ 1.9°，「盘」只有 0.53° ⇒ 关足迹时几乎只能碰到 1~2 像素。
+    EXPECT_GT(off.lit, 0) << "关足迹时连一个像素都没点亮，先怀疑日盘像根本没出现";
+    EXPECT_GT(on.lit, off.lit) << "足迹没把 lobe 变宽：dFdx 那条路没接上";
+    EXPECT_LT(on.peak, off.peak) << "变宽必须伴随峰值下降（能量守恒），否则是在凭空加能量";
+
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }

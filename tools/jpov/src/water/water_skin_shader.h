@@ -90,6 +90,14 @@ uniform float uDepthBiasM;       // 水面与场景深度的比较容差（米�
 uniform samplerCube uEnvCube;    // 天光探针（大气色，不含日月盘）
 uniform sampler2D   uSceneDepth; // MRT#1 场景深度（gl_FragCoord.z，1.0 = 背景/远平面）
 
+// ── 太阳的像（解析 GGX，盘状光源）──
+// 由 Renderer 从 cmds.sun 填。与介质那份 uWaterSun* 分开：介质可以关，水面依然有日盘像。
+uniform int   uHasSun;            // 0 = 无太阳 ⇒ 这一项恒 0
+uniform vec3  uSunToward;         // 指向太阳（气侧，单位）
+uniform vec3  uSunIrradiance;     // color × intensity（辐照度语义）
+uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
+uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU 对拍测试置 0）
+
 const float kBackgroundDepth = 0.999999;
 const float kEnvLod = 0.0;        // 纯平面 = 镜面；探针只有 128²，LOD0 对天空已足够
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
@@ -118,6 +126,37 @@ void main() {
     vec3 rd = normalize(uCamFwd
                         + uCamRight * (vNdc.x * uTanHalfFov * uAspect)
                         + uCamUp    * (vNdc.y * uTanHalfFov));
+
+    // ── 太阳的像（解析 GGX）—— 必须在 discard 之前算 ──
+    // ① dFdx/dFdy 需要 uniform control flow：discard 或**变值分支**之后求导是未定义的，
+    //    所以 H 与足迹在这里无条件算完，只在最后按 NoV/NoL 遮罩。
+    // ② 这里用**未夹地平的** rd：地平线夹取只作用于探针支路（否则日盘像会被
+    //    压平成地平线上一条硬线 —— 契约 §2.3）。
+    vec3 Vw = -rd;                       // P → 相机
+    vec3 H = Vw + uSunToward;            // 半向量（未归一）
+    float hlen = length(H);
+    H = (hlen > 1.0e-6) ? (H / hlen) : vec3(0.0, 1.0, 0.0);
+    vec3 dHdx = dFdx(H);
+    vec3 dHdy = dFdy(H);
+    // 像素足迹并入斜率方差（specular AA 口径，known_issue §11.3③）：
+    // 平面法线恒定，H 的变化全来自视线 ⇒ 掠射时这一项自动变大，正好抵消投影压缩。
+    float footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
+    vec3 sun_spec = vec3(0.0);
+    if (uHasSun != 0) {
+        float NoV = Vw.y;                // N = (0,1,0)
+        float NoL = uSunToward.y;
+        if (NoV > 0.0 && NoL > 0.0) {
+            float NoH = max(H.y, 0.0);
+            // 带宽 = 盘角半径（θ/2，半向量只偏一半）+ 像素足迹；上限 0.25 防掠射爆炸。
+            float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
+                           + uSunFootprint * footprint_a2, 0.25);
+            float D = GgxDistribution(NoH, a2);
+            float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
+            // 界面反射率与探针支路同一个 F（平面下 VoH ≈ NoV，不另算 Schlick）。
+            float Fw = FresnelDielectric(abs(rd.y), 1.0, uWaterIor);
+            sun_spec = uSunIrradiance * (Fw * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
+        }
+    }
 
     // ── 视线 ∩ 平面 ──
     // 地平线附近（|rd.y| ≈ 0）**不 discard**：把方向钳到极小的 |dy|，让这一层照样覆盖上去。
@@ -177,7 +216,11 @@ void main() {
             rdir = normalize(rdir);
         }
         vec3 refl = textureLod(uEnvCube, rdir, kEnvLod).rgb * uEnvScale;
-        C = F * refl;
+        // 环境反射 + 太阳的像。
+        // ⚠️ 太阳项是**加法**：探针不含日月盘（kEnvProbe），SSR 也不负责它 ——
+        //    将来接 SSR 时写成 F*(A*SSR + (1-A)*sky) + sun_spec，
+        //    千万别把 sun_spec 也乘上 A（那会让日盘像随 SSR 命中与否闪）。
+        C = F * refl + sun_spec;
         // 透射率 = (1−F)/n²（辐射度跨介质守恒）；WBO 的 α 是“背景衰减率”= 1 − T。
         alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
     }

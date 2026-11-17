@@ -614,6 +614,67 @@ int RunCaptureWaterTricolor(const std::string& out_dir) {
     return 0;
 }
 
+// 水面上的「太阳的像」（解析 GGX，盘状光源）—— 三张不同太阳方位的 A/B。
+// 用法：jpov_skylight_viewer --capture-water-sun <out_dir>
+//
+// 出图：sun_azim{34,214,219,224}.png —— 同机位、同介质，只转太阳方位。
+//   34° 是**对照**：太阳在相机背后 ⇒ 日盘像落在画外，水面**不该**有亮斑；
+//   214/219/224° 是相机朝向一侧 ⇒ 亮斑应随方位平移。
+// 判据：水面上那个 **≈6 px 的亮斑**跟着太阳方位**横向移动**，且峰值远超环境反射
+//       （峰值是 HDR 值，tone map 后应该是纯白）；没有它说明带宽/遮罩哪一步失效了。
+int RunCaptureWaterSun(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面太阳的像（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 俯视 35°，看得到大片水面 —— 日盘像要落在水体上才有意义。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 28.0f;   // 低太阳 ⇒ 掠射反射，日盘像离相机近、更好找
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetWaterMedium(true);
+
+    // ⚠️ 方位要取**相机自己的朝向上**才看得到镜像：水面把视线水平方向原样反射回去 ⇒
+    //   日盘像只出现在「相机水平朝向 ≈ 太阳方位」的那一侧。本机位 theta=0.6 ⇒ 相机在
+    //   方位 34.4°、朝 214.4° 看 ⇒ 太阳方位要取 214° 附近（之前取 25°/45° 时像在画外，
+    //   白拍了一轮）。
+    for (float azim : {34.0f, 214.0f, 219.0f, 224.0f}) {
+        app.deg_.sun_azim_deg = azim;
+        char name[64];
+        std::snprintf(name, sizeof(name), "/sun_azim%03d.png", static_cast<int>(azim));
+        app.RunOnce(input, winfo, (out_dir + name).c_str());
+    }
+
+    LOG(INFO) << "water sun-image captured to " << out_dir
+              << " (sun_azim34 对照 / 214 / 219 / 224)";
+    app.Finalize();
+    return 0;
+}
+
 // 「水体消费的是光，不是 sky」的验证拍摄。
 // 用法：jpov_skylight_viewer --capture-water-light <out_dir>
 //
@@ -1191,6 +1252,7 @@ int main(int argc, char** argv) {
     std::string water_sweep_out_dir;
     std::string water_tricolor_out_dir;
     std::string water_light_out_dir;
+    std::string water_sun_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
     float smaa_threshold = 0.1f;
@@ -1213,6 +1275,8 @@ int main(int argc, char** argv) {
             water_tricolor_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-light") == 0 && i + 1 < argc) {
             water_light_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-sun") == 0 && i + 1 < argc) {
+            water_sun_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-camera-cross") == 0 && i + 1 < argc) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
@@ -1235,6 +1299,9 @@ int main(int argc, char** argv) {
     }
     if (!water_light_out_dir.empty()) {
         return RunCaptureWaterLight(water_light_out_dir);
+    }
+    if (!water_sun_out_dir.empty()) {
+        return RunCaptureWaterSun(water_sun_out_dir);
     }
     if (!camera_cross_out_dir.empty()) {
         return RunCaptureCameraCross(camera_cross_out_dir);

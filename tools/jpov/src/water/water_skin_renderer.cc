@@ -68,8 +68,10 @@ void WaterSkinRenderer::Init(ShaderManager* shader_mgr) {
     shader_mgr_ = shader_mgr;
     // 介质片段（MediumAt + uWater* uniform）拼在本 pass 的 FS 前面：
     // 水下支路要用它取「深海积分反射」 S_P(∞)，物理只写一份。
+    // GGX 片段（平光镜面项）同理 —— 与 PBR 共用同一份 D/G，不在水皮里再拄一遍。
     std::string fs = "#version 330 core\n";
     fs += water::kWaterMediumGlsl;
+    fs += lighting::kGgxSpecularGlsl;
     fs += water::kWaterSkinFs;
     prog_draw_ = shader_mgr_->GetOrCreate("water_skin_draw",
                                           {water::kWaterSkinVs, fs.c_str()});
@@ -157,6 +159,19 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
         glUniform3f(shader_mgr_->GetUniform(prog, "uWaterSunToward"), 0.0f, 1.0f, 0.0f);
         glUniform1i(shader_mgr_->GetUniform(prog, "uWaterHasSun"), 0);
     }
+
+    // ── 太阳的像（解析 GGX，盘状光源）──
+    // 与介质那份 sun 分开传：介质可以关，水面依然该有日盘像。
+    // 无太阳时置零，避免上一帧残留。
+    glUniform1i(shader_mgr_->GetUniform(prog, "uHasSun"), in.has_sun ? 1 : 0);
+    glUniform3f(shader_mgr_->GetUniform(prog, "uSunToward"),
+                in.sun_toward.x(), in.sun_toward.y(), in.sun_toward.z());
+    glUniform3f(shader_mgr_->GetUniform(prog, "uSunIrradiance"),
+                in.has_sun ? in.sun_irradiance.x() : 0.0f,
+                in.has_sun ? in.sun_irradiance.y() : 0.0f,
+                in.has_sun ? in.sun_irradiance.z() : 0.0f);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uSunAngularRadius"), in.sun_angular_radius);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uSunFootprint"), in.sun_footprint);
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {
