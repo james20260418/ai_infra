@@ -220,7 +220,9 @@ inline constexpr float kWaterIor = 1.333f;   // 20°C 纯水（菲涅尔 / 临�
 // （材质中性，不和水的染色混淆）。ground_mesh_ 是 40×40 的 quad ⇒ scale = 30/40。
 inline constexpr float kSlabSizeM = 30.0f;
 inline constexpr float kSlabGroundMeshSizeM = 40.0f;
-inline constexpr float kSlabTopDepthDefM = 5.0f;
+// 岩板顶面默认深度（米）。1.7 m 是 Danis 验收时定的默认档：
+// 红通道已明显衰减但未死、蓝通道基本不动，逐通道吸收的差异最直观。
+inline constexpr float kSlabTopDepthDefM = 1.7f;
 inline jpov::PBRMaterial SlabMaterial() {
     return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.72f, 0.70f, 0.66f, 1.0f},
                                           /*metallic*/ 0.0f, /*roughness*/ 0.9f);

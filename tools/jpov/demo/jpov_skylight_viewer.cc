@@ -445,7 +445,7 @@ int RunCaptureEnv(const std::string& out_dir) {
 // 出图（同一机位；前五张是“凝胶对物体的遮挡”，后两张是“对天色的吸收”）：
 //   water_off.png      介质关 —— 岩板/三件方块的原色（对照基线）
 //   water_on_d2.png    介质开，岩板深度 2 m
-//   water_on_d5.png    5 m（默认）
+//   water_on_d5.png    5 m
 //   water_on_d10.png   10 m
 //   water_on_d20.png   20 m（红通道应该基本没了，只剩蓝）
 //   water_sky_off.png  无几何 + 介质关：天空下半球的原始地色
@@ -600,7 +600,7 @@ int RunCaptureWaterTricolor(const std::string& out_dir) {
     app.deg_.daylight_season = 0.0f;
     app.deg_.sun_elev_deg    = 45.0f;
     app.deg_.sun_azim_deg    = 40.0f;
-    app.SetSlabDepth(5.0f);
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
     app.SetWaterMedium(true);
 
     app.SetTricolorAmbient(false);
@@ -657,7 +657,7 @@ int RunCaptureWaterLight(const std::string& out_dir) {
     app.deg_.daylight_season = 0.0f;
     app.deg_.sun_elev_deg    = 45.0f;
     app.deg_.sun_azim_deg    = 40.0f;
-    app.SetSlabDepth(5.0f);
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
     app.SetWaterMedium(true);
 
     app.RunOnce(input, winfo, (out_dir + "/light_sky.png").c_str());
