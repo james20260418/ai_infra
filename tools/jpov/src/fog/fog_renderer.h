@@ -57,11 +57,13 @@ namespace jpov {
 //
 // 内散射源：L_in = fog_tint · ( ambient_color·ambient_intensity
 //                                + sun_color·sun_intensity·csm_shadow )。
-// 前者来自天光单色 ambient 推导（SkyCommand::AmbientColor()/AmbientIntensity()），
-// 后者是太阳直射经 CSM 阴影调制 —— god ray 正是来自后者。
+// 两项都来自 RenderCommandList 的光源（`cmds.ambient` / `cmds.sun`），与 object3d 同源；
+// **不从 SkyCommand 推导**（天光→光照的换算是场景的职责）。
+//   · 未配 ambient：Color/强度均为零值 ⇒ 没有环境注入（“没光就应该暗”）；
+//   · 三色 ambient：调用方传 `AmbientLight::IsotropicColor()` 的球面权重纯色。
 struct FogLighting {
-    Color ambient_color{0.9f, 0.9f, 0.9f, 1.0f};   // SkyCommand::AmbientColor()
-    float ambient_intensity = 1.0f;                // SkyCommand::AmbientIntensity()
+    Color ambient_color{0.0f, 0.0f, 0.0f, 1.0f};   // AmbientLight::IsotropicColor()
+    float ambient_intensity = 0.0f;                // AmbientLight::intensity
     std::optional<DirectionalLight> sun;           // 无 ⇒ 无 god ray
     ShadowConfig shadow_cfg{};                      // 级联范围 / 淡出 / 偏置
     std::vector<CascadeFBO> shadow_fbos;            // 长度 = cascade_count（仅 sun 时有效）

@@ -206,6 +206,29 @@ inline constexpr float kLadderCenterX(int i) {
 }
 inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左→右
 
+// ── 水凝胶场景（水体验收）：无限水平面 + 均质水体介质 + 界面层 + 三件水下物体 ──
+//
+// 水面是 `y = kWaterLevelY` 的无限平面（几何上必须解析求交，没有“平面尺寸”参数）。
+// 已实现：介质（吸收 + 注入，闭式）、界面层（水下 Snell/TIR + 深海积分、水上探针反射
+// + 太阳的像 + ÷n² 透射）。未实现：SSR 接反射、波浪法线、水皮接 CSM（见 known_issue §10）。
+// 验收：① 介质对物体的遮挡 ② 对天色/日光的吸收 ③ 静止水面的日盘像。
+inline constexpr float kWaterLevelY = 0.0f;
+inline constexpr float kWaterIor = 1.333f;   // 20°C 纯水（菲涅尔 / 临界角 / 太阳折射）
+// 地平线以下的填充色：**就用 sky 的 ground_color（陆地色）**，水场景不改写它
+//（Danis 2026-11-17 定）。水面边缘的地缝由水皮自己多盖几像素堵住。
+
+// 水下岩板：30×30 m 的均匀亮灰底，随深度滑条整组下沉 —— 颜色变化只可能来自水体
+// （材质中性，不和水的染色混淆）。ground_mesh_ 是 40×40 的 quad ⇒ scale = 30/40。
+inline constexpr float kSlabSizeM = 30.0f;
+inline constexpr float kSlabGroundMeshSizeM = 40.0f;
+// 岩板顶面默认深度（米）。1.7 m 是 Danis 验收时定的默认档：
+// 红通道已明显衰减但未死、蓝通道基本不动，逐通道吸收的差异最直观。
+inline constexpr float kSlabTopDepthDefM = 1.7f;
+inline jpov::PBRMaterial SlabMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(/*color*/ {0.72f, 0.70f, 0.66f, 1.0f},
+                                          /*metallic*/ 0.0f, /*roughness*/ 0.9f);
+}
+
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //
 // turbidity：大气浊度 [0, 8]，默认 2（清澈）。

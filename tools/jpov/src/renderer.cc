@@ -22,6 +22,8 @@
 #include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/lights_texture.h"
 #include "tools/jpov/src/fog/fog_renderer.h"
+#include "tools/jpov/src/water/water_medium_math.h"
+#include "tools/jpov/src/water/water_medium_shader.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
@@ -615,6 +617,7 @@ Renderer::~Renderer() {
     DestroySkyEnvCube();
     fog_renderer_.Finalize();
     fog_composite_.Finalize();
+    water_skin_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1358,7 +1361,8 @@ void Renderer::Init(
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
     fog_renderer_.Init(&shader_mgr_);
-    fog_composite_.Init(&shader_mgr_);
+    fog_composite_.Init(&shader_mgr_, water::kWaterMediumGlsl);
+    water_skin_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
@@ -1466,8 +1470,10 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
-    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty() ||
-                  !cmds.volume_fires.empty();
+    // 水体也必须在里面：水皮是 3D 空间里的一层（要 MRT#1 场景深度 + HDR），
+    // 漏掉会让「只配了 water、没有 sky/物体/粒子」的帧整块跳过 3D ⇒ 水**静默不画**。
+    bool has_3d = cmds.sky.has_value() || cmds.water.has_value() ||
+                  !cmds.particles.empty() || !cmds.volume_fires.empty();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -1506,6 +1512,12 @@ void Renderer::Render(const RenderCommandList& cmds,
         // cmds.ambient，未配则用默认值）
         const std::optional<DirectionalLight> eff_sun = cmds.sun;
         std::optional<AmbientLight> eff_ambient = cmds.ambient;
+        // 天体必须有非零角半径：0 意味着「没有带宽」⇒ 镜面上 D 恒为 0（高光静默消失）
+        // 或极端值。按 known_issue §11 的口径，这是配置错误，不静默容忍。
+        if (eff_sun.has_value()) {
+            CHECK_GT(eff_sun->angular_radius, 0.0f)
+                << "DirectionalLight::angular_radius 必须 > 0（太阳 ≈0.00465 / 月亮 ≈0.00452）";
+        }
 
         // ---- 第 0 步：太阳阴影 pass（有 sun 时）----
         // 先渲染场景深度到阴影纹理，主 pass 的 PBR shader 才能采样做影子。
@@ -1561,6 +1573,72 @@ void Renderer::Render(const RenderCommandList& cmds,
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
+        // 水体：`water` 命令存在 = 有界面层要画（层由合成器消费）；介质可单独开关。
+        const bool water_present = cmds.water.has_value();
+        const bool water_medium_on = water_present && cmds.water->medium.enabled;
+
+        // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
+        //   直射 = cmds.sun，环境 = cmds.ambient —— 与 object3d 的 PBR 是同一份数据。
+        //
+        // 为什么**不从 SkyCommand 推导**（2026-11-17 Danis 定）：sky 只负责「画出来的天」，
+        //   把天光换算成 ambient/sun 是**场景的职责**（demo 的 MakeSkyLighting 就是先算好
+        //   再填 cmds.sun / cmds.ambient）。渲染侧再推一份，等于同一个物理量有两个来源。
+        // 没配 = 没光 = 暗：不给默认亮度兜底（否则“忘了配光”会被静默当成合法场景）。
+        // 三色 ambient 没有法线可依（体积不是面）⇒ 按球面权重塌成纯色，
+        //   推导见 AmbientLight::IsotropicColor()（天 : 天际线 : 地 = 1 : 2 : 1）。
+        Color ambient_color{0.0f, 0.0f, 0.0f, 1.0f};
+        float ambient_intensity = 0.0f;
+        if (cmds.ambient.has_value()) {
+            ambient_color = cmds.ambient->IsotropicColor();
+            ambient_intensity = cmds.ambient->intensity;
+        }
+
+        // 水体介质样本：视线侧（合成趟）、水皮的「深海积分反射」、镜面环境项共用这一份。
+        // 不合法直接 crash（不静默退化）。
+        water::WaterMediumSample water_medium;
+        const water::WaterMediumSample* water_medium_ptr = nullptr;
+        if (water_medium_on) {
+            const WaterMedium& wm = cmds.water->medium;
+            CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_a.z(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
+            CHECK_GE(wm.sigma_s.x(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
+            CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
+            CHECK_LT(wm.phase_g, water::kMaxPhaseG)
+                << "WaterMedium::phase_g 必须 < kMaxPhaseG(0.95)：g→1 会让相位函数变成 δ";
+            // ior <= 1 在物理上不存在（水必须比空气密）；放行会让 sin²θw ≥ 1 ⇒
+            // 没有折射解 ⇒ 增益 1/cosθw = inf 与 (1−R)=0 相乘得 NaN（known_issue §10 已记）。
+            CHECK_GE(cmds.water->ior, 1.0f)
+                << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
+            // σ 全 0 = 「忘了填参数」（enabled=false 才是「关」）：静默跑一趟恒等合成很误导。
+            CHECK(wm.sigma_a.x() > 0.0f || wm.sigma_a.y() > 0.0f || wm.sigma_a.z() > 0.0f ||
+                  wm.sigma_s.x() > 0.0f || wm.sigma_s.y() > 0.0f || wm.sigma_s.z() > 0.0f)
+                << "WaterMedium::enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 enabled=false";
+            water_medium.level_y = cmds.water->level_y;
+            water_medium.ior = cmds.water->ior;
+            water_medium.sigma_a = wm.sigma_a;
+            water_medium.sigma_s = wm.sigma_s;
+            water_medium.phase_g = wm.phase_g;
+            water_medium.ambient = {ambient_color.r * ambient_intensity,
+                                    ambient_color.g * ambient_intensity,
+                                    ambient_color.b * ambient_intensity};
+            if (eff_sun.has_value()) {
+                const Vec3f sd = eff_sun->direction;   // 传播方向
+                const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
+                                           sd.z() * sd.z());
+                if (sl > 1e-8f) {
+                    water_medium.has_sun = true;
+                    water_medium.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
+                    water_medium.sun_color = {eff_sun->color.r * eff_sun->intensity,
+                                              eff_sun->color.g * eff_sun->intensity,
+                                              eff_sun->color.b * eff_sun->intensity};
+                }
+            }
+            water_medium_ptr = &water_medium;
+        }
+
         // ---- 第 0.5 步：天光背景（有 sky 指令时）----
         // 先画程序化天光垫底（不写深度、不参与深度测试），3D 物体随后用深度覆盖。
         // 独立 shader program（sky），一帧一次 draw，与 object3d PBR 完全分开。
@@ -1570,7 +1648,25 @@ void Renderer::Render(const RenderCommandList& cmds,
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
 
-            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+            // 天球折射（契约 §3）：由 Renderer 自动填 —— 有水面且相机在水面以下。
+            // 两趟（kFull / kAtmoOnly）必须用**同一份**命令，否则窗内远景雾会朝未折射天色收敛。
+            SkyCommand sky_cmd_for_draw = *cmds.sky;
+            if (cmds.water.has_value() &&
+                cmds.camera.position.y() < cmds.water->level_y) {
+                CHECK_GE(cmds.water->ior, 1.0f)
+                    << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
+                sky_cmd_for_draw.water_refract_ior = cmds.water->ior;
+                sky_cmd_for_draw.water_refract_level_y = cmds.water->level_y;
+            } else {
+                sky_cmd_for_draw.water_refract_ior = 0.0f;
+            }
+            // 「地平线以下是什么」由场景的水面决定（深海渐近色，单一出处）：
+            //   · 背景填充：贴地平线的射线可能落在远平面之外（水面交点不可达）⇒ 必须有个色兜底；
+            // 地平线以下的填充色**不改写**：用场景给的 ground_color（陆地色）。
+            // 水场景里那条“地缝”由水皮多盖几像素解决（见 water_skin_shader.h 的地平线钳位），
+            // 不用填色兜底 —— 填色会让陆地场景的色调被水污染（Danis 2026-11-17 定）。
+
+            SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_);
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
@@ -1579,7 +1675,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             EnsureSkyColorFBO(fbo_3d_w, fbo_3d_h);
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+            SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
@@ -1598,7 +1694,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                     << "EnvSpecular::sky_scale 必须 <= 1";
                 if (cmds.env_specular->sky_scale > 0.0f) {
                     EnsureSkyEnvCube(kSkyEnvCubeSize);
-                    SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
+                    // 探针必须与主天空用**同一份**命令：下半球的水面语义在这里生效。
+                    SkyRenderer::DrawSkyEnvCube(sky_cmd_for_draw, kSkyEnvCubeSize,
                                                 sky_env_tex_, sky_env_fbo_, shader_mgr_);
                 }
             }
@@ -1832,6 +1929,8 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
             const bool run_fog = !cmds.point_fogs.empty();
+            // 合成趟的触发条件：有雾场 **或** 有水体（层必须有人消费，否则水皮白画）。
+            const bool run_medium_composite = run_fog || water_present;
 
             // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
             //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
@@ -1942,51 +2041,109 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(2, mrt_bufs);
             }
 
-            // ── 点状雾火（froxel 体积雾）—— 与 horizon_fog 同为「其它 3D
-            //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
-            //    只读 MRT#1 场景深度做 z 裁剪；靠 GL_ONE/GL_SRC_ALPHA 混合与帧缓冲已有
-            //    颜色合成（不采样场景颜色）。见 docs/jpov_froxel_design.md。
-            if (run_fog) {
+            // ── 点状雾火（froxel 体积雾）+ 水体介质 —— 同一次全屏合成趟。──
+            //    与 horizon_fog 同为「其它 3D 渲染之后、HDR 后处理之前」，就地合成到 3D HDR FBO。
+            //    只读 MRT#1 场景深度做 z 裁剪；不采样场景颜色。见 docs/jpov_froxel_design.md。
+            //    水体介质与雾场是同一趟里的两个「场来源」：前缀 (τ, S) 直接相加。
+            // ── 水皮（界面层）—— 只画进自持 WBO，**不合成**。──
+            //    合成由下面的介质合成趟做（段 ↔ 层交替）：这样「相机 → 水面」那段水体的注入
+            //    不会被层盖掉（环外 α=1 时尤其明显）。
+            TransparentLayerSet layers;
+            if (water_present) {
+                CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
+                CHECK(cmds.sky.has_value())
+                    << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
+                const bool cam_underwater = cmds.camera.position.y() < cmds.water->level_y;
+                // 水下没有介质 ⇒ S_P(∞)=0 ⇒ 环外 α=1 会把画面盖成**黑环**（不是"暗水"）。
+                // 这个组合没有物理意义，直接拦。
+                CHECK(!cam_underwater || water_medium_ptr != nullptr)
+                    << "水下（相机低于 level_y）必须开启 medium：否则环外 α=1 会盖成黑环";
+                if (!cam_underwater) {
+                    CHECK(cmds.env_specular.has_value())
+                        << "水上水皮需要 env_specular：水面唯一的反射源是天光探针";
+                    CHECK_GT(cmds.env_specular->sky_scale, 0.0f)
+                        << "env_specular.sky_scale = 0 时探针不建，水面没有反射源";
+                    CHECK_NE(sky_env_tex_, 0u)
+                        << "水上水皮需要天光 cubemap（env_specular 开启时应已在天空 pass 建好）";
+                }
+                WaterSkinRenderer::Inputs wsi;
+                wsi.camera = cmds.camera;
+                wsi.full_w = fbo_3d_w;
+                wsi.full_h = fbo_3d_h;
+                wsi.scene_depth_tex = hdr_scene_depth_tex;   // 本帧 MRT#1
+                wsi.env_cube_tex = sky_env_tex_;
+                wsi.env_scale = cmds.env_specular.has_value()
+                                    ? cmds.env_specular->sky_scale : 0.0f;
+                wsi.level_y = cmds.water->level_y;
+                wsi.ior = cmds.water->ior;
+                wsi.medium = water_medium_ptr;
+                // 太阳的像：与介质分开传（介质可关，水面依然该有日盘像）。
+                if (eff_sun.has_value()) {
+                    const Vec3f sd = eff_sun->direction;   // 传播方向
+                    const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() +
+                                               sd.z() * sd.z());
+                    if (sl > 1e-8f) {
+                        wsi.has_sun = true;
+                        wsi.sun_toward = {-sd.x() / sl, -sd.y() / sl, -sd.z() / sl};
+                        wsi.sun_irradiance = {eff_sun->color.r * eff_sun->intensity,
+                                              eff_sun->color.g * eff_sun->intensity,
+                                              eff_sun->color.b * eff_sun->intensity};
+                        wsi.sun_angular_radius = eff_sun->angular_radius;
+                    }
+                }
+
+                water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                water_skin_renderer_.Draw(wsi);
+                layers.Add(water_skin_renderer_.layer());
+
+                // Draw 改了 FBO / viewport / 纹理单元：恢复主 3D 目标。
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-                // 只写颜色附件0；雾不碰场景深度附件。
+                const GLenum mrt_w[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_w);
+            }
+
+            if (run_medium_composite) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件0；不碰场景深度附件。
                 const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
                 glDrawBuffers(1, fog_draw_buf);
                 // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
                 // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
-                // 物理光照：内散射源 = 天光单色 ambient + 太阳经 CSM 阴影
-                // （god ray 来自后者）。ambient 走 sky 的单色推导函数。
+                // 环境光已在上方由 cmds.ambient 统一解析（ambient_color / ambient_intensity），
+                // 与 object3d、水体介质同一份；不从 sky 推导。
                 const FogParams ff_params = cmds.fog.value_or(FogParams{});
-                FogLighting ff_light;
-                if (cmds.sky.has_value()) {
-                    ff_light.ambient_color = cmds.sky->AmbientColor();
-                    ff_light.ambient_intensity = cmds.sky->AmbientIntensity();
-                } else if (cmds.ambient.has_value()) {
-                    ff_light.ambient_color = cmds.ambient->color;
-                    ff_light.ambient_intensity = cmds.ambient->intensity;
-                }
-                ff_light.sun = eff_sun;
-                ff_light.shadow_cfg = shadow_cfg_;
-                if (eff_sun.has_value()) {
-                    ff_light.shadow_fbos = shadow_fbos_;
-                    std::memcpy(ff_light.shadow_vp, shadow_vp_, sizeof(shadow_vp_));
-                    std::memcpy(ff_light.shadow_depth_vp, shadow_depth_vp_,
-                                sizeof(shadow_depth_vp_));
-                    std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
-                                sizeof(shadow_texel_world_));
-                }
-                // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
-                //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
-                // 烘场（inject/reduce/scatter）与合成（雾场 + 透明层交替积分）是两个类：
-                // 前者产出 FogField，后者按场把所有层一次合成进当前 HDR FBO。
+
+                // 烘场只在真有雾团时跑（无水体的空白场不能拿来当「空场」用）。
                 FogField fog_field;
-                fog_renderer_.Build(cmds.point_fogs, cmds.point_lights, light_data_tex_,
-                                    cam, mvp_, fbo_3d_w, fbo_3d_h, ff_params,
-                                    ff_light, &fog_field);
+                if (run_fog) {
+                    FogLighting ff_light;
+                    ff_light.ambient_color = ambient_color;
+                    ff_light.ambient_intensity = ambient_intensity;
+                    ff_light.sun = eff_sun;
+                    ff_light.shadow_cfg = shadow_cfg_;
+                    if (eff_sun.has_value()) {
+                        ff_light.shadow_fbos = shadow_fbos_;
+                        std::memcpy(ff_light.shadow_vp, shadow_vp_, sizeof(shadow_vp_));
+                        std::memcpy(ff_light.shadow_depth_vp, shadow_depth_vp_,
+                                    sizeof(shadow_depth_vp_));
+                        std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
+                                    sizeof(shadow_texel_world_));
+                    }
+                    // 雾的内散射也用点光源数据：与本帧的 PBR 共用同一张光源纹理
+                    //（本帧已在上面的「点光源数据纹理」处统一上传一次）。
+                    // 烘场（inject/reduce/scatter）与合成（场 + 透明层交替积分）是两个类：
+                    // 前者产出 FogField，后者按场把所有层一次合成进当前 HDR FBO。
+                    fog_renderer_.Build(cmds.point_fogs, cmds.point_lights,
+                                        light_data_tex_, cam, mvp_, fbo_3d_w, fbo_3d_h,
+                                        ff_params, ff_light, &fog_field);
+                }
+
                 fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
-                                    ff_params, TransparentLayerSet{});
+                                    ff_params, layers, water_medium_ptr);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

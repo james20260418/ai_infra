@@ -410,6 +410,8 @@ cc_library(
         "//tools/jpov/src/fog:fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
+        "//tools/jpov/src/water:water_medium_math",   # 水体介质（场的第二个来源）
+        "//tools/jpov/src/water:water_skin_renderer",  # 水皮（界面层）
         "//tools/jpov/src/strip:strip_renderer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",

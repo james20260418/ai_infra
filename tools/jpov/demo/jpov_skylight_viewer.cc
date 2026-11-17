@@ -439,6 +439,516 @@ int RunCaptureEnv(const std::string& out_dir) {
 
 }  // namespace
 
+// 水体介质（水凝胶）A/B 拍摄：固定机位/光照，只切介质开关与岩板深度。
+// 用法：jpov_skylight_viewer --capture-water <out_dir>
+//
+// 出图（同一机位；前五张是“凝胶对物体的遮挡”，后两张是“对天色的吸收”）：
+//   water_off.png      介质关 —— 岩板/三件方块的原色（对照基线）
+//   water_on_d2.png    介质开，岩板深度 2 m
+//   water_on_d5.png    5 m
+//   water_on_d10.png   10 m
+//   water_on_d20.png   20 m（红通道应该基本没了，只剩蓝）
+//   water_sky_off.png  无几何 + 介质关：天空下半球的原始地色
+//   water_sky_on.png   无几何 + 介质开：整段水柱把天色吃掉 + 注入自身颜色
+//
+// 为什么这组就够：
+//   · 遮挡 = **逐通道衰减**：岩板是中性灰材质，颜色只会在灰度线上变暗 + 向蓝偏；
+//   · 天色吸收：射线向下穿过整段水体到远平面 ⇒ 背景 = 地平线以下天空色被 exp(−τ) 吞掉，
+//     剩下的只能是介质自己的注入项（σs 越大越亮）。
+int RunCaptureWater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体介质（水凝胶）A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 机位 A（俯视 35°）：看“凝胶对物体的遮挡”—— 岩板 + 三件方块。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62;
+    app.view_.theta = 0.6;
+    app.view_.R     = 26.0;
+    // 太阳：侧上方，能看出“逐通道吸收 + 相位方向性”的差别。
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+
+    // 机位 B（近水平 9°）：看“凝胶对天色的吸收”—— 地平线以上是空气里的天，
+    // 以下要穿过整段水体 ⇒ 天色被 exp(−τ) 吞掉，只剩介质自己的注入色。
+    const auto setCameraB = [&app]() {
+        app.view_.phi   = 0.16;
+        app.view_.theta = 0.6;
+        app.view_.R     = 30.0;
+    };
+
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_off.png").c_str());
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d2.png").c_str());
+    app.SetSlabDepth(5.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d5.png").c_str());
+    app.SetSlabDepth(10.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d10.png").c_str());
+    app.SetSlabDepth(20.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_on_d20.png").c_str());
+
+    // ── 水下两张（M2 水皮验收）──
+    // (a) 水下俯视：把**水位**抬到 +6 m（相机 4.2 m ⇒ 水下 1.8 m），目标仍是原点 ⇒ 看下去。
+    //     岩板顶面 = 水位 − 5 m = +1 m（水面下 5 m）。
+    app.SetShowScene(true);
+    app.SetWaterLevel(6.0f);
+    app.SetSlabDepth(5.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_under_down.png").c_str());
+
+    // (a2) 半浸方块：水位 +6、岩板深度 0.5 ⇒ 岩板顶面 +5.5 m（水面下 0.5 m），
+    //      2.2 m 高的方块露出水面 —— 用来看「水线上下的物体」的地色/反射是否各归各位。
+    app.SetWaterLevel(6.0f);
+    app.SetSlabDepth(0.5f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.55f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 16.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_halfbox.png").c_str());
+
+    // (b) 水下抬头：水位回 0、相机在原点下方（phi<0）⇒ 直视上方的 Snell 窗与 TIR 环。
+    app.SetWaterLevel(0.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = -0.60f;
+    app.view_.theta = 0.70f + 3.14159265f;
+    app.view_.R     = 8.0f;
+    app.RunOnce(input, winfo, (out_dir + "/water_under_up.png").c_str());
+
+    // 天色吸收：不画任何几何 + 近水平机位 ⇒ 上半屏是空气里的天，下半屏是“被水柱吃掉的天色”。
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetShowScene(false);
+    setCameraB();
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/water_sky_off.png").c_str());
+    app.SetWaterMedium(true);
+    app.RunOnce(input, winfo, (out_dir + "/water_sky_on.png").c_str());
+
+    LOG(INFO) << "water medium A/B captured to " << out_dir
+              << " (water_off / on_d2,5,10,20 / sky_off,on)";
+    app.Finalize();
+    return 0;
+}
+
+// 三色环境光 → 水体照明的 A/B：证明「三色 ambient 塌成纯色后确实进了水体」。
+// 用法：jpov_skylight_viewer --capture-water-tricolor <out_dir>
+//
+// 出图（同机位、同光照、介质开，只切三色 ambient 开关）：
+//   tricolor_off.png  单色 ambient（= AmbientColor()，旧行为）
+//   tricolor_on.png   三色 ambient（天/天际线/地 按 1:2:1 塔成纯色后供介质使用）
+//
+// 判据：两图必须**不同**（旧实现里三色开关对水完全无效）；差别应集中在
+//   水体被照亮的地方（岩板/方块周围的水而不是天空）。
+int RunCaptureWaterTricolor(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 三色 ambient → 水体 A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 机位与水介质 A/B 的机位 A 一致（俯视 35°），岩板深度取默认可见档。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetWaterMedium(true);
+
+    app.SetTricolorAmbient(false);
+    app.RunOnce(input, winfo, (out_dir + "/tricolor_off.png").c_str());
+    app.SetTricolorAmbient(true);
+    app.RunOnce(input, winfo, (out_dir + "/tricolor_on.png").c_str());
+
+    LOG(INFO) << "water tricolor A/B captured to " << out_dir
+              << " (tricolor_off / tricolor_on)";
+    app.Finalize();
+    return 0;
+}
+
+// 水面上的「太阳的像」（解析 GGX，盘状光源）—— 三张不同太阳方位的 A/B。
+// 用法：jpov_skylight_viewer --capture-water-sun <out_dir>
+//
+// 出图：sun_azim{34,214,219,224}.png —— 同机位、同介质，只转太阳方位。
+//   34° 是**对照**：太阳在相机背后 ⇒ 日盘像落在画外，水面**不该**有亮斑；
+//   214/219/224° 是相机朝向一侧 ⇒ 亮斑应随方位平移。
+// 判据：水面上那个 **≈6 px 的亮斑**跟着太阳方位**横向移动**，且峰值远超环境反射
+//       （峰值是 HDR 值，tone map 后应该是纯白）；没有它说明带宽/遮罩哪一步失效了。
+int RunCaptureWaterSun(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面太阳的像（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 俯视 35°，看得到大片水面 —— 日盘像要落在水体上才有意义。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 28.0f;   // 低太阳 ⇒ 掠射反射，日盘像离相机近、更好找
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetWaterMedium(true);
+
+    // ⚠️ 方位要取**相机自己的朝向上**才看得到镜像：水面把视线水平方向原样反射回去 ⇒
+    //   日盘像只出现在「相机水平朝向 ≈ 太阳方位」的那一侧。本机位 theta=0.6 ⇒ 相机在
+    //   方位 34.4°、朝 214.4° 看 ⇒ 太阳方位要取 214° 附近（之前取 25°/45° 时像在画外，
+    //   白拍了一轮）。
+    for (float azim : {34.0f, 214.0f, 219.0f, 224.0f}) {
+        app.deg_.sun_azim_deg = azim;
+        char name[64];
+        std::snprintf(name, sizeof(name), "/sun_azim%03d.png", static_cast<int>(azim));
+        app.RunOnce(input, winfo, (out_dir + name).c_str());
+    }
+
+    // 诊断用：关掉**水体介质**（保留水皮与太阳）—— 用来分清亮点是「水皮的镜面项」
+    // 还是「水体体积的太阳内散射」。介质关掉后体积项消失；若亮点还在 ⇒ 它是水皮。
+    {
+        app.deg_.sun_azim_deg = 214.0f;
+        app.SetWaterMedium(false);
+        app.RunOnce(input, winfo, (out_dir + "/sun_medium_off.png").c_str());
+        app.SetWaterMedium(true);
+    }
+
+    // 诊断用：保持 sky / ambient 不变，只把**太阳强度**置零。
+    // 用来分辨「水面那个亮点」是太阳的解析镜面项（会消失），
+    // 还是天空里绘出的日盘透过水面 / 水体自身的散射（不会消失）。
+    {
+        jpov::DirectionalLight no_sun{};
+        no_sun.direction = {-0.5f, -0.7f, -0.5f};
+        no_sun.intensity = 0.0f;
+        app.SetSunOverride(no_sun);
+        app.deg_.sun_azim_deg = 214.0f;
+        app.RunOnce(input, winfo, (out_dir + "/sun_off.png").c_str());
+        app.ClearSunOverride();
+    }
+
+    LOG(INFO) << "water sun-image captured to " << out_dir
+              << " (34 对照 / 214 / 219 / 224 / sun_off / sun_medium_off)";
+    app.Finalize();
+    return 0;
+}
+
+// 「水体消费的是光，不是 sky」的验证拍摄。
+// 用法：jpov_skylight_viewer --capture-water-light <out_dir>
+//
+// 三张图**sky 完全相同**，只改 RenderCommandList 的光源：
+//   light_sky.png    光源 = 由 sky 推导的默认 ambient/sun（= 改动前也能出的图）
+//   light_warm.png   ambient 覆盖成暖橙、sun 不变（sky 不动）
+//                  ⇒ 水体/物体应变暖；旧实现里水只认 sky，这张图不可能变
+//   light_dark.png   ambient = 0 且 sun intensity = 0
+//                  ⇒ 注入为 0，水体只剩吸收（背景被吞、“没光就暗”）
+int RunCaptureWaterLight(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体照明来源 A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 与水介质 A/B 的机位 A 一致：俯视 35°，能看到岩板、三件方块与它们周围的水体。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 26.0f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetSlabDepth(jpov_skylight::kSlabTopDepthDefM);
+    app.SetWaterMedium(true);
+
+    app.RunOnce(input, winfo, (out_dir + "/light_sky.png").c_str());
+
+    // 只关太阳强度（sky 不动、ambient 不动）：用来分辨「水面上的亮点」到底来自
+    // 太阳的解析项，还是天空里绘出的日盘透过水面（透射）。
+    // 前者会消失，后者会留下。
+    {
+        jpov::DirectionalLight no_sun{};
+        no_sun.direction = {-0.5f, -0.7f, -0.5f};
+        no_sun.intensity = 0.0f;
+        app.SetSunOverride(no_sun);
+        app.RunOnce(input, winfo, (out_dir + "/light_sunoff.png").c_str());
+        app.ClearSunOverride();
+    }
+
+    // 只换 ambient（sky / sun 不动）：暖橙、强度略高，便于测像素。
+    jpov::AmbientLight warm;
+    warm.color = {0.90f, 0.35f, 0.12f, 1.0f};
+    warm.intensity = 1.6f;
+    app.SetAmbientOverride(warm);
+    app.RunOnce(input, winfo, (out_dir + "/light_warm.png").c_str());
+    app.ClearAmbientOverride();
+
+    // 完全无光：ambient = 0、sun 强度 = 0。水只剩吸收，注入应为零。
+    jpov::AmbientLight none_ambient;
+    none_ambient.color = {0.0f, 0.0f, 0.0f, 1.0f};
+    none_ambient.intensity = 0.0f;
+    app.SetAmbientOverride(none_ambient);
+    jpov::DirectionalLight none_sun{};
+    none_sun.intensity = 0.0f;
+    app.SetSunOverride(none_sun);
+    app.RunOnce(input, winfo, (out_dir + "/light_dark.png").c_str());
+
+    LOG(INFO) << "water lighting A/B captured to " << out_dir
+              << " (light_sky / light_sunoff / light_warm / light_dark)";
+    app.Finalize();
+    return 0;
+}
+
+// 水体连续性扫描（诊断用）：固定相机/光照，沿岩板深度做细步扫描。
+// 用法：jpov_skylight_viewer --capture-water-sweep <out_dir>
+// 出图：sweep_d000.png … sweep_d600.png（0.00 ~ 6.00 m，步长 0.25）
+//
+// 为什么需要：掠射角下物体“入水/出水”的过渡是不是**连续**的，胉眼看容易被帧率+
+// 屏幕位移骗过去（红通道半衰 ~0.2 m，而屏幕只动十几像素）。把中间帧存下来逐帧量像素，
+// 就能区分“物理上本来就陡”与“积分真断了”。
+int RunCaptureWaterSweep(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体连续性扫描（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 用户报告问题时的机位（CAM pos (−60.4857, 4.1991, −41.6154) -> (0,0,0)）：
+    // R = 73.54、仰角 3.27°、方位 4.1095 rad。掠射 5.8°，正好是“看着像瞬间”的角度。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 73.54f;
+    app.view_.phi   = 0.05715f;
+    app.view_.theta = 4.1095f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+
+    for (int i = 0; i <= 24; ++i) {
+        const float depth = 0.25f * static_cast<float>(i);
+        app.SetSlabDepth(depth);
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s/sweep_d%03d.png", out_dir.c_str(),
+                      static_cast<int>(depth * 100.0f + 0.5f));
+        app.RunOnce(input, winfo, name);
+    }
+
+    LOG(INFO) << "water continuity sweep captured to " << out_dir
+              << " (0.00 .. 6.00 m / step 0.25)";
+    app.Finalize();
+    return 0;
+}
+
+// 相机跨越水面的连续性扫描（诊断用）：相机高度从水上 → 水面 → 水下，其他参数不变。
+// 用法：jpov_skylight_viewer --capture-camera-cross <out_dir>
+// 出图：cross_p+100.png … cross_p-100.png（view_.phi = +0.10 … −0.10 rad，步长 0.01）
+//
+// 为什么单独一个：岩板深度扫描检的是“物体入水”，这里检的是**介质分支本身**
+// 在 ro.y = level 两侧是不是连续的（水上要走“先穿水面”，水下从 t=0 开始）。
+int RunCaptureCameraCross(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 相机跨越水面（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 固定 theta / R，只动 phi：R=20 ⇒ phi=0.10 时相机高度 +2.00 m，−0.10 时 −2.00 m。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 20.0f;
+    app.view_.theta = 0.6f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(5.0f);
+
+    for (int i = 10; i >= -10; --i) {
+        app.view_.phi = 0.01f * static_cast<float>(i);
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s/cross_p%+03d.png", out_dir.c_str(), i);
+        app.RunOnce(input, winfo, name);
+    }
+
+    LOG(INFO) << "camera-cross captured to " << out_dir
+              << " (phi +0.10 .. −0.10 rad, step 0.01)";
+    app.Finalize();
+    return 0;
+}
+
+// 天球折射鉴定（水下抬头看天）：同一机位/光照，只切折射开关。
+// 用法：jpov_skylight_viewer --capture-sky-refract <out_dir>
+// 出图：refract_off.png / refract_on.png
+//
+// 机位在水下 4.5 m（R=8、phi=−0.6），视线向上 34° —— 正好把 Snell 窗（半角 48.6°）
+// 与太阳（气侧 45° → 水内应出现在 58° 仰角）都装进画面。
+int RunCaptureSkyRefract(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 天球折射鉴定（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.R     = 8.0f;
+    app.view_.phi   = -0.87f;   // 相机在水下 ≈6.1 m，视线向上 ≈50°（窗与太阳都在画面内）
+    app.view_.theta = 0.70f + 3.14159265f;   // 相机在太阳的对侧看回去（否则太阳在身后）
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(5.0f);
+
+    // 没有独立开关：折射由「有水面 + 相机在水下」自动开，折射率取水配置。
+    // ior = 1.0 ⇒ 折射恒等、n² = 1 ⇒ 等价于“不折射”，作为 A/B 的基线。
+    app.SetWaterIor(1.0f);
+    app.RunOnce(input, winfo, (out_dir + "/refract_off.png").c_str());
+    app.SetWaterIor(jpov_skylight::kWaterIor);
+    app.RunOnce(input, winfo, (out_dir + "/refract_on.png").c_str());
+
+    LOG(INFO) << "sky refraction A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 // SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
 //   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
 //   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
@@ -772,6 +1282,13 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
+    std::string water_out_dir;
+    std::string water_sweep_out_dir;
+    std::string water_tricolor_out_dir;
+    std::string water_light_out_dir;
+    std::string water_sun_out_dir;
+    std::string camera_cross_out_dir;
+    std::string sky_refract_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -784,12 +1301,47 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-materials") == 0 && i + 1 < argc) {
             mat_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
+            water_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-sweep") == 0 && i + 1 < argc) {
+            water_sweep_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-tricolor") == 0 && i + 1 < argc) {
+            water_tricolor_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-light") == 0 && i + 1 < argc) {
+            water_light_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-sun") == 0 && i + 1 < argc) {
+            water_sun_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-camera-cross") == 0 && i + 1 < argc) {
+            camera_cross_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
+            sky_refract_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!water_out_dir.empty()) {
+        return RunCaptureWater(water_out_dir);
+    }
+    if (!water_sweep_out_dir.empty()) {
+        return RunCaptureWaterSweep(water_sweep_out_dir);
+    }
+    if (!water_tricolor_out_dir.empty()) {
+        return RunCaptureWaterTricolor(water_tricolor_out_dir);
+    }
+    if (!water_light_out_dir.empty()) {
+        return RunCaptureWaterLight(water_light_out_dir);
+    }
+    if (!water_sun_out_dir.empty()) {
+        return RunCaptureWaterSun(water_sun_out_dir);
+    }
+    if (!camera_cross_out_dir.empty()) {
+        return RunCaptureCameraCross(camera_cross_out_dir);
+    }
+    if (!sky_refract_out_dir.empty()) {
+        return RunCaptureSkyRefract(sky_refract_out_dir);
     }
     if (!mat_out_dir.empty()) {
         return RunCaptureMaterials(mat_out_dir);

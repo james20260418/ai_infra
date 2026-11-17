@@ -71,6 +71,14 @@ layout(location = 1) out vec4 FragSceneDepth;
 //（直射高光已由 PBR 的 GGX 给出）。
 uniform int uSkyOutput;
 
+// ── 天球方向的水面折射（**后处理方向变换**，鉴定开关）──
+// 契约（docs/jpov_water_contract.md §3）：折射只在**方向入口**做一次，
+// Preetham / 日盘 / 光晕 / 地色一行不改。uSkyBendOn == 0 ⇒ 恒等（逐字节零回归）。
+// 探针 cube（kEnvProbe）**不弯**：它是方向函数，弯它没有物理意义（契约 §3.3）。
+uniform int   uSkyBendOn;     // 0 = 关
+uniform float uSkyBendIor;    // 界面折射率（> 0）
+uniform float uSkyBendLevelY; // 水面世界高度（米，y-up）
+
 uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_FragCoord→NDC
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
 uniform vec3  uCamPos;        // 相机世界位置（方向 = 反投影点 - 相机）
@@ -297,6 +305,52 @@ float discGlow(float ang, float disc_radius, float strength, float glow_width_sc
     return strength * exp(-(d * d) / (2.0 * glow_sigma * glow_sigma));
 }
 
+const float kPadSin = 0.0523359562;   // sin(3°)：环边气侧仰角下限（契约 §3.4）
+
+// 天球方向的水面折射：**只在方向入口做一次**，其余天空逻辑（Preetham / 盘 / 光晕 /
+// 地色）一行不改。输出的 gain 是能量因子（水内观察到的天球要 ×n²）。
+//   · 射线没穿过水面（t ≤ 0）或与水面平行 ⇒ 原样返回；
+//   · 全内反射（水→空气超临界）⇒ 原样返回（那一段属于 TIR 区，由水皮负责）；
+//   · 否则按 Snell 折射：水平分量按 sinθt/sinθi 缩放，竖直角保号。
+vec3 SkyBendDir(vec3 raw, out float gain) {
+    gain = 1.0;
+    if (!(uSkyBendIor > 0.0)) {
+        return raw;
+    }
+    if (abs(raw.y) < 1.0e-6) {
+        return raw;
+    }
+    float t = (uSkyBendLevelY - uCamPos.y) / raw.y;
+    if (!(t > 0.0)) {
+        return raw;   // 射线背离水面：不跨介质
+    }
+    bool from_water = (uCamPos.y < uSkyBendLevelY);
+    float eta = from_water ? uSkyBendIor : (1.0 / uSkyBendIor);
+    float sin2_i = max(0.0, 1.0 - raw.y * raw.y);
+    float sin2_t = eta * eta * sin2_i;
+    if (sin2_t >= 1.0) {
+        return raw;   // 全内反射：方向不变（留给水皮的环外分支）
+    }
+    float cos_t = sqrt(max(0.0, 1.0 - sin2_t));
+    float k = (sin2_i > 1.0e-12) ? sqrt(sin2_t / sin2_i) : eta;
+    vec3 out_dir = normalize(vec3(raw.x * k, sign(raw.y) * cos_t, raw.z * k));
+    // 环边 padding（契约 §3.4）：气侧仰角钳到 ≥3°，避开天空模型的地平线奇点与窗缘硬边。
+    // **钳方向不钳颜色**：C0 连续，且保留方位依赖（太阳侧白天顶侧暗）。
+    if (out_dir.y < kPadSin) {
+        float xz = length(out_dir.xz);
+        if (xz > 1.0e-6) {
+            float s = sqrt(1.0 - kPadSin * kPadSin) / xz;
+            out_dir = vec3(out_dir.x * s, kPadSin, out_dir.z * s);
+        } else {
+            out_dir = vec3(0.0, kPadSin, 0.0);
+        }
+    }
+    if (from_water) {
+        gain = uSkyBendIor * uSkyBendIor;   // 辐射度跨介质：L_water = n²·L_air
+    }
+    return out_dir;
+}
+
 void main() {
     // gl_FragCoord → NDC：frag 坐标在 [0,w]×[0,h]，NDC 在 [-1,1]。
     //（不用 VS 的 vNDC varying —— 无 VAO 全屏三角形上插值不可靠）
@@ -304,6 +358,12 @@ void main() {
     // ndc → 逆 VP → 世界 far 平面一点；视线方向 = 世界点 - 相机位置。
     vec4 wp = uInvVP * vec4(ndc_xy, 1.0, 1.0);
     vec3 dir = normalize(wp.xyz / wp.w - uCamPos);
+
+    // 天球折射（后处理）：只在入口改一次方向；探针 cube（uSkyOutput==2）不弯。
+    float sky_bend_gain = 1.0;
+    if (uSkyBendOn != 0 && uSkyOutput != 2) {
+        dir = SkyBendDir(dir, sky_bend_gain);
+    }
 
     float sun_y = normalize(uSunDir).y;
     // 昼夜过渡：0=夜 1=日（太阳仰角连续）。
@@ -435,6 +495,16 @@ void main() {
     // 环境反射探针：上半球用大气色（不含日月盘），下半球用**地色**（乘以 intensity，
     //   与完整天空路径里 `sky *= uIntensity` 对地色的缩放一致）——金属球下半部
     //   应该反射地面而不是地平线色。
+    // 能量：水内看到的天球要 ×n²（地色不参与 —— 它不是天空）。
+    // 放在最后一次性乘：sky / sky_atmo 都已乘过 intensity 与 season 乘子。
+    if (sky_bend_gain != 1.0 && dir.y >= 0.0) {
+        sky *= sky_bend_gain;
+        sky_atmo *= sky_bend_gain;
+    }
+
+    // 环境反射探针的下半球 = **ground_color × intensity**（与水面无关）。
+    // 2026-11-16 Danis 定：陆地是主场 ⇒ 物体的下侧反射/环境光按陆地配，
+    // 不能因为场景里有水就把深海色漏到 IBL 里。（水体只影响背景填充色。）
     vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
     vec3 out_color = (uSkyOutput == 1) ? sky_atmo
                    : (uSkyOutput == 2) ? sky_env

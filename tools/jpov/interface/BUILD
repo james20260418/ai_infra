@@ -115,6 +115,19 @@ cc_test(
     linkstatic = 1,
 )
 
+# 三色环境光 → 体积消费者的纯色等效（AmbientLight::IsotropicColor()）单测：
+# 权重 1:2:1 的推导（球面平均）+ 独立数值积分对照 + 对称性 + 不乘 intensity。
+cc_test(
+    name = "ambient_light_test",
+    srcs = ["ambient_light_test.cc"],
+    deps = [
+        ":render_command",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 远景仰角雾雾色推导单测（SkyCommand::ElevationFogColor()）：昼夜/浊度/季节影响 + 与三色地平端一致。
 cc_test(
     name = "elevation_fog_color_test",
