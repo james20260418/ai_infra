@@ -147,9 +147,12 @@ void main() {
         float NoL = uSunToward.y;
         if (NoV > 0.0 && NoL > 0.0) {
             float NoH = max(H.y, 0.0);
-            // 带宽 = 盘角半径（θ/2，半向量只偏一半）+ 像素足迹；上限 0.25 防掠射爆炸。
+            // 带宽 = 盘角半径（θ/2，半向量只偏一半）+ 像素足迹。
+            // 上限 0.25（⇒ α ≤ 0.5，半角约 26°）是**数值兜底**：极端掠射时 dFdx 会把足迹
+            // 方差推出数量级（H 在屏幕空间近似不连续），不夹会把日斑摊成一大片糊。
+            // 正常机位下足迹项比 (θ/2)² 小 1~2 个数量级，碰不到这个夹。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
-                           + uSunFootprint * footprint_a2, 0.25);
+                           + uSunFootprint * footprint_a2, 0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
             // 界面反射率与探针支路同一个 F（平面下 VoH ≈ NoV，不另算 Schlick）。

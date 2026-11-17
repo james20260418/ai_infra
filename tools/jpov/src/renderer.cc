@@ -1610,6 +1610,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 没有折射解 ⇒ 增益 1/cosθw = inf 与 (1−R)=0 相乘得 NaN（known_issue §10 已记）。
             CHECK_GE(cmds.water->ior, 1.0f)
                 << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
+            // σ 全 0 = 「忘了填参数」（enabled=false 才是「关」）：静默跑一趟恒等合成很误导。
+            CHECK(wm.sigma_a.x() > 0.0f || wm.sigma_a.y() > 0.0f || wm.sigma_a.z() > 0.0f ||
+                  wm.sigma_s.x() > 0.0f || wm.sigma_s.y() > 0.0f || wm.sigma_s.z() > 0.0f)
+                << "WaterMedium::enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 enabled=false";
             water_medium.level_y = cmds.water->level_y;
             water_medium.ior = cmds.water->ior;
             water_medium.sigma_a = wm.sigma_a;
@@ -2048,6 +2052,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK(cmds.sky.has_value())
                     << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
                 const bool cam_underwater = cmds.camera.position.y() < cmds.water->level_y;
+                // 水下没有介质 ⇒ S_P(∞)=0 ⇒ 环外 α=1 会把画面盖成**黑环**（不是"暗水"）。
+                // 这个组合没有物理意义，直接拦。
+                CHECK(!cam_underwater || water_medium_ptr != nullptr)
+                    << "水下（相机低于 level_y）必须开启 medium：否则环外 α=1 会盖成黑环";
                 if (!cam_underwater) {
                     CHECK(cmds.env_specular.has_value())
                         << "水上水皮需要 env_specular：水面唯一的反射源是天光探针";

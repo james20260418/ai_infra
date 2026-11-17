@@ -206,11 +206,12 @@ inline constexpr float kLadderCenterX(int i) {
 }
 inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左→右
 
-// ── 水凝胶场景（M1 验收）：无限水平面 + 均质水体介质 + 三件水下物体 ──
+// ── 水凝胶场景（水体验收）：无限水平面 + 均质水体介质 + 界面层 + 三件水下物体 ──
 //
 // 水面是 `y = kWaterLevelY` 的无限平面（几何上必须解析求交，没有“平面尺寸”参数）。
-// M1 只做**介质**（吸收 + 注入），界面层（反射/Snell）是下一个 milestone。
-// 验收两件事：① 凝胶对物体的遮挡 ② 对天色/日光的吸收。
+// 已实现：介质（吸收 + 注入，闭式）、界面层（水下 Snell/TIR + 深海积分、水上探针反射
+// + 太阳的像 + ÷n² 透射）。未实现：SSR 接反射、波浪法线、水皮接 CSM（见 known_issue §10）。
+// 验收：① 介质对物体的遮挡 ② 对天色/日光的吸收 ③ 静止水面的日盘像。
 inline constexpr float kWaterLevelY = 0.0f;
 inline constexpr float kWaterIor = 1.333f;   // 20°C 纯水（菲涅尔 / 临界角 / 太阳折射）
 // 地平线以下的填充色：**就用 sky 的 ground_color（陆地色）**，水场景不改写它

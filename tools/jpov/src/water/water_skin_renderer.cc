@@ -180,7 +180,9 @@ void WaterSkinRenderer::Draw(const Inputs& in) {
     // 水上支路的反射源是天光探针；水下支路只用介质（S_P(∞)），不需要探针。
     CHECK(in.env_cube_tex != 0u || in.camera.position.y() < in.level_y)
         << "WaterSkinRenderer::Draw: 水上必须提供 env_cube_tex";
-    CHECK_GT(in.ior, 0.0f) << "WaterSkinRenderer::Draw: ior 必须 > 0";
+    // 与 Renderer 同一口径：ior < 1（比空气还疏）没有折射解 ⇒ cosθw=0 ⇒ 增益 1/cosθw = inf
+    // 与 (1−R)=0 相乘得 NaN。1.0 = 无界面/调试值，合法。
+    CHECK_GE(in.ior, 1.0f) << "WaterSkinRenderer::Draw: ior 必须 >= 1（纯水 1.333）";
     CHECK_GT(in.full_w, 0);
     CHECK_GT(in.full_h, 0);
     CHECK_EQ(in.full_w, wbo_.width()) << "WaterSkinRenderer::Draw: 与 Begin 的宽度不一致";

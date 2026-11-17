@@ -240,7 +240,7 @@ void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
         face_cam.far      = 10.0f;
         // 探针**不弯**（契约 §3.3）：它是纯方向函数，没有“相机在水下”这件事。
         SkyCommand cube_cmd = sky_cmd;
-        cube_cmd.water_refract_ior = 0.0f;   // 探针不弯（水面的角度依赖由 uWaterEnv* 负责）
+        cube_cmd.water_refract_ior = 0.0f;   // 探针不弯（方向函数；水面自己的反射在别处算）
         DrawSky(cube_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
     }
 
