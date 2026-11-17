@@ -1619,13 +1619,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             water_medium_ptr = &water_medium;
         }
 
-        // 「地平线以下是什么」= 深海渐近色（σs·(L_amb·k)/σt）。**单一出处**：
-        //   · 天空的地平线以下填充（否则贴地平线的射线在远平面之外会露出死色黑带）；
-        //   · 环境探针的下半球（水面：掠射是天空倒影、正视是深水）。
-        const jpov::Vec3f water_deep =
-            water_medium_on ? water::AsymptoticAmbientRadiance(water_medium)
-                            : jpov::Vec3f{0.0f, 0.0f, 0.0f};
-
         // ---- 第 0.5 步：天光背景（有 sky 指令时）----
         // 先画程序化天光垫底（不写深度、不参与深度测试），3D 物体随后用深度覆盖。
         // 独立 shader program（sky），一帧一次 draw，与 object3d PBR 完全分开。
@@ -1648,16 +1641,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
             // 「地平线以下是什么」由场景的水面决定（深海渐近色，单一出处）：
             //   · 背景填充：贴地平线的射线可能落在远平面之外（水面交点不可达）⇒ 必须有个色兜底；
-            //   · **只用于背景填充**：探针（IBL）的下半球仍然是 ground_color（水无关，Danis 定）。
-            if (water_present) {
-                // ground_color 在 shader 里还要 × intensity ⇒ 这里先除回去（deep 已含 intensity）。
-                const float inv_intensity =
-                    1.0f / std::max(ambient_intensity > 0.0f ? cmds.sky->intensity : 1.0f,
-                                    1.0e-6f);
-                sky_cmd_for_draw.ground_color = {water_deep.x() * inv_intensity,
-                                                 water_deep.y() * inv_intensity,
-                                                 water_deep.z() * inv_intensity, 1.0f};
-            }
+            // 地平线以下的填充色**不改写**：用场景给的 ground_color（陆地色）。
+            // 水场景里那条“地缝”由水皮多盖几像素解决（见 water_skin_shader.h 的地平线钳位），
+            // 不用填色兜底 —— 填色会让陆地场景的色调被水污染（Danis 2026-11-17 定）。
 
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_);

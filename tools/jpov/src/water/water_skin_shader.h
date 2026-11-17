@@ -93,6 +93,7 @@ uniform sampler2D   uSceneDepth; // MRT#1 场景深度（gl_FragCoord.z，1.0 = 
 const float kBackgroundDepth = 0.999999;
 const float kEnvLod = 0.0;        // 纯平面 = 镜面；探针只有 128²，LOD0 对天空已足够
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
+const float kHorizonEps = 1.0e-4; // 地平线钳位（|rd.y| 下限）⇒ 层多盖几像素，堵住地缝
 
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
@@ -119,8 +120,12 @@ void main() {
                         + uCamUp    * (vNdc.y * uTanHalfFov));
 
     // ── 视线 ∩ 平面 ──
-    if (abs(rd.y) < 1.0e-6) {
-        discard;   // 与水面平行：没有交点
+    // 地平线附近（|rd.y| ≈ 0）**不 discard**：把方向钳到极小的 |dy|，让这一层照样覆盖上去。
+    // 否则地平线那 1~2 像素的层缺失 ⇒ 露出天空在地平线以下填的 ground_color（“地缝”）。
+    // 这是「把水面稍微拉大几像素盖住地缝」的落点：不改 ground_color、不填色兜底。
+    if (abs(rd.y) < kHorizonEps) {
+        float sgn = (uCamPos.y < uWaterLevelY) ? 1.0 : -1.0;   // 让交点在前方（不能写 const：非编译期常量）
+        rd = normalize(vec3(rd.x, sgn * kHorizonEps, rd.z));
     }
     float t = (uWaterLevelY - uCamPos.y) / rd.y;
     if (t <= 0.0) {

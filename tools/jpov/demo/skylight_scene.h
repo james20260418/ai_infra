@@ -213,8 +213,8 @@ inline constexpr int kLadderMaterial[kLadderSegments] = {0, 1, 2, 3};   // 左�
 // 验收两件事：① 凝胶对物体的遮挡 ② 对天色/日光的吸收。
 inline constexpr float kWaterLevelY = 0.0f;
 inline constexpr float kWaterIor = 1.333f;   // 20°C 纯水（菲涅尔 / 临界角 / 太阳折射）
-// 介质关时的占位色不在这里 —— 天空下半球的填充色由 `AsymptoticAmbientRadiance()`
-// 从当前 σ / ambient 算出（与渲染端同一个公式，避免“手填一个海色”与介质渐近值漂开）。
+// 地平线以下的填充色：**就用 sky 的 ground_color（陆地色）**，水场景不改写它
+//（Danis 2026-11-17 定）。水面边缘的地缝由水皮自己多盖几像素堵住。
 
 // 水下岩板：30×30 m 的均匀亮灰底，随深度滑条整组下沉 —— 颜色变化只可能来自水体
 // （材质中性，不和水的染色混淆）。ground_mesh_ 是 40×40 的 quad ⇒ scale = 30/40。

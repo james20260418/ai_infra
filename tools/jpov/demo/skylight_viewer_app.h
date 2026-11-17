@@ -475,12 +475,15 @@ public:
             }
         }
 
-        // 水体（介质）：世界属性，与“画不画场景”无关 —— 天空那两张图也必须带上介质的吸收。
-        if (water_scene && water_medium_on_) {
+        // 水体：世界属性，与“画不画场景”无关。
+        //   · **界面层**（水皮）只要在水场景就有（它是世界的一部分）；
+        //   · **介质**才受 `水体介质` 开关控制。
+        // 两者分开 ⇒ A/B 的语义是「界面不变、只切介质」，不会把界面一起关掉。
+        if (water_scene) {
             jpov::WaterCommand w;
             w.level_y = water_level_y_;
             w.ior = water_ior_;
-            w.medium.enabled = true;
+            w.medium.enabled = water_medium_on_;
             w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
             w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
             w.medium.phase_g = water_phase_g_;

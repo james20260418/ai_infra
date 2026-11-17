@@ -154,28 +154,6 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
     S->z() += m.sigma_s.z() * amb_b * DecayLength(st_b, 1.0f, len_w);
 }
 
-// 深海渐近色 = 环境项在无限长路径上的极限：
-//   S_amb(∞) = σs · (L_amb · k) / σt      （逐通道）
-// 用途（**单一出处**）：天空在地平线以下的那半球的填充色。相机从上往下看，贴地平线的射线
-// 要跑很远才入水（甚至超出远平面）⇒ 那几像素的背景几乎没被介质衰减 ⇒ 如果填一个
-// 无关的“地色”就会露一条黑带。用本函数填，黑带就自动变成正确的深水色，且随 σ 滑条变。
-// Pre-condition: m.sigma_a/sigma_s 各分量 >= 0（σt = 0 时返回 0：没有介质就没有渐近色）。
-inline Vec3f AsymptoticAmbientRadiance(const WaterMediumSample& m) {
-    const Vec3f st = {m.sigma_a.x() + m.sigma_s.x(), m.sigma_a.y() + m.sigma_s.y(),
-                      m.sigma_a.z() + m.sigma_s.z()};
-    Vec3f out = {0.0f, 0.0f, 0.0f};
-    const float src[3] = {m.ambient.x(), m.ambient.y(), m.ambient.z()};
-    const float sig[3] = {m.sigma_s.x(), m.sigma_s.y(), m.sigma_s.z()};
-    const float ext[3] = {st.x(), st.y(), st.z()};
-    float* dst[3] = {&out.x(), &out.y(), &out.z()};
-    for (int c = 0; c < 3; ++c) {
-        if (ext[c] > 1.0e-6f) {
-            *dst[c] = sig[c] * (src[c] * kAmbientInterfaceTransmittance) / ext[c];
-        }
-    }
-    return out;
-}
-
 }  // namespace water
 }  // namespace jpov
 
