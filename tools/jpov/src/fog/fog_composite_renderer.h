@@ -265,7 +265,7 @@ void main() {
     vec3 S_op;
     FieldAt(ro, rd, z_op, tau_op, S_op);
     L += W * (S_op - S_prev);
-    vec3 T = W * exp(-(tau_op - tau_prev));   // 背景透射率（逐通道）
+    vec3 T = W * exp(-tau_op);   // 背景透射率（逐通道）：必须是**全路径**衰减
 
     if (uSpectralOutput == 0) {
         oColor = vec4(L, T.r);   // 旧路径：标量 a（无水时三通道相等 ⇒ 与改前逐字节相同）
