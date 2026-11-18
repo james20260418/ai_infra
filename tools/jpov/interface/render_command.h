@@ -541,8 +541,8 @@ enum class FogAttenuation : uint8_t {
 // **高自由度 box**：用户直接配 box 的**空间位置**（center）+ **长宽高**（size）；box **外侧**
 // 再包一层厚度 = radius 的**球面圆角外壳**。box **内部无衰减**（w = 1）；圆角壳区按 attenuation
 // 剖面从内盒表面（w≈1）衰减到外壳表面（w=0）。渲染走 Fog 体积管线（屏幕 tile 剪枝 +
-// froxel 摊销；见 tools/jpov/docs/jpov_fog_design.md），与 ElevationFogConfig
-//（屏幕空间解析雾）是**两条不同的通道**。
+// froxel 摊销；见 tools/jpov/docs/jpov_fog_design.md）。与 DistanceFog（远景雾）共用同一
+// 条 froxel 管线与同一次合成趟，区别是后者不吃光照、不参与 tile 剔除（见 DistanceFog）。
 //
 // ── 散射 vs 自发光（辐射传输的源项，二者在此**显式分开**）──
 //   J = σ_s · L_light  +  ε        （每米）
@@ -1123,72 +1123,58 @@ struct WindCommand {
     float blow_away_exponent = 2.0f;
 };
 
-// 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
+// 远景雾（空气透视）—— 一块**真实体积雾**（froxel 注入），不是屏幕空间后处理。
 //
-// ── 在后处理链中的位置（用户视角）──
-// 它是一次**全屏后处理**，只走 HDR 路径，时机在 3D 绘制全部完成之后，且**早于**
-// highlight / bloom / tone map（即「其它 3D 渲染之后、HDR 后处理之前」）：
+// ── 为什么是「真正的雾」──
+// 早先的远景雾是屏幕空间解析式：按「视线仰角带 + 到可见面的距离」直接算 α 再 alpha 混合。
+// 那条链路的三个硬伤：① 它看不见「层」（条带 / 水皮 / 玻璃），只能整屏后盖；② 折射与
+// 反射射线方向一变，同一位置的密度就跳变；③ 与雾团、水体是两条互不相交的通道，光照与
+// 排序没法统一。现在改成**世界空间的体积介质**：由 froxel inject 逐切片累加 (τ, S)，与雾团、
+// 水体介质、透明层在同一次合成趟里按深度交替积分 —— 「远景淡出」于是按真实几何深度发生。
 //
-//   阴影 pass → 3D 不透明 pass（天空 + object3d…；MRT：颜色 + 场景深度）
-//            → 【本雾 pass】   ← 就地 alpha 混合进已有的 3D HDR FBO（只读 MRT#1 场景深度）
-//            → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
+// ── 形状：与 PointFog 同族的圆角盒 ──
+// 内盒（center ± size/2）内无衰减（w = 1）；外侧再包一层厚度 = radius 的球面圆角外壳，壳区
+// 按 attenuation 剖面从 1 衰减到 0。**软边**只要给 radius + kLinear / kExponential 就够
+// （kUniform 是硬边，配了就 CHECK 打回）。
 //
-//  · **不持有自己的 FBO**：用固定管线 alpha 混合（SRC_ALPHA, ONE_MINUS_SRC_ALPHA）
-//    把雾**就地**叠到当前 3D HDR FBO 上。雾色作为源、α = 1−e^{−τ}，与帧缓冲里**已有的**
-//    场景颜色混合 ⇒ 无需采样场景颜色、也无需自己的 FBO。
-//  · 读：MRT#1 场景深度（R32F，取距离用）+ **大气色天空纹理**（取收敛色用；若场景无天空
-//    或 use_sky_color=false 则退回 color 常量）。
-//  · 因为落在**线性 HDR 域、tone map 之前**，雾是「内散射加光」语义，能正确参与
-//    bloom 提取与最终 tone map；放到 tone map 之后会变成非线性域的灰糊。
-//  · 前置条件：**cmds.tone_mapping 必须为 true**。tone_mapping=false（旧 LDR 直通
-//    路径）时本雾无法执行，Renderer 会 CHECK 报错，而不是静默失效。
+// ── 与 PointFog 的两点语义差异 ──
+//  · **全局**：不做屏幕 tile 剔除、不占「每 tile ≤8 个团」的预算 —— 它每帧存在于所有 froxel
+//    （远景雾本来就覆盖整个场景）。代价：开了它就一定跑整条 froxel 管线。
+//  · **不吃光照**：内散射色由 color **直接给定**（= 收敛色），不消费 ambient / 太阳 / 点光。
+//    「用户配什么雾色就是什么颜色」——所以没有任何天光收敛色推导，也不需要天空纹理。
 //
-// ── 影响什么 / 不影响什么 ──
-//  · 影响：低仰角带内（|视线仰角| ≤ elev_inner_deg）且距离 ≥ start_distance 的像素，
-//    按 τ 朝雾色收敛 —— 远景/地平线淡出、融进天边。
-//  · 不影响：高仰角像素（|仰角| ≥ elev_outer_deg ⇒ band=0）、近处像素
-//    （dist < start_distance ⇒ ramp=0）、以及其后绘制的 2D/UI 叠加层。天空像素的收敛色
-//    = 它自己的天空色 ⇒ 几乎不变（不会“把天空吃成一块色”）。
-//  · 收敛色默认 = **该像素方向的天空辐射色**（由 sky 单独一趟渲的大气色纹理，不含日月盘/
-//    光晕）⇒ 远景与天边无缝。⚠️ 别用 CPU 推导的“天光色”（AmbientTricolor，环境光量级，
-//    比天空辐射暗很多）当收敛色，那会把远景压暗成一条脏带（实测）。无天空时才退回 color。
+// ── 介质模型（逐切片闭式）──
+//   Δτ = σ_t · w(P) · Δlen                 // P = 该 froxel 切片内的段中点
+//   S  = color · (1 − e^{−Δτ})             // 内散射（无光照项）
+//   over 合成 ⇒ 整条视线 S = color·(1 − e^{−τ_total})：无限远收敛到 color。
 //
-// 与「局部体积雾体 + tile culling」是**两条不同的通道**（后者设计未定，未实现）：
-// 本雾是屏幕空间解析式、无体积、无光源；雾体雾是 3D 定位 + 闭式积分 + tile 列表。
+// ── ⚠️ 与水体合成器的约定：雾只在水上 ──
+// 合成器把场写成 `τ = τ_fog + τ_water`，只在两个介质**空间不相交**时精确（见
+// docs/jpov_water_contract.md §1.3）。因此：
+//  · 盒底应**不低于水面**（水场景建议直接压在水面上）；
+//  · **相机在水面以下时整块远景雾被忽略**（Renderer 直接不注入它）—— 水下没有雾。
 //
-// 计算式：每像素由相机逆 VP 反推视线方向 d 与到可见面的距离 dist，然后
-//   band = 1 − smoothstep(elev_inner, elev_outer, |d.y|)   // 仰角带（水平带内=1）
-//   ramp = smoothstep(start_distance, full_distance, dist)  // 距离
-//   τ    = density · band · ramp
-//   α    = 1 − exp(−τ)；  L_out = L_scene · (1−α) + fog_color · α   // 线性 HDR 域内就地混合
-//
-// 关键：沿视线 d 不变 ⇒ `d.y` 整条射线是**常量** ⇒ 仰角这个条件**不用求交**，就是一个乘子。
-// **与相机位置无关**（不像“高度雾”锚在世界 y）——相机怎么飞，地平线带都一致。
-struct ElevationFogConfig {
-    // 是否启用。false（默认）时整个 pass 跳过，零开销零回归。
+// Pre-conditions（不满足直接 CHECK）: size 各分量 > 0；radius >= 0 且内盒各半尺寸 > 0；
+//   sigma > 0（要关请用 enabled=false）；color 各通道 >= 0；
+//   attenuation != kUniform（硬边没有意义，软边用 kLinear / kExponential / kQuadratic）。
+struct DistanceFog {
+    // 是否启用。false（默认）时整块不注入，零开销零回归。
     bool enabled = false;
 
-    // 起雾距离（米）：dist ≤ 此值无雾；≥ full_distance 满雾（中间 smoothstep 过渡）。
-    float start_distance = 300.0f;
-    float full_distance = 1500.0f;
-
-    // 仰角带（度）：|视线仰角| ≤ elev_inner → 满，≥ elev_outer → 无（中间软边）。
-    // 仰角 = 视线方向与水平面的夹角（由 |d.y| 得）。语义上须 _inner < _outer；
-    // 越界不报错，Renderer 内部会夹断（outer = max(outer, inner + 0.01°)）。
-    float elev_inner_deg = 1.0f;
-    float elev_outer_deg = 4.0f;
-
-    // 最大消光 σ_max（站在带内、满距离处的 τ；越大越糊）。
-    float density = 2.0f;
-
-    // 雾色（内散射色，线性 HDR）。**仅当无天空纹理 / use_sky_color=false 时**才用。
-    // 无天空时可以取 SkyCommand::ElevationFogColor()（CPU 推导的地平线天光色）。
+    // 盒中心（世界坐标）。
+    Vec3f center = {0.0f, 0.0f, 0.0f};
+    // 内盒长宽高（米，各 > 0）—— 内盒无衰减。
+    Vec3f size = {0.0f, 0.0f, 0.0f};
+    // 内盒**外侧**的球面圆角壳厚度（米，>= 0）；0 = 硬边盒。软边全靠它 + attenuation。
+    float radius = 0.0f;
+    // 消光系数 σ_t（1/m，> 0）—— 物理量纲，不是「强度」。τ = σ_t × 视线落在盒内的光程。
+    float sigma = 0.0f;
+    // 内散射色（线性 HDR 辐射亮度）—— **收敛色**：视线无限远时画面即为此色。
+    // 用户直接给；渲染侧不做任何天光推导 / 光照调制。
     Color color = {0.6f, 0.68f, 0.8f, 1.0f};
-
-    // true（默认）：收敛色 = 该像素方向的天空色（sky 单独一趟渲的**大气色**纹理，
-    //   不含日月盘/光晕；不是 MRT 附件）——与天边无缝，推荐。场景无天空时退回 color。
-    // false：始终用上面的 color 常量。
-    bool use_sky_color = true;
+    // 圆角壳区的衰减剖面：kLinear（1−t）/ kExponential（e^{−4t} 归一）/ kQuadratic。
+    // 三者都是「无硬边」的连续剖面；kUniform（w≡1）会在盒面上留一条硬缝。
+    FogAttenuation attenuation = FogAttenuation::kExponential;
 };
 
 // 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
@@ -2007,22 +1993,6 @@ struct SkyCommand {
         }
         return {zenith, horizon, ground};
     }
-
-    // ── 远景仰角雾（空气透视）雾色推导（2026-09-30）──
-    //
-    // 仰角雾把「低仰角 + 大距离」的远处像素朝**雾色**收敛，使远景/地平线淡出、
-    // 融进天里。雾色取「**地平线附近的天光色**」：与 AmbientTricolor() 的地平
-    //（天际线）端同源 —— 同一条时间轴（昼夜 daylight / 浊度 haze / 季节
-    // daylight_season），故雾色会随太阳起落 / 天气 / 季节一起变，与天空、环境光
-    // 保持一致。
-    //
-    // 用途：ElevationFogConfig::color 可直接取本值（见 demo/skylight_viewer_app.h
-    // 的雾色色块，可目视核对“天光 → 雾色”的推理链）。
-    // 返回**色调与相对量级**（线性 RGB）；需要匹配天空亮度时可另乘一个增益。
-    Color ElevationFogColor() const {
-        const std::array<Color, 3> trio = AmbientTricolor();
-        return trio[1];   // [天, 天际线, 地] 的「天际线(地平)」端
-    }
 };
 
 // ── 天光构造参数（全部字段，带默认值）──
@@ -2511,12 +2481,12 @@ struct RenderCommandList {
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
-    // 点状雾体列表（世界空间）。走 Fog 体积管线（froxel 屏幕空间摊销），
-    // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
-    // 每帧可设置 0~N 个；空列表时 Fog pass 零开销跳过。
+    // 点状雾体列表（世界空间）。走 Fog 体积管线（froxel 屏幕空间摊销）。
+    // 每帧可设置 0~N 个；空列表时 Fog pass 零开销跳过（除非同时给了 distance_fog）。
     std::vector<PointFog> point_fogs;
 
-    // Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
+    // Fog 管线参数（相位 / 增益）。未设置时用默认值。
+    // 仅在 point_fogs 非空 **或** distance_fog 启用时生效。
     std::optional<FogParams> fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
@@ -2575,12 +2545,10 @@ struct RenderCommandList {
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
 
-    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在 3D 绘制之后、HDR 后处理
-    //（highlight/bloom/tone map）之前，就地 alpha 混合进已有的 3D HDR FBO ——
-    // **不持有自己的 FBO**，读 MRT#1 场景深度 + 大气色天空纹理。
-    // 位置/影响/前置条件详见 ElevationFogConfig。
-    // 未设置 / enabled=false 时零开销。**需要 tone_mapping=true**，否则 CHECK 报错。
-    std::optional<ElevationFogConfig> elevation_fog;
+    // 远景雾（空气透视）。有值且 enabled=true 时，作为一块**全局体积介质**注入 froxel 场，
+    // 与雾团 / 水体介质 / 透明层在同一次合成趟里按深度交替积分（不再是独立后处理 pass）。
+    // 形状/语义/前置条件详见 DistanceFog；未设置 / enabled=false 时零开销。
+    std::optional<DistanceFog> distance_fog;
 
     // 场景深度可视化开关（调试，默认 false）。
     //   HDR 3D pass 用 MRT 把「场景深度」写进第二颜色附件（R32F，值 = gl_FragCoord.z

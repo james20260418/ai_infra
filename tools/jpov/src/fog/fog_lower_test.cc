@@ -95,6 +95,58 @@ TEST(FogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.params[1], 0.5f);
 }
 
+// ── LowerDistanceFog（远景雾：命令层 → inject 需要的形状量）──
+TEST(FogLower, LowerDistanceFogMapsFields) {
+    DistanceFog fog;
+    fog.enabled = true;
+    fog.center = Vec3f(1.0f, 2.0f, 3.0f);
+    fog.size = Vec3f(20.0f, 40.0f, 60.0f);   // 各轴不等 ⇒ 验半尺寸换算
+    fog.radius = 5.0f;                        // 外侧圆角壳厚度
+    fog.sigma = 0.0125f;
+    fog.color = Color{0.4f, 0.5f, 0.6f, 1.0f};
+    fog.attenuation = FogAttenuation::kLinear;
+
+    const DistanceFogShape sh = LowerDistanceFog(fog);
+    EXPECT_FLOAT_EQ(sh.center.x(), 1.0f);
+    EXPECT_FLOAT_EQ(sh.center.y(), 2.0f);
+    EXPECT_FLOAT_EQ(sh.center.z(), 3.0f);
+    // 容器半尺寸 = 内盒半 (size/2) + radius（与 LowerPointFog 同一口径）。
+    EXPECT_FLOAT_EQ(sh.bound_half.x(), 10.0f + 5.0f);
+    EXPECT_FLOAT_EQ(sh.bound_half.y(), 20.0f + 5.0f);
+    EXPECT_FLOAT_EQ(sh.bound_half.z(), 30.0f + 5.0f);
+    EXPECT_FLOAT_EQ(sh.radius, 5.0f);
+    EXPECT_EQ(sh.attenuation, static_cast<int>(FogAttenuation::kLinear));
+    EXPECT_FLOAT_EQ(sh.sigma, 0.0125f);
+    EXPECT_FLOAT_EQ(sh.color.x(), 0.4f);
+    EXPECT_FLOAT_EQ(sh.color.y(), 0.5f);
+    EXPECT_FLOAT_EQ(sh.color.z(), 0.6f);
+}
+
+// 负向：报告里最容易"看起来对"的三条 —— 硬边剖面、σ=0（想关但没关）、空盒。
+TEST(FogLower, LowerDistanceFogRejectsHardEdge) {
+    DistanceFog fog;
+    fog.size = Vec3f(10.0f, 10.0f, 10.0f);
+    fog.sigma = 1.0f;
+    fog.attenuation = FogAttenuation::kUniform;
+    EXPECT_DEATH(LowerDistanceFog(fog), "kUniform");
+}
+
+TEST(FogLower, LowerDistanceFogRejectsZeroSigma) {
+    DistanceFog fog;
+    fog.size = Vec3f(10.0f, 10.0f, 10.0f);
+    fog.sigma = 0.0f;
+    fog.attenuation = FogAttenuation::kExponential;
+    EXPECT_DEATH(LowerDistanceFog(fog), "sigma");
+}
+
+TEST(FogLower, LowerDistanceFogRejectsEmptyBox) {
+    DistanceFog fog;
+    fog.size = Vec3f(10.0f, 0.0f, 10.0f);
+    fog.sigma = 1.0f;
+    fog.attenuation = FogAttenuation::kExponential;
+    EXPECT_DEATH(LowerDistanceFog(fog), "size");
+}
+
 TEST(FogLower, EmptyBodiesAllSentinel) {
     float mvp[16];
     IdentityMvp(mvp);

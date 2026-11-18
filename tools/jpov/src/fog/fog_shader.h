@@ -241,6 +241,22 @@ FogSegment FogNoHit() {
     return s;
 }
 
+// 圆角盒的**点求值**：世界点 p 处的 σ（内盒内 = σ；圆角壳区按剖面衰减；容器外 = 0）。
+// 求交趟与「段被裁剪后重算中点」共用这一份 —— 两处口径必须一致。
+float RoundBoxSigmaAt(FogBodyData d, vec3 p) {
+    vec3 bh = FogBoundHalf(d);       // 容器半尺寸（内盒半 + radius）
+    float rad = FogRadius(d);        // 外侧圆角壳厚度
+    // 内盒半尺寸 = 容器半 − radius；须 > 0。
+    if (bh.x <= rad || bh.y <= rad || bh.z <= rad || rad < 0.0) {
+        return 0.0;
+    }
+    vec3 box_h = bh - vec3(rad);
+    vec3 loc = p - FogCenter(d);
+    vec3 q = vec3(dot(d.axis0, loc), dot(d.axis1, loc), dot(d.axis2, loc));  // 世界单位局部坐标
+    float tt = RoundBoxShellT(q, box_h, rad);
+    return FogSigma(d) * ProfileAtten(int(FogAtten(d) + 0.5), tt);
+}
+
 // ── kRoundBox 采样器（唯一分支本体；**严格 O(1)**：求交 + 一次点求值，无循环/无迭代纹理依赖）──
 // 容器 = 内盒 ⊕ 球(radius)（保守 OBB）；内盒无衰减，圆角壳区由 attenuation 塑形。
 FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
@@ -249,9 +265,7 @@ FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
 
     vec3 bh = FogBoundHalf(d);       // 容器半尺寸（内盒半 + radius）
     float rad = FogRadius(d);        // 外侧圆角壳厚度
-    // 内盒半尺寸 = 容器半 − radius；须 > 0。
     if (bh.x <= rad || bh.y <= rad || bh.z <= rad || rad < 0.0) { return s; }
-    vec3 box_h = bh - vec3(rad);
 
     // 求交用容器 OBB：内盒 ⊕ 球(radius) ⊂ 该 OBB，壳外无场处由点求值吸收。
     float o0;
@@ -263,11 +277,7 @@ FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
     if (b <= a) { return s; }
 
     vec3 p = ro + (0.5 * (a + b)) * rd;   // 段中点采样
-    vec3 loc = p - FogCenter(d);
-    vec3 q = vec3(dot(d.axis0, loc), dot(d.axis1, loc), dot(d.axis2, loc));  // 世界单位局部坐标
-    float tt = RoundBoxShellT(q, box_h, rad);
-    float w = ProfileAtten(int(FogAtten(d) + 0.5), tt);
-    float sig = FogSigma(d) * w;
+    float sig = RoundBoxSigmaAt(d, p);
     if (sig <= 0.0) { return s; }
 
     s.hit = true;
@@ -303,6 +313,20 @@ uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
 uniform int   uTotalFogs;
 
+// ── 远景雾（全局介质；**不吃光照**）──
+// 与雾团共用同一套圆角盒求交/剖面（DistanceFogBody 组装成 FogBodyData），但不走 tile 候选
+// 列表、不占每 tile 预算 —— 它每帧存在于所有 froxel。源项 = 用户给定色 × 覆盖率。
+uniform int   uDistFogEnabled;      // 0 = 本帧无远景雾
+uniform vec3  uDistFogCenter;       // 盒中心
+uniform vec3  uDistFogBoundHalf;    // 容器半尺寸 = 内盒半 + radius
+uniform float uDistFogRadius;       // 外侧圆角壳厚度
+uniform float uDistFogAtten;        // FogAttenuation 底层值（剖面）
+uniform float uDistFogSigma;        // σ_t（1/m）
+uniform vec3  uDistFogColor;        // 内散射色（用户给定的收敛色）
+// 雾只在水上：非 0 时把 y < uDistFogFloorY 的段裁掉（水体存在时 = 水面高度）。
+uniform int   uDistFogFloorEnabled;
+uniform float uDistFogFloorY;
+
 // ── 点光源（tile culling；仅需内散射所需的 position/color/radius/intensity）──
 struct FogLight {
     vec3 position;
@@ -315,6 +339,39 @@ struct FogLight {
 // 1020 个，必然 error C6020 链接失败（2026-11-01 Windows 真卡实测）。
 // 与 PBR 路径**共用同一张** uLightData（row 0 = position+radius，row 1 = color+intensity）。
 uniform sampler2D uLightData;
+
+// 远景雾 → 圆角盒采样器需要的 FogBodyData（几何与团同源；albedo/emission 恒为 0：
+// 它的源项由 inject 直接按 uDistFogColor 算，**不借光照** —— 所以这两个字段没有意义）。
+FogBodyData DistanceFogBody() {
+    FogBodyData d;
+    d.kind = FOG_KIND_ROUNDBOX;
+    d.sigma = uDistFogSigma;
+    d.albedo = vec3(0.0);
+    d.emission = vec3(0.0);
+    d.center = uDistFogCenter;
+    d.axis0 = vec3(1.0, 0.0, 0.0);
+    d.axis1 = vec3(0.0, 1.0, 0.0);
+    d.axis2 = vec3(0.0, 0.0, 1.0);
+    d.bound_half = uDistFogBoundHalf;
+    d.radius = uDistFogRadius;
+    d.atten = uDistFogAtten;
+    return d;
+}
+
+// 把段 [a,b] 裁到半空间 y >= floor_y（雾只在水上）；返回 false = 整段被裁空。
+// 水平射线（|rd.y|≈0）整段同高：在面上方则整段保留、否则整段丢弃。
+bool ClipSegmentAboveY(vec3 ro, vec3 rd, float floor_y, inout float a, inout float b) {
+    if (abs(rd.y) < 1e-8) {
+        return ro.y >= floor_y;
+    }
+    float t = (floor_y - ro.y) / rd.y;
+    if (rd.y > 0.0) {
+        a = max(a, t);
+    } else {
+        b = min(b, t);
+    }
+    return b > a;
+}
 
 // 取第 li 盏灯（只用前两行：雾的内散射不要 physicalRadius）。
 // Pre-condition: 0 <= li < uTotalLights
@@ -370,18 +427,42 @@ void main() {
     float zk  = texelFetch(uZSlicesTex, ivec2(k, 0), 0).r;
     float zk1 = texelFetch(uZSlicesTex, ivec2(k + 1, 0), 0).r;
 
-    // ★ 短路：本 tile 候选团的保守 z 范围是 [zr.x, zr.y]；切片若完全在其外 ⇒ 局部恒等
-    //（省掉下方 ≤8 个团的射线-球求交 + CSM 采样）。空 tile（无候选）zr=(0,0) ⇒ 恒等。
-    vec2 zr = texelFetch(uTileZRange, ivec2(tile_col, tile_row), 0).xy;
-    if (zk1 <= zr.x || zk >= zr.y) {
-        oColor = vec4(0.0);
-        return;
-    }
-
     // tile 中心视线（froxel = 整柱一个值，用 tile 中心而非像素自身视线）：
     // 方向由 CPU 预烘在 tile 射线纹理里（单位向量），省掉每 texel 两次 uInvVP 乘 + normalize。
     vec3 ro = uCamPos;
     vec3 rd = texelFetch(uTileRayTex, ivec2(tile_col, tile_row), 0).xyz;
+
+    vec4 acc = vec4(0.0);   // 本 froxel 的局部 (τ, S)：远景雾 + 多团 over 合成
+
+    // ── 远景雾：全局介质，**不吃光照**（源项 = 用户给定色 × 覆盖率）──
+    // 形状复用圆角盒求交 + 剖面（与团同源）；它没有 tile 候选列表 ⇒ 每 texel 都要算。
+    if (uDistFogEnabled != 0) {
+        FogBodyData df = DistanceFogBody();
+        FogSegment seg = SampleFogSegment(df, ro, rd, zk, zk1, uZNear);
+        if (seg.hit) {
+            float a = seg.t0;
+            float b = seg.t1;
+            bool keep = (uDistFogFloorEnabled == 0)
+                        || ClipSegmentAboveY(ro, rd, uDistFogFloorY, a, b);
+            if (keep && b > a) {
+                // 段被水面裁掉一截后中点会变 ⇒ σ 按新中点重算（与采样器同一份点求值）。
+                vec3 p = ro + (0.5 * (a + b)) * rd;
+                float dtau = RoundBoxSigmaAt(df, p) * (b - a);
+                if (dtau > 0.0) {
+                    acc = OverCompose(acc, vec4(dtau, uDistFogColor * (1.0 - exp(-dtau))));
+                }
+            }
+        }
+    }
+
+    // ★ 短路：本 tile 候选团的保守 z 范围是 [zr.x, zr.y]；切片若完全在其外 ⇒ 只剩远景雾
+    //（省掉下方 ≤8 个团的射线-球求交 + CSM 采样）。空 tile（无候选）zr=(0,0) ⇒ 同上。
+    //   注意：远景雾是**全局**介质，不参与这个短路（上面已经累加进 acc）。
+    vec2 zr = texelFetch(uTileZRange, ivec2(tile_col, tile_row), 0).xy;
+    if (zk1 <= zr.x || zk >= zr.y) {
+        oColor = acc;
+        return;
+    }
 
     // 本 tile 的候选雾团索引。
     uint fog_idx[MAX_FOGS_PER_TILE];
@@ -423,7 +504,7 @@ void main() {
         }
     }
 
-    vec4 acc = vec4(0.0);   // 局部 (τ, S)，本 froxel 内多团 over 合成（顺序无关）
+    // 同一 froxel 内的多个团按团序 over 合成（同切片内顺序无意义；见设计文档 §2.2）。
     for (int j = 0; j < nf; ++j) {
         int bi = int(fog_idx[j]);
         // 解码器：按团 index 取「每团通用数据 d」（公共头 + 按 kind 的 union 区）。

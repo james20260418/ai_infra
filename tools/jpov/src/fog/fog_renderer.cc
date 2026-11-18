@@ -393,12 +393,24 @@ void FogRenderer::Build(const std::vector<PointFog>& fogs,
                         int viewport_h,
                         const FogParams& params,
                         const FogLighting& light,
+                        const DistanceFog* distance_fog,
+                        std::optional<float> fog_floor_y,
                         FogField* out /*output*/) {
     CHECK(shader_mgr_ != nullptr) << "FogRenderer::Init 未调用";
     CHECK(out != nullptr) << "FogRenderer::Build 需要非空输出";
     *out = FogField{};
-    if (fogs.empty()) {
-        return;   // 零开销：无雾体（场无效）
+    // 远景雾：enabled=false 等价于 null（调用方不必先判）。
+    const bool has_dist_fog = (distance_fog != nullptr) && distance_fog->enabled;
+    if (fogs.empty() && !has_dist_fog) {
+        return;   // 零开销：既无雾体也无远景雾（场无效）
+    }
+    // 形状量 + 全部校验（含 attenuation 不得为 kUniform）。校验必须在这里做：
+    // 之后只往 uniform 里塞数值，没有第二处能拦住非法配置。
+    // 未启用时也要上传（enabled=0 + 全零），否则上一帧的远景雾会残留在 uniform 里。
+    // 注意 `{}` 不能省：Vec3f 的默认构造不清零，值初始化才保证未启用分支是确定的 0。
+    DistanceFogShape dist_shape{};
+    if (has_dist_fog) {
+        dist_shape = LowerDistanceFog(*distance_fog);
     }
     CHECK_GT(viewport_w, 0);
     CHECK_GT(viewport_h, 0);
@@ -544,10 +556,12 @@ void FogRenderer::Build(const std::vector<PointFog>& fogs,
         t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
         t6[0] = b.params[0];               // attenuation 枚举
     }
-    glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count * kBodyTexelsPerFog, 1,
-                    GL_RGBA, GL_FLOAT, body_attr.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
+    if (count > 0) {
+        glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count * kBodyTexelsPerFog, 1,
+                        GL_RGBA, GL_FLOAT, body_attr.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 
     EnsureTargets(grid_cols, grid_rows, sblock, num_levels);
     EnsureZSlices(params.nz);
@@ -611,6 +625,29 @@ void FogRenderer::Build(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uBlockSide"), sblock);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTilePx"), params.tile_px);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalFogs"), count);
+
+    // ── 远景雾（全局介质，不吃光照）——无则 enabled=0，且其余量清零防上一帧残留 ──
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uDistFogEnabled"),
+                has_dist_fog ? 1 : 0);
+    glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uDistFogCenter"),
+                dist_shape.center.x(), dist_shape.center.y(), dist_shape.center.z());
+    glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uDistFogBoundHalf"),
+                dist_shape.bound_half.x(), dist_shape.bound_half.y(),
+                dist_shape.bound_half.z());
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uDistFogRadius"),
+                dist_shape.radius);
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uDistFogAtten"),
+                static_cast<float>(dist_shape.attenuation));
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uDistFogSigma"),
+                dist_shape.sigma);
+    glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uDistFogColor"),
+                dist_shape.color.x(), dist_shape.color.y(), dist_shape.color.z());
+    // 雾只在水上：只有「有远景雾 + 有下界」时才裁；否则 enabled=0（整段保留）。
+    const bool has_floor = has_dist_fog && fog_floor_y.has_value();
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uDistFogFloorEnabled"),
+                has_floor ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uDistFogFloorY"),
+                has_floor ? *fog_floor_y : 0.0f);
 
     // ── 物理光照 + CSM 阴影（**始终开启**；无「无光照」链路）──
     const int cascade_count =

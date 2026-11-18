@@ -351,15 +351,20 @@ struct SkyDegrees {
     float sun_azim_deg = 45.0f;        // ③ 天体方位角 [0,360)
     float moon_red = 0.0f;             // ④ 月色变红 [0,1] → moon_season（1=血月）
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
-    // ⑥ 远景仰角雾（空气透视）几何属性（雾色由天光推导，见 ElevationFogColor）。
-    bool  elev_fog_on = false;         // 开关（默认关：远景雾影响观感，需时手动开）
-    float elev_fog_start = 0.5f;       // 起雾距离（米；小场景默认小值使效果可见）
-    float elev_fog_full = 12.0f;       // 满雾距离（米）
-    float elev_fog_inner_deg = 3.0f;   // 仰角带内边界（度）
-    float elev_fog_outer_deg = 25.0f;  // 仰角带外边界（度；宽软边，避免硬边）
-    float elev_fog_density = 1.5f;     // σ_max
-    float elev_fog_gain = 1.0f;        // 雾色增益（仅 use_sky=false 时生效）
-    bool  elev_fog_use_sky = true;     // 收敛色取「该像素方向的天空色」（推荐）；false=用推导常量色
+    // ⑥ 远景雾（空气透视）：一块**真实体积雾**（froxel 全局介质）。
+    //    形状 = 圆角盒（内盒 size + 外侧圆角壳 radius）；雾色是**用户给定**的收敛色，
+    //    查看器这里取「地平线附近天光色 × 增益」当天色（渲染侧不做任何天光推导）。
+    bool  dist_fog_on = false;         // 开关（默认关：远景雾影响观感，需时手动开）
+    float dist_fog_sigma = 0.008f;     // σ_t（1/m）：≈125 m 能见度（空气透视尺度）
+    float dist_fog_top = 24.0f;        // 内盒顶高（米）；盒底压在 y=0（地面/水面）
+    float dist_fog_extent = 400.0f;    // 内盒水平半尺寸（米）
+    float dist_fog_radius = 12.0f;     // 顶/侧软边厚度（米）—— 剖面见下
+    // 雾色增益：AmbientTricolor 是**归一化到亮度 1 的相对色**，直接当辐射用会过曝；
+    // 乘这个增益把它落到天空辐射量级。
+    float dist_fog_gain = 0.20f;
+    // 软边剖面：kExponential（默认，指数）/ kLinear（线性）/ kQuadratic。三者都无硬边；
+    // kUniform 被 DistanceFog 校验拦掉（盒面硬缝）。
+    jpov::FogAttenuation dist_fog_atten = jpov::FogAttenuation::kExponential;
 };
 
 inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {

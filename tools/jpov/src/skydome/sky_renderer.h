@@ -65,8 +65,7 @@ layout(location = 0) out vec4 FragColor;
 // vec4 + alpha=1 保证在全局 alpha 混合下恒等写入。
 layout(location = 1) out vec4 FragSceneDepth;
 // uSkyOutput 选择本趟要输出什么（见 SkyOutput）：
-//   0 = 完整天空（含日月盘/光晕）；1 = 只出大气色（收敛色用，下半球用地平线色）；
-//   2 = 环境反射探针（不含日月盘/光晕，下半球用**地色**）。
+//   0 = 完整天空（含日月盘/光晕）；1 = 环境反射探针（不含日月盘/光晕，下半球用**地色**）。
 // 分离成多趟绘制：日月盘是光源，不该成为远处收敛色，也不该在反射里再算一次
 //（直射高光已由 PBR 的 GGX 给出）。
 uniform int uSkyOutput;
@@ -359,9 +358,9 @@ void main() {
     vec4 wp = uInvVP * vec4(ndc_xy, 1.0, 1.0);
     vec3 dir = normalize(wp.xyz / wp.w - uCamPos);
 
-    // 天球折射（后处理）：只在入口改一次方向；探针 cube（uSkyOutput==2）不弯。
+    // 天球折射（后处理）：只在入口改一次方向；探针 cube（uSkyOutput==1）不弯。
     float sky_bend_gain = 1.0;
-    if (uSkyBendOn != 0 && uSkyOutput != 2) {
+    if (uSkyBendOn != 0 && uSkyOutput != 1) {
         dir = SkyBendDir(dir, sky_bend_gain);
     }
 
@@ -484,9 +483,9 @@ void main() {
     //   ⚠️ dir.y 夹到 ≥0：向下看的远处也收敛到**地平线色**，而不是下半球的 ground_color
     //   （天空 shader 在地平线以下填的是 ground_color，直接拿会得到"地色"，见 2026-09-30 反馈）。
     vec3 sky_atmo = vec3(0.0);
-    // 只有 kAtmoOnly / kEnvProbe 需要它：kFull 不算（preethamSky 很贵，
+    // 只有 kEnvProbe 需要它：kFull 不算（preethamSky 很贵，
     // 背景那一趟是全屏的，白算一次会直接翻倍那片元成本）。
-    if (uSkyOutput > 0) {
+    if (uSkyOutput != 0) {
         vec3 da = normalize(vec3(dir.x, max(dir.y, 0.0) + 1e-5, dir.z));
         vec3 solar_a = preethamSky(da, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
         sky_atmo = mix(vec3(0.0), solar_a, daylight) * uDaylightSeason * uIntensity;
@@ -506,9 +505,7 @@ void main() {
     // 2026-11-16 Danis 定：陆地是主场 ⇒ 物体的下侧反射/环境光按陆地配，
     // 不能因为场景里有水就把深海色漏到 IBL 里。（水体只影响背景填充色。）
     vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
-    vec3 out_color = (uSkyOutput == 1) ? sky_atmo
-                   : (uSkyOutput == 2) ? sky_env
-                   : sky;
+    vec3 out_color = (uSkyOutput == 1) ? sky_env : sky;
     FragColor = vec4(out_color, 1.0);
     FragSceneDepth = vec4(1.0, 0.0, 0.0, 1.0);
 }
@@ -517,8 +514,7 @@ void main() {
     // 本趟输出的内容（DrawSky 的 output 参数）。整数取值与 shader 的 uSkyOutput 一一对应。
     enum class SkyOutput {
         kFull = 0,      // 完整天空：含日月盘/光晕（背景垫底用）
-        kAtmoOnly = 1,  // 只出大气色：不含盘/晕，且下半球也用地平线色（远景雾收敛色用）
-        kEnvProbe = 2,  // 环境反射探针：不含盘/晕，下半球用**地色**（IBL 镜面用）
+        kEnvProbe = 1,  // 环境反射探针：不含盘/晕，下半球用**地色**（IBL 镜面用）
     };
 
     // ---- DrawSky ----
@@ -534,8 +530,8 @@ void main() {
     //   - 目标 FBO 已绑定（天光垫底的 3D FBO），viewport 已设置
     //   - 深度测试已禁用（天空永远垫底，不写深度）
     // Pre-condition: cam.up 非零、target != position
-    //   output: 本趟画什么（见 SkyOutput）。kAtmoOnly = 只出大气色（不含日月盘/光晕），
-    //           供远景仰角雾当收敛色；kEnvProbe = 环境反射探针（不含盘/晕，下半球用地色）。
+    //   output: 本趟画什么（见 SkyOutput）。kEnvProbe = 环境反射探针
+    //           （不含盘/晕，下半球用地色）。
     static void DrawSky(const SkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr,

@@ -15,7 +15,7 @@
 | 大地用灰色 | 40×40 灰 quad（rough=1, albedo 0.35） | `MakeGroundQuad()` / `GroundMaterial()` |
 | 视角变换与 model viewer 相同 | 直接复用 `jpov_viewer::ViewConfig` + `ApplyInput` | `view_config.h` |
 | 每方块顶面站一个 T-pose 蓝人 | `mixamo_male` 蒙皮网格 + 单 identity pose（T-pose）；三人同一 mesh/骨架，**一次 instanced draw** | `InstallPerson()` / `BoxTopCenter()` |
-| **只暴露五个天光自由度** | 浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝（**左列** 6 滑条 + 1 个三色 ambient 开关；**右列**为远景仰角雾的几何旋钮；月亮恒取 `-sun_dir`） | `skylight_viewer_app.h` `DrawLightPanel` |
+| **只暴露五个天光自由度** | 浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝（**左列** 6 滑条 + 1 个三色 ambient 开关；月亮恒取 `-sun_dir`） | `skylight_viewer_app.h` `DrawLightPanel` |
 | 其余参数走默认 | `CreateDefaultSkyCommand` → 其余字段走 `SkyCommand` 默认构造 | `render_command.h` |
 | 主平行光由 sky 推导 | 白天 `sun=SunDirectionalColor/Intensity`；夜间 `moon=MoonDirectionalColor/Intensity`（按 `sun_dir.y` 切换） | `skylight_scene.h` `MakeSkyLighting` |
 | ambient 由 sky 推导 | `ambient=AmbientColor/Intensity`（含夜间项）；开关打开时改用 `AmbientTricolor()`（[天,天际线,地] 三色梯度，均值与单色对齐） | 同上 |
@@ -40,7 +40,7 @@
 
 ## 3. 交互面板（两列）
 
-左列 = 天光五个自由度 + 三色 ambient 开关；右列 = 远景仰角雾（开关 + 几何旋钮 + 雾色色块）。
+左列 = 天光五个自由度 + 三色 ambient 开关；远景雾的旋钮已从面板移除（见 §3.1）。
 
 | 滑条（左列） | 范围 | 自由度 | 说明 |
 |---|---|---|---|
@@ -52,45 +52,22 @@
 | 夜空偏蓝 | [0, 1] | ⑤ | 0=出厂夜色，1=梦幻蓝且更亮；夜色两色整体乘子 |
 | 三色环境光（开关） | 开/关 | — | 开=ambient 按法线仰角在 [天,天际线,地] 间插值（`AmbientTricolor`）；关=原单色（`AmbientColor`）。供对比 |
 
-### 3.1 右列：远景仰角雾（空气透视）
+### 3.1 右列：远景雾（空气透视）—— 面板已移除，只留代码旋钮
 
-把「低仰角 + 大距离」的远处像素朝雾色收敛，使远景融进天边。**位置**：一次全屏后处理，
-在 3D 绘制之后、HDR 后处理（highlight/bloom/tone map）**之前**，用 alpha 混合**就地**叠进
-已有的 3D HDR FBO（不持有自己的 FBO）；读场景深度 + 天空大气色纹理（收敛色，
-天空像素收敛到自身 ⇒ 几乎不变）；详见 `render_command.h` 的 `ElevationFogConfig` 头注释。
+远景雾现在是**一块真实体积雾**（froxel 全局介质，见 `docs/jpov_distance_fog_design.md`），
+不是屏幕空间后处理。面板控件已于 2026-11-13 整段删除（它会影响 SSR 对比判断），
+参数留在 `SkyDegrees`（`skylight_scene.h`）里，由代码/拍摄分支设置：
 
-| 控件（右列） | 范围 | 说明 |
-|---|---|---|
-| 远景仰角雾（开关） | 开/关（默认开） | 关掉 ⇒ 不设 `cmds.elevation_fog`，零开销 |
-| 起雾距离 m | [0, 2000] | 小于此距离无雾（`start_distance`） |
-| 满雾距离 m | [1, 5000] | 大于此距离满雾（`full_distance`） |
-| 仰角带内 ° / 带外 ° | [0,20] / [0.1,40] | 仰角软边（内=满、外=无；`elev_inner/outer_deg`） |
-| 雾浓度 σ | [0, 8] | 最大消光（`density`） |
-| 雾色增益 | [0, 5] | 乘在推导出的地平线天光色上（**仅“雾色跟随天空”关时生效**） |
-| 雾色跟随天空（开关） | 开/关（默认开） | 开=收敛色取该方向天空色（与天无缝）；关=用推导常量色×增益 |
-| 雾色推导参考（色块） | — | `SkyCommand::ElevationFogColor()` × 增益，目视核对“天光 → 雾色”推理链 |
+| 字段 | 含义 |
+|---|---|
+| `dist_fog_on` | 开关（默认关） |
+| `dist_fog_sigma` | σ_t（1/m，默认 0.008 ≈ 125 m 能见度） |
+| `dist_fog_top` / `dist_fog_extent` | 内盒顶高 / 水平半尺寸（米），盒底压在 y=0 |
+| `dist_fog_radius` | 外侧圆角壳厚度（软边） |
+| `dist_fog_atten` | 壳区剖面（`kExponential` 默认 / `kLinear` / `kQuadratic`） |
+| `dist_fog_gain` | 雾色增益（乘地平线天光色；天光色是亮度归一化的相对色，必须缩放） |
 
-> **日月共用一条仰角轴**：查看器固定 `moon_dir = −sun_dir`（满月落在反日点），不给
-> 月亮单独的仰角/方位滑条。一条仰角轴从 +90° 扫到 −90° 就覆盖「正午 → 日落 → 午夜」，
-> 主平行光在 `sun_dir.y = 0` 处由太阳切到月亮（两侧强度都趋零，交接无缝）。
-
-> **滑条是查看器的交互设计，不是接口契约**：接口收的都是 `Color`，查看器把每个滑条压成
-> 一个标量再编码（与注释里「冬冷 (0.75,0.85,1.0) / 夏暖 (1.0,0.97,0.90)」同量级）：
->   - 日光季节 → `DaylightSeasonTintFromSlider()`（±`kSeasonTintSpan`=0.25，经
->     `DaylightSeasonTintScale()` 归一化 ⇒ 只偏色温不改亮度）；
->   - 月色变红 → `MoonSeasonFromSlider()`（**不归一化** ⇒ 血月同时变暗）；
->   - 夜空偏蓝 → `NightTintFromSlider()`（只乘夜色两色，不改接口）。
->
-> **其余参数一律走默认构造**：日月盘半径/亮度/光晕、日月盘压盘角、`ground_color`、
-> `intensity`。故面板里**没有**「太阳强度/环境光强度/夜色强度/月盘亮度/月晕强度/
-> 夜色两色绝对值」这些旋钮——它们由标准天光默认值 + sky 推导给出（夜色只给“相对出厂
-> 夜色的整体偏蓝乘子”）。
->
-> **光照一律由 sky 推导**（不再有绝对量强度滑条）：sun 用
-> `SunDirectionalColor()/SunDirectionalIntensity()`，ambient 用
-> `AmbientColor()/AmbientIntensity()`。色调与亮度都跟着天光走，滑条只给自由度。
-> 三色开关开启时，ambient 改用 `AmbientTricolor()`（同样由 sky 推导，与单色**并列独立**、
-> 均值对齐），只有“上/中/下”的方向梯度变化，不整体漂亮/漂暗。
+验收：`--capture-distance-fog <dir>`（7 张 A/B，判据见设计文档 §8）。
 
 ## 4. 验收路径（Danis 肉眼）
 

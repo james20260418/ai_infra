@@ -1423,17 +1423,117 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.RunOnce(input, winfo, (out_dir + "/ssr_graze.png").c_str());
 
 
-    // (i)(j) 远景仰角雾 × SSR：雾用 **MRT#1 场景深度**，而 SSR 合成是往同一个 FBO 的颜色
+    // (i)(j) 远景雾 × SSR：雾合成用 **MRT#1 场景深度**，而 SSR 合成是往同一个 FBO 的颜色
     //   附件上画的 —— 这一组用来确认 SSR 不会破坏 MRT#1（雾在开 SSR / 关 SSR 下必须一致）。
-    app.deg_.elev_fog_on = true;
+    app.deg_.dist_fog_on = true;
     app.SetSsr(false);
     app.RunOnce(input, winfo, (out_dir + "/ssr_fog_off.png").c_str());
     app.SetSsr(true);
     app.RunOnce(input, winfo, (out_dir + "/ssr_fog_on.png").c_str());
-    app.deg_.elev_fog_on = false;
+    app.deg_.dist_fog_on = false;
     app.SetSsr(false);
 
     LOG(INFO) << "SSR A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// 远景雾（空气透视）验收 A/B —— 用法：--capture-distance-fog <out_dir>
+//
+// 出图（同机位、同光照，只切远景雾参数）：
+//   fog_off.png          关
+//   fog_on.png           开（默认 σ=0.008、层顶 24 m、软边 12 m / 指数剖面）
+//   fog_thick.png        σ ×3（τ 随光程线性涨 ⇒ 近处也开始糊）
+//   fog_linear.png       软边剖面改 kLinear（对比指数剖面 —— 两者都无硬边）
+//   fog_water_off/on.png 水场景（俯视，相机在水上）：水皮/条带也要被雾影响
+//   fog_under_off/on.png 水场景（相机在水下）：两张必须**逐像素相同**
+//                        —— 合成器约定「水下没有雾」，远景雾整块被忽略
+//
+// 判据：
+//   · fog_on 相对 fog_off 的变化集中在**远处**（地平线附近、橡树/地面远端）；
+//   · fog_thick 的 τ 约为 fog_on 的 3 倍（可读同一像素反解）；
+//   · fog_linear 与 fog_on 只在盒顶软边附近有差（内部 w=1 完全相同）；
+//   · fog_under_off == fog_under_on（水下忽略）。
+int RunCaptureDistanceFog(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 远景雾（froxel 全局介质）A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    auto shoot = [&](const char* name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture: " << path;
+    };
+
+    app.deg_.turbidity        = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season  = 0.0f;
+    app.deg_.sun_elev_deg     = 25.0f;   // 低阳：天边更暖，雾色看得清
+    app.deg_.sun_azim_deg     = 45.0f;
+    app.deg_.dist_fog_on      = false;
+    app.deg_.dist_fog_sigma   = 0.008f;
+    app.deg_.dist_fog_top     = 24.0f;
+    app.deg_.dist_fog_extent  = 400.0f;
+    app.deg_.dist_fog_radius  = 12.0f;
+
+    // ── 陆地场景：近水平机位（看得到地平线，远景雾才有意义）──
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.06;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 12.0;
+
+    shoot("fog_off");
+    app.deg_.dist_fog_on = true;
+    shoot("fog_on");
+    app.deg_.dist_fog_sigma = 0.024f;
+    shoot("fog_thick");
+    app.deg_.dist_fog_sigma = 0.008f;
+    app.deg_.dist_fog_atten = jpov::FogAttenuation::kLinear;
+    shoot("fog_linear");
+    app.deg_.dist_fog_atten = jpov::FogAttenuation::kExponential;
+    app.deg_.dist_fog_on    = false;
+
+    // ── 水场景（相机在水上，俯视 35°）：水皮 / 条带 / 水体介质都要被雾正确参与 ──
+    app.SetWaterScene(true);
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(5.0f);
+    app.deg_.sun_elev_deg = 45.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.62;
+    app.view_.theta = 0.6;
+    app.view_.R     = 26.0;
+    shoot("fog_water_off");
+    app.deg_.dist_fog_on = true;
+    shoot("fog_water_on");
+
+    // ── 水下：远景雾整块被忽略 ⇒ 两张必须逐像素相同 ──
+    app.SetWaterLevel(0.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = -0.60f;
+    app.view_.theta = 0.70f + 3.14159265f;
+    app.view_.R     = 8.0f;
+    shoot("fog_under_on");
+    app.deg_.dist_fog_on = false;
+    shoot("fog_under_off");
+
+    LOG(INFO) << "distance fog A/B captured to " << out_dir;
     app.Finalize();
     return 0;
 }
@@ -1455,6 +1555,7 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string distance_fog_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -1485,9 +1586,14 @@ int main(int argc, char** argv) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
             sky_refract_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-distance-fog") == 0 && i + 1 < argc) {
+            distance_fog_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!distance_fog_out_dir.empty()) {
+        return RunCaptureDistanceFog(distance_fog_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);

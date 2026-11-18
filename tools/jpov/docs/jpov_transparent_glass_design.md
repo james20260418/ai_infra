@@ -120,7 +120,7 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 3. 场景深度在 MRT#1（单采样）；下游雾 pass 采样它时临时摘下该附件防反馈环；
 4. **玻璃 pass**（若有 kBlend）：`EnsureGlassFBO` + `ClearGlassFBO`（无玻璃也清空，
    提供恒等层）+ `DrawTransparentPass`；
-5. 远景仰角雾（不变）；
+5. 远景雾（2026-11-18 起并入 froxel 场，不再是独立 pass）；
 6. **froxel 体积雾 composite**（唤醒条件 = 有雾**或有玻璃**）：把玻璃段一并合成。
 
 `CHECK(!has_glass || use_hdr)`：kBlend 仅在 HDR 路径支持（否则 crash，不静默失效）。

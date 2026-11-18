@@ -134,9 +134,16 @@ public:
     //   viewport_w/h    : 当前 3D FBO 像素尺寸（= froxel 纹理尺寸）。
     //   params          : 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
     //   light           : 物理光照来源（ambient + 太阳×CSM 资源）。
-    //   out             : 输出场；fogs 为空时置为无效（scatter_tex = 0）。
-    // Pre-conditions: Init 已调用；out != nullptr。
-    // 说明：fogs 为空时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 /
+    //   distance_fog    : 远景雾（可选，nullptr = 无）。它与雾团共用圆角盒求交/剖面，
+    //                     但**不吃光照**（源项 = DistanceFog::color × 覆盖率），也不走 tile
+    //                     候选列表（全局介质）。`enabled=false` 与 nullptr 等价。
+    //                     ⚠️ 调用方负责「水下没有雾」：相机在水面以下时传 nullptr。
+    //   fog_floor_y     : 远景雾的下界（世界 y）。非空 ⇒ 注入时把 y 以下的段裁掉
+    //                     （水体存在时传水面高度 —— 合成器契约「雾只在水上」）。
+    //   out             : 输出场；fogs 为空**且**无远景雾时置为无效（scatter_tex = 0）。
+    // Pre-conditions: Init 已调用；out != nullptr；distance_fog->enabled 时其字段合法
+    //                 （见 LowerDistanceFog）。
+    // 说明：fogs 为空且无远景雾时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 /
     //       viewport / 活动纹理单元 / 使用的纹理单元绑定（见头文件顶部「GL 状态机契约」）。
     void Build(const std::vector<PointFog>& fogs,
                const std::vector<PointLight>& point_lights,
@@ -147,6 +154,8 @@ public:
                int viewport_h,
                const FogParams& params,
                const FogLighting& light,
+               const DistanceFog* distance_fog,
+               std::optional<float> fog_floor_y,
                FogField* out /*output*/);
 
 private:
