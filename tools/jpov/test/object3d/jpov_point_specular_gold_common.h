@@ -11,7 +11,9 @@
 //
 // 场景（人类可读）：与 skylight viewer 的镜面地板场景同一份资源与机位
 //   （`InstallMirrorFloorScene()` + `SetPointSpecularView()`），地面 metallic=1 / roughness 可调；
-//   太阳与环境光**全关** ⇒ 画面里唯一的照明就是那盏灯（否则太阳的高光会盖住要看的东西）。
+//   太阳关掉、天光反射开着（正常镜子观感）⇒ 画面既看得出"这是镜子"，又能看到灯的像。
+//   ⚠️ 刻意**不**出"关掉天光/环境光、只剩这盏灯"的诊断照：那种图地面几乎全黑，
+//   检查时容易被误读成"渲染坏了"（Danis 2026-11-18 定：只留正常或近乎正常的图）。
 //
 // 机位与灯位**算死**（推导见 SkylightApp::PlacePointLampAtScreenCenter）：
 //   灯放在「原点处的反射方向」上 3.5 m ⇒ 灯的像精确落在画面正中 ⇒ 测试可以按像素位置断言。
@@ -68,12 +70,12 @@ inline void ApplyShot(jpov_skylight::SkylightApp* app, const Shot& shot) {
     app->SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(shot.floor_roughness));
     app->SetPointLamp(shot.lamp_radius);
 
-    // 画面里只留这盏灯：关 env/SSR + 环境光置零（太阳在 InstallScene 里已置零）。
-    app->SetEnvSpecular(false);
-    app->SetSsr(false);
-    jpov::AmbientLight no_ambient{};
-    no_ambient.intensity = 0.0f;
-    app->SetAmbientOverride(no_ambient);
+    // 正常镜子观感（地面映天光与散布方块；太阳在 InstallScene 里已置零）。
+    // 刻意**不**关 env —— 关掉后地面几乎全黑，检查时容易被误读成"渲染坏了"
+    // （Danis 2026-11-18 定：只留正常或近乎正常的图）。
+    app->SetEnvSpecular(true, 0.35f);
+    app->SetSsr(true);
+    app->ClearAmbientOverride();
 }
 
 // 场景装配（太阳置零 + 画面资源）：generator/test 共同的入口。

@@ -44,23 +44,24 @@ inline constexpr int kExpectedCenterX = kImageWidth / 2;
 inline constexpr int kExpectedCenterY = kImageHeight / 2;
 
 // 一张「拍摄」= 一组对照条件。
+//
+// ⚠️ 只出**正常观感**的图（地面映天光与方块，日盘的像叠在上面）。刻意不留"把 env/ambient
+// 关掉、只剩太阳镜面项"的诊断照：那种图地面几乎全黑，检查时容易被误读成"材质/渲染坏了"
+// （Danis 2026-11-18 定）。
 struct Shot {
-    float roughness = 0.0f;        // 地面材质 roughness
-    bool env_reflections = false;  // true = 开 env/SSR（镜子观感）；false = 只留太阳的镜面项
-    const char* file_tag = "";     // 进文件名
+    float roughness = 0.0f;     // 地面材质 roughness
+    const char* file_tag = "";  // 进文件名
 };
 
 inline constexpr Shot kShots[] = {
-    // ① 钱图：只有太阳的镜面项 ⇒ 除日盘的像外地面纯黑（修之前这张是**一片全黑**）。
-    {0.0f,  false, "r0.000_pure"},
-    // ② 正常镜子观感：地面映天光与方块，日盘的像叠在上面。
-    {0.0f,  true,  "r0.000_mirror"},
-    // ③ θ 主导：r=0.02 的 a2 只有 θ 带宽的 3% ⇒ 应与 ① 几乎同一张图。
-    {0.02f, false, "r0.020_pure"},
-    // ④ 粗糙端由 roughness 主导：不能被这次改动弄没（本该有光）。
-    {0.30f, true,  "r0.300_mirror"},
+    // ① 钱图：正常镜子观感（r=0 的完美镜面），日盘的像落在画面正中。
+    {0.0f,  "r0.000_mirror"},
+    // ② θ 主导：r=0.02 的 a2 只有 θ 带宽的 3% ⇒ 应与 ① 几乎同一张图。
+    {0.02f, "r0.020_mirror"},
+    // ③ 粗糙端由 roughness 主导：不能被这次改动弄没（本该有光）。
+    {0.30f, "r0.300_mirror"},
 };
-inline constexpr int kShotCount = 4;
+inline constexpr int kShotCount = 3;
 
 inline std::string ShotFileName(const Shot& shot) {
     return std::string("specular_bw_") + shot.file_tag + "_1280x720.png";
@@ -72,22 +73,10 @@ inline void ApplyShot(jpov_skylight::SkylightApp* app, const Shot& shot) {
     CHECK(app != nullptr);
 
     app->SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(shot.roughness));
-
-    if (shot.env_reflections) {
-        // 天光消费量 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围最亮
-        // 的天光，全天光会把日盘一起过曝成白、对比度全丢（见 MirrorFloorMaterial 注释）。
-        app->SetEnvSpecular(true, 0.35f);
-        app->SetSsr(true);
-        app->ClearAmbientOverride();
-    } else {
-        // 把太阳的镜面项完全隔离出来：关 env/SSR + 环境光置零。
-        // （要关环境光是因为 metallic 目前仍吃到 diffuse ambient 那一项 —— 那是另一件事。）
-        app->SetEnvSpecular(false);
-        app->SetSsr(false);
-        jpov::AmbientLight no_ambient{};
-        no_ambient.intensity = 0.0f;
-        app->SetAmbientOverride(no_ambient);
-    }
+    // 天光消费量 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围最亮的天光，
+    // 全天光会把日盘一起过曝成白、对比度全丢（见 MirrorFloorMaterial 注释）。
+    app->SetEnvSpecular(true, 0.35f);
+    app->SetSsr(true);
 }
 
 }  // namespace jpov_specular_bandwidth

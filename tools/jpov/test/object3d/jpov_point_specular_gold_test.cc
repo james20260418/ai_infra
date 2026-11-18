@@ -3,16 +3,19 @@
 // 与 generator 共用场景头，渲同一组对照条件，然后做**定量**断言
 // （不比对像素：llvmpipe 下 PBR 光照有稳态抖动）。
 //
+// 四张图都是**正常观感**（地面映天光与散布方块；太阳关掉、只有那盏球灯在打高光）——
+// 刻意不出"关掉天光、只剩这盏灯"的诊断照（地面几乎全黑，检查时容易误读成渲染坏了）。
+//
 // 断言四件事：
-//   ① R=0.02 / 0.10 / 0.50 三档都必须有**饱和**的灯的像（max=255）。
-//      修之前这三档都是「一个点」：R=0.02/0.10 亮斑 0 px，R=0.50 只有 92 px 的一线。
+//   ① R=0.02 / 0.10 / 0.50 三档都必须有**饱和**（≥250）的灯的像。
+//      修之前这三档都是「一个点」：R=0.02/0.10 一个饱和像素都没有，R=0.50 只有一线。
 //   ② 面积随 R **单调显著增长**（θ = asin(R/3.5 m)：0.33° / 3.3° / 16.4°）。
 //      这条是本次修复的正题：代表点只挪方向、不加带宽 ⇒ 修之前面积与 R 无关。
 //   ③ 位置：像的中心必须在几何预测点（画面正中）±30 px —— 把「像确实是这盏灯」
 //      钉死，而不只是「画面里变亮了」。
 //   ④ 粗糙端（roughness=0.30）不能被这次改动弄没（本该有光）。
 //
-// 修复前实测（同一套场景）：0 / 0 / 92 px，且 0.50 那条是 46×2 的一线（点高光）。
+// 修复前实测（同一套场景，阈值 250）：0 / 0 / ~0 px；修好后 80 / 512 / 3785 px。
 
 #include <algorithm>
 #include <cmath>
@@ -33,10 +36,14 @@ namespace {
 // 统计窗口：画面正中 ±kWindowHalf 像素（灯的像就在正中）。
 constexpr int kWindowHalf = 110;
 
+// 「灯的像」的判据：饱和（≥250）。地面映上来的天光本来就在 200 上下，
+// 只有灯的像会把峰值顶到饱和 —— 阈值 250 正好把"有像/没像"分开。
+constexpr int kSaturated = 250;
+
 struct SpotStats {
     int max_value = 0;
-    long long bright = 0;                    // max(r,g,b) >= 200 的像素数
-    int x0 = 0, y0 = 0, x1 = -1, y1 = -1;    // 亮像素 bbox（x1<0 = 空）
+    long long saturated = 0;                 // max(r,g,b) >= kSaturated 的像素数
+    int x0 = 0, y0 = 0, x1 = -1, y1 = -1;    // 上述像素的 bbox（x1<0 = 空）
     int width() const { return x1 < 0 ? 0 : (x1 - x0 + 1); }
     int height() const { return y1 < 0 ? 0 : (y1 - y0 + 1); }
     double centerX() const { return 0.5 * (x0 + x1); }
@@ -49,12 +56,12 @@ SpotStats AnalyzeWindow(const unsigned char* rgba, int w, int h) {
     for (int y = std::max(0, cy - kWindowHalf); y < std::min(h, cy + kWindowHalf); ++y) {
         for (int x = std::max(0, cx - kWindowHalf); x < std::min(w, cx + kWindowHalf); ++x) {
             const unsigned char* p = rgba + (static_cast<size_t>(y) * w + x) * 4;
-            const unsigned char mx = std::max({p[0], p[1], p[2]});
-            s.max_value = std::max(s.max_value, static_cast<int>(mx));
-            if (mx < 200) {
+            const int mx = std::max({p[0], p[1], p[2]});
+            s.max_value = std::max(s.max_value, mx);
+            if (mx < kSaturated) {
                 continue;
             }
-            ++s.bright;
+            ++s.saturated;
             if (s.x1 < 0) {
                 s.x0 = s.x1 = x;
                 s.y0 = s.y1 = y;
@@ -113,7 +120,7 @@ int main() {
         const std::vector<unsigned char> img = LoadRgba(path, &w, &h);
         stats[i] = AnalyzeWindow(img.data(), w, h);
         LOG(INFO) << shot.file_tag
-                  << "  亮斑=" << stats[i].bright
+                  << "  饱和=" << stats[i].saturated
                   << "  max=" << stats[i].max_value
                   << "  bbox=" << stats[i].width() << "x" << stats[i].height()
                   << "  中心x=" << stats[i].centerX();
@@ -127,26 +134,22 @@ int main() {
 
     // ① 有尺寸的灯必须都有饱和的像。
     for (int i : {kSmall, kMedium, kLarge}) {
-        CHECK_GE(stats[i].bright, 100)
+        CHECK_GE(stats[i].saturated, 40)
             << "R=" << jpov_point_specular::kShots[i].lamp_radius
-            << " 的地面上没有灯的像（亮斑=" << stats[i].bright
+            << " 的地面上没有灯的像（饱和像素=" << stats[i].saturated
             << "）。点光源的角半径 θ=asin(R/dist) 没接进 a2？";
-        CHECK_GE(stats[i].max_value, 250)
-            << "R=" << jpov_point_specular::kShots[i].lamp_radius
-            << " 的像不饱和（max=" << stats[i].max_value
-            << "）—— 带宽只该把能量摊开、不该压暗峰值（D 归一化）。";
     }
 
     // ② 面积随灯的物理半径单调显著增长（θ 从 0.33° → 3.3° → 16.4°）。
     const double small_to_medium =
-        static_cast<double>(stats[kMedium].bright) / std::max<long long>(stats[kSmall].bright, 1);
+        static_cast<double>(stats[kMedium].saturated) / std::max<long long>(stats[kSmall].saturated, 1);
     const double medium_to_large =
-        static_cast<double>(stats[kLarge].bright) / std::max<long long>(stats[kMedium].bright, 1);
+        static_cast<double>(stats[kLarge].saturated) / std::max<long long>(stats[kMedium].saturated, 1);
     CHECK_GE(small_to_medium, 1.8)
-        << "R=0.02 → 0.10 的亮斑只长了 " << small_to_medium
+        << "R=0.02 → 0.10 的灯的像只长了 " << small_to_medium
         << " 倍（应 ≥1.8）。代表点改方向、不改 a2？";
     CHECK_GE(medium_to_large, 1.8)
-        << "R=0.10 → 0.50 的亮斑只长了 " << medium_to_large
+        << "R=0.10 → 0.50 的灯的像只长了 " << medium_to_large
         << " 倍（应 ≥1.8）。";
 
     // ③ 位置：像的中心必须在画面正中（几何预测点）附近。
@@ -157,8 +160,8 @@ int main() {
         << "）。机位/灯位推导或带宽口径被改坏了？";
 
     // ④ 粗糙端（roughness 主导）必须有光。
-    CHECK_GE(stats[kRough].bright, 100)
-        << "roughness=0.30 的那张几乎没有光了（亮斑=" << stats[kRough].bright
+    CHECK_GE(stats[kRough].saturated, 200)
+        << "roughness=0.30 的那张几乎没有光了（饱和像素=" << stats[kRough].saturated
         << "）—— 点光的带宽逻辑把粗糙端也影响掉了？";
 
     app.ClearPointLamp();

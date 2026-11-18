@@ -716,10 +716,12 @@ int RunCaptureWaterSun(const std::string& out_dir) {
 //   ⇒ 太阳的像精确落在画面正中（原点）。太阳本身也在画面上方 ⇒ 一张图里能直接比较
 //   「天上的日盘」与「地上的像」的大小与亮度。
 //
-// 出图（同一机位/同一太阳，只切地面条件）：
-//   mirror_r0_pure.png     关 env/ambient ⇒ 除太阳的像外地面纯黑（最干净的一张）
-//   mirror_r0_mirror.png   开 env/SSR ⇒ 正常镜子观感（映天空与方块）+ 太阳的像
-//   mirror_r02_pure.png    roughness=0.02 的同一条对照（θ 主导，应与 r=0 几乎同图）
+// 出图（同一机位/同一太阳，只切地面 roughness；全部是**正常观感**）：
+//   mirror_r0.000.png   r=0 的完美镜面：地面映天空与方块，日盘的像落在正中
+//   mirror_r0.020.png   θ 主导（a2 只多 3%）⇒ 应与 r=0 几乎同图
+//   mirror_r0.300.png   粗糙端：roughness 主导，仍该有光
+// ⚠️ 刻意**不**出"关掉天光与环境光、只剩太阳镜面项"的诊断照：那种图地面几乎全黑，
+//    检查时容易被误读成"材质/渲染坏了"（Danis 2026-11-18 定）。
 int RunCaptureMirrorSpecular(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 镜面高光带宽（headless）";
@@ -748,16 +750,6 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
         LOG(INFO) << "capture: " << path;
     };
 
-    // 关 env / SSR + 环境光置零 = 把「太阳的镜面项」完全隔离出来：
-    // 地面上除了太阳的像什么都没有。（要关环境光是因为 metallic 目前仍吃到 diffuse
-    // ambient 那一项 —— 那是另一件事，这里只想看高光。）
-    auto only_sun_specular = [&]() {
-        app.SetEnvSpecular(false);
-        app.SetSsr(false);
-        jpov::AmbientLight no_ambient{};
-        no_ambient.intensity = 0.0f;
-        app.SetAmbientOverride(no_ambient);
-    };
     auto full_mirror = [&]() {
         // 天光消费量取 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围
         // 最亮的天光，全天光 + 暗银镜仍会把两者一起过曝成白，日盘的像就淹在白里了。
@@ -767,21 +759,20 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
         app.ClearAmbientOverride();
     };
 
-    // ① 钱图：纯太阳高光。正中一颗亮盘 + 一枚竖向拉长的拖尾
-    //    （低太阳掠过地面时 lobe 沿视线方向被投影拉长，是正确行为）。
-    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
-    only_sun_specular();
-    shoot("mirror_r0_pure");
-
-    // ② 正常镜子观感：地面映天空与散布方块，太阳的像叠在上面。
+    // ① 钱图（r=0 完美镜面）：地面映天空与散布方块，日盘的像叠在正中。
+    //    低太阳掠过地面时 lobe 沿视线方向被投影拉长，是正确行为。
     full_mirror();
-    shoot("mirror_r0_mirror");
+    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
+    shoot("mirror_r0.000");
 
-    // ③ roughness=0.02（JPOV 镜面地板预设）：修之前被 `max(denom,1e-7)` 护栏钳成一块
+    // ② roughness=0.02（JPOV 镜面地板预设）：修之前被 `max(denom,1e-7)` 护栏钳成一块
     //    暗糊团（越光滑反而越暗）；现在与 r=0 几乎同一颗盘（θ 主导）。
     app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.02f));
-    only_sun_specular();
-    shoot("mirror_r02_pure");
+    shoot("mirror_r0.020");
+
+    // ③ 粗糙端（roughness 主导）：仍该有光。
+    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.30f));
+    shoot("mirror_r0.300");
 
     app.ClearSunOverride();
     app.ClearAmbientOverride();
@@ -804,12 +795,11 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
 //   灯放在「原点处的反射方向」上 3.5 m 处 ⇒ 灯的像精确落在画面正中。
 //   另画一个自发光小球（直径 = 2R）当灯的参照物，一眼能对上「天上的灯 / 地上的像」。
 //
-// 出图（同一机位，只改灯的物理半径）：
-//   point_r0.020_pure.png   小球灯
-//   point_r0.100_pure.png   中等（≈人手一个灯笼）
-//   point_r0.500_pure.png   大球灯 ⇒ 像最大最柔
-//   point_r0.100_mirror.png 开天光反射（普通镜子观感，灯像叠在上面）
-// 「pure」= 关 env/SSR + 环境光置零 + 太阳置零 ⇒ 画面里唯一的照明就是那盏灯。
+// 出图（同一机位，只改灯的物理半径；全部是正常镜子观感 —— 太阳关掉、天光反射开着）：
+//   point_r0.020.png   小球灯
+//   point_r0.100.png   中等（≈人手一个灯笼）
+//   point_r0.500.png   大球灯 ⇒ 像最大最柔
+// ⚠️ 刻意**不**出"关掉天光、只剩这盏灯"的诊断照（地面几乎全黑，容易被误读成渲染坏了）。
 int RunCapturePointSpecular(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 点光源镜面带宽（headless）";
@@ -836,8 +826,9 @@ int RunCapturePointSpecular(const std::string& out_dir) {
     no_sun.direction = {0.0f, -1.0f, 0.0f};
     no_sun.intensity = 0.0f;
     app.SetSunOverride(no_sun);
-    jpov::AmbientLight no_ambient{};
-    no_ambient.intensity = 0.0f;
+
+    app.SetEnvSpecular(true, 0.35f);
+    app.SetSsr(true);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -849,11 +840,6 @@ int RunCapturePointSpecular(const std::string& out_dir) {
         app.RunOnce(input, winfo, path.c_str());
         LOG(INFO) << "capture: " << path;
     };
-    auto pure = [&]() {
-        app.SetEnvSpecular(false);
-        app.SetSsr(false);
-        app.SetAmbientOverride(no_ambient);
-    };
 
     // ① 灯越来越大 ⇒ 地上的像越来越大越柔（带宽 = (θ/2)²，θ = asin(R/3.5m)）。
     struct LampShot {
@@ -861,22 +847,14 @@ int RunCapturePointSpecular(const std::string& out_dir) {
         const char* name;
     };
     const LampShot lamp_shots[] = {
-        {0.02f, "point_r0.020_pure"},
-        {0.10f, "point_r0.100_pure"},
-        {0.50f, "point_r0.500_pure"},
+        {0.02f, "point_r0.020"},
+        {0.10f, "point_r0.100"},
+        {0.50f, "point_r0.500"},
     };
     for (const LampShot& s : lamp_shots) {
-        pure();
         app.SetPointLamp(s.radius);
         shoot(s.name);
     }
-
-    // ③ 普通镜子观感：开天光反射（地面映天空与方块），灯的像叠在上面。
-    app.SetPointLamp(/*physical_radius*/ 0.10f);
-    app.SetEnvSpecular(true, 0.35f);
-    app.SetSsr(true);
-    app.ClearAmbientOverride();
-    shoot("point_r0.100_mirror");
 
     app.ClearPointLamp();
     app.ClearSunOverride();
