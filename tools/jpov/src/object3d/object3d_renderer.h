@@ -210,6 +210,11 @@ uniform int   uHasSun;
 uniform vec3  uSunDir;       // 光传播方向（归一化），从光源指向场景
 uniform vec3  uSunColor;     // 光颜色
 uniform float uSunIntensity;
+// 天体的**角半径** θ（弧度）：太阳 0.004654 / 月亮 0.004521（DirectionalLight::angular_radius）。
+// 它是镜面高光的**带宽下限**，不是装饰：完美镜面（roughness=0）+ 平行光 = 两个 δ 相乘，
+// 逐像素采样只能拿到 ∞ 或 0 ⇒ 高光要么爆要么彻底消失（docs/jpov_specular_bandwidth.md）。
+// 半向量是入射与视线的**角平分线**，只偏 θ/2 ⇒ 并进 a2 的是 (θ/2)²（写 θ² 会过宽 4 倍）。
+uniform float uSunAngularRadius;
 uniform int   uCascadeCount;          // 级联段数
 uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
 uniform float uCascadeBlendFraction;   // 级联间混合带宽度（占该级联跨度的比例，见 ShadowConfig::cascade_blend_fraction）
@@ -508,14 +513,22 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-float distributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
+float distributionGGX(vec3 N, vec3 H, float a2) {
     float NdotH = max(dot(N, H), 0.0);
     float NdotH2 = NdotH * NdotH;
     float denom = NdotH2 * (a2 - 1.0) + 1.0;
     denom = PI * denom * denom;
-    return a2 / max(denom, 1e-7);
+    // ⚠️ 护栏必须给 1e-30，**不能**用 1e-7：NoH→1 时 denom ≈ π·a2²，a2 < 1.8e-4
+    //   （= roughness < 0.115）时 π·a2² 就小于 1e-7 ⇒ 峰值被钳到 a2/1e-7，**越光滑反而越暗**
+    //   且能量不守恒（r=0.02 的镜面地板：峰值 2e6 → 1.6，压低 6 个量级）。
+    return a2 / max(denom, 1e-30);
+}
+
+// α = roughness²，a2 = α² = roughness⁴（JPOV/Filament 口径）。
+// 单独抽出来是为了让「光源带宽」能以同样的量纲加到 a2 上。
+float ggxAlpha2(float roughness) {
+    float a = roughness * roughness;
+    return a * a;
 }
 
 float geometrySchlickGGX(float NdotX, float roughness) {
@@ -571,8 +584,8 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
 
     // ── Representative Point (Karis 2013) ──
     // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
-    // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
-    // 能从不同区域命中镜面 lobe → 金属面不会全黑。
+    // 的有效入射方向（**只改方向**）。它的作用只是让金属面在点光下别全黑；
+    // “灯越大、高光越柔/越宽”是下面 θ 那一项（带宽）的事，两者不能互相代替。
     // physicalRadius = 0 时退化为原始点光源行为。
     float sourceRadius = light.physicalRadius;
     vec3 spec_dir = light_dir;  // default: same as point light
@@ -602,7 +615,14 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         float NdotV = max(dot(N, V), 0.0);
         vec3 F0 = mix(vec3(0.04), base_color, metallic);
         vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-        float D = distributionGGX(N, H, roughness);
+        // 光源角半径 θ（**逐像素**）：球在 P 处张的角 = asin(R/dist)。
+        // 与平行光同一条公式：a2_eff = roughness⁴ + (θ/2)²（半向量只偏 θ/2）。
+        // 没有这一项时：r=0 的表面在点光下 D ≡ 0（完全没有高光）；有光泽的表面也只会得到
+        // 一个「点」高光，与灯泡/灯笼的实际尺寸无关（代表点只改方向，不改 lobe 宽度）。
+        // dist < R（片元在球内）时 asin 域外 ⇒ 先 clamp 到 1（θ=π/2），再由 a2 上限兜底。
+        float theta = asin(clamp(sourceRadius / max(dist, sourceRadius), 0.0, 1.0));
+        float a2 = min(ggxAlpha2(roughness) + 0.25 * theta * theta, 0.25);
+        float D = distributionGGX(N, H, a2);
         float G = geometrySmith(N, V, spec_dir, roughness);
         vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
         total_specular += light.color * light.intensity * spec * NdotL_s * attenuation;
@@ -717,11 +737,17 @@ void main() {
             total_diffuse += light_col * (kD * base_color / PI) * NdotL;
 
             // specular（GGX Cook-Torrance）
+            // 带宽 = 粗糙度项 + 光源角半径项：a2_eff = roughness⁴ + (θ/2)²。
+            // 这一行就是「完美镜面 + 平行光」能从"高光彻底消失"变成"看得见太阳的像"的原因：
+            // r=0 ⇒ a2=0 ⇒ 没有带宽时 D 恒为 0；接上 (θ/2)²=5.4e-6 后 D 有有限峰值
+            // （GGX 的 D 归一化 ⇒ 总能量仍是 F·E⊥，只是峰值降、覆盖变宽）。
             vec3 H = normalize(L + V);
             float NdotV = max(dot(N, V), 0.0);
             vec3 F0 = mix(vec3(0.04), base_color, metallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-            float D = distributionGGX(N, H, roughness);
+            float sun_a2 = ggxAlpha2(roughness) +
+                           0.25 * uSunAngularRadius * uSunAngularRadius;
+            float D = distributionGGX(N, H, sun_a2);
             float G = geometrySmith(N, V, L, roughness);
             vec3 spec = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
             total_specular += light_col * spec * NdotL;

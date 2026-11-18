@@ -3,19 +3,21 @@
 // 为什么单独一个头：水皮要画「太阳的像」，而那是**同一个 GGX**，不是第二套高光。
 // 如果水皮自己再写一份 D/G，改一处就会漂 —— 这里放唯一出处：
 //   · CPU 版本给单测与 GPU 像素对拍当参考（test/water:water_skin_*_test）；
-//   · kGgxSpecularGlsl 拼进水皮片元（将来 PBR 也改用它，见文末「待统一」）。
+//   · kGgxSpecularGlsl 拼进水皮片元。
 //
 // 口径（与 object3d_renderer.h 的 distributionGGX 一致，勿改）：
 //   a2 = α²，其中 α = roughness²（JPOV/Filament 口径）⇒ a2 = roughness⁴。
 //
-// ⚠️ 已知的两个「δ 光源 × δ BRDF」问题与解法见 known_issue §11：
+// ⚠️ 已知的两个「δ 光源 × δ BRDF」问题与解法见 docs/jpov_specular_bandwidth.md：
 //   · 完美镜面 + 平行光 = 两个 δ 相乘 ⇒ 点值无穷、只能积分；
 //   · 给光源一个**角半径** θ，半向量只偏 θ/2 ⇒ `a2_eff = a2 + (θ/2)²` 就有带宽；
 //   · 掠射时投影会把带宽压回亚像素 ⇒ 再并进「像素足迹」的斜率方差（specular AA）。
 //
-// 待统一（下一步，会改 gold）：object3d 的三份 PBR 片元目前仍各自拷贝着
-//   distributionGGX / geometrySchlickGGX。等给它也接上 angular_radius 时，
-//   一并换成这里的函数，届时 `distributionGGX` 的旧实现删除。
+// 已落地（2026-11-18）：object3d / instanced / skeleton 三份 PBR 片元都已接上
+//   `uSunAngularRadius`（太阳路径用 `a2_eff = roughness⁴ + (θ/2)²`，护栏 1e-30），
+//   验收见 `--capture-mirror-specular` 与 test/object3d:jpov_specular_bandwidth_gold_*。
+//   三处的 `distributionGGX` 仍各自拷贝（GLSL 字符串、共享片段只拼给水皮），
+//   真正做到“一份实现”要把它们也改成拼 kGgxSpecularGlsl —— 仍未做，改一处记得改三处。
 
 #ifndef JPOV_SRC_LIGHTING_GGX_SPECULAR_H_
 #define JPOV_SRC_LIGHTING_GGX_SPECULAR_H_
@@ -29,17 +31,16 @@ namespace jpov {
 namespace lighting {
 
 // 天体角半径（弧度）。太阳 0.2665°、月亮 0.259°；年周期日地距离只变 ±1.7%。
-// 这是**光源的几何属性**，与仰角无关（别用仰角插值，见 known_issue §11.6①）。
+// 这是**光源的几何属性**，与仰角无关（别用仰角插值，见 docs/jpov_specular_bandwidth.md §1.6①）。
 inline constexpr float kSunAngularRadiusRad = 0.004654f;    // 0.2667°
 inline constexpr float kMoonAngularRadiusRad = 0.004521f;   // 0.2591°
 
 // GGX 法线分布 D（a2 = α²）。NoH = max(dot(N,H), 0)。
 //
-// ⚠️ 护栏取 1e-30，**不能**照抄 object3d 的 `max(denom, 1e-7)`：
-//   denom 在 NoH→1 时 ≈ π·a2²，a2 < 1.8e-4（roughness < 0.0206）时 π·a2² 就小于 1e-7，
-//   于是峰值被人为钳到 a2/1e-7 —— 越光滑反而越暗，且能量不守恒。
-//   水皮的日盘带宽 a2 = (θ/2)² = 5.4e-6 正好落在这个陷阱里（实测峰值被压低 1086 倍）。
-//   PBR 那份的实现仍是 1e-7（现有材质 r≥0.02，a2=4e-4 刚好没踩到），统一时一并修。
+// ⚠️ 护栏取 1e-30，**不能**用 1e-7：denom 在 NoH→1 时 ≈ π·a2²，a2 < 1.8e-4
+//   （roughness < 0.115）时 π·a2² 就小于 1e-7，于是峰值被人为钳到 a2/1e-7 ——
+//   越光滑反而越暗，且能量不守恒。水皮的日盘带宽 a2 = (θ/2)² = 5.4e-6 正好落在这个
+//   陷阱里（实测峰值被压低 1086 倍）；三份 PBR 片元已于 2026-11-18 同步改成 1e-30。
 inline float GgxDistribution(float no_h, float a2) {
     const float no_h2 = no_h * no_h;
     const float t = no_h2 * (a2 - 1.0f) + 1.0f;
@@ -60,7 +61,7 @@ inline float GgxSmithG1(float no_x, float a2) {
 }
 
 // 盘状光源并入 a2 的带宽：半向量只偏 **θ/2**（角平分线）⇒ 平方后是 (θ/2)²。
-// ⚠️ 写成 θ² 会过宽 4 倍（known_issue §11.6②）。
+// ⚠️ 写成 θ² 会过宽 4 倍（docs/jpov_specular_bandwidth.md §1.6②）。
 inline float GgxDiskBandwidthA2(float angular_radius) {
     const float h = 0.5f * std::max(angular_radius, 0.0f);
     return h * h;
@@ -158,7 +159,7 @@ float GgxSmithG1(float NoX, float a2) {
 }
 
 // 盘状光源的带宽：半向量只偏 θ/2（角平分线）⇒ (θ/2)²。
-// ⚠️ 写 θ² 会过宽 4 倍（known_issue §11.6②）。
+// ⚠️ 写 θ² 会过宽 4 倍（docs/jpov_specular_bandwidth.md §1.6②）。
 float GgxDiskBandwidthA2(float angularRadius) {
     float h = 0.5 * max(angularRadius, 0.0);
     return h * h;

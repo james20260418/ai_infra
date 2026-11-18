@@ -1513,7 +1513,7 @@ void Renderer::Render(const RenderCommandList& cmds,
         const std::optional<DirectionalLight> eff_sun = cmds.sun;
         std::optional<AmbientLight> eff_ambient = cmds.ambient;
         // 天体必须有非零角半径：0 意味着「没有带宽」⇒ 镜面上 D 恒为 0（高光静默消失）
-        // 或极端值。按 known_issue §11 的口径，这是配置错误，不静默容忍。
+        // 或极端值。按 docs/jpov_specular_bandwidth.md 的口径，这是配置错误，不静默容忍。
         if (eff_sun.has_value()) {
             CHECK_GT(eff_sun->angular_radius, 0.0f)
                 << "DirectionalLight::angular_radius 必须 > 0（太阳 ≈0.00465 / 月亮 ≈0.00452）";

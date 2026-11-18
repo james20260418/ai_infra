@@ -11,7 +11,7 @@
 // 物理与 src/water/water_medium_math.h 的 WaterAt **同源**（改一处必须改另一处），
 //  由 test/water:water_medium_gpu_test 逐像素对拍兜底。
 //
-// 本版不做（见 known_issue §11）：CSM 阴影（太阳项按全受照）、多次散射、视线折射、
+// 本版不做（见 docs/jpov_specular_bandwidth.md）：CSM 阴影（太阳项按全受照）、多次散射、视线折射、
 //  环境场随深度的自身衰减。
 
 #ifndef JPOV_SRC_WATER_WATER_MEDIUM_SHADER_H_

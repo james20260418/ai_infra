@@ -469,6 +469,9 @@ uniform int   uHasSun;
 uniform vec3  uSunDir;       // 光传播方向（归一化），从光源指向场景
 uniform vec3  uSunColor;     // 光颜色
 uniform float uSunIntensity;
+// 天体**角半径** θ（弧度）：镜面高光的带宽下限，见 object3d_renderer.h 的同名 uniform。
+// 半向量只偏 θ/2 ⇒ 并进 a2 的是 (θ/2)²（docs/jpov_specular_bandwidth.md §1.6②）。
+uniform float uSunAngularRadius;
 uniform int   uCascadeCount;          // 级联段数
 uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
 uniform float uCascadeBlendFraction;   // 级联间混合带宽度（占该级联跨度的比例，见 ShadowConfig::cascade_blend_fraction）
@@ -767,14 +770,20 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-float distributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
+float distributionGGX(vec3 N, vec3 H, float a2) {
     float NdotH = max(dot(N, H), 0.0);
     float NdotH2 = NdotH * NdotH;
     float denom = NdotH2 * (a2 - 1.0) + 1.0;
     denom = PI * denom * denom;
-    return a2 / max(denom, 1e-7);
+    // ⚠️ 护栏 1e-30（不是 1e-7）：NoH→1 时 denom ≈ π·a2²，a2 < 1.8e-4（roughness < 0.115）
+    //   时 π·a2² 就小于 1e-7 ⇒ 峰值被钳住，**越光滑反而越暗**且能量不守恒。
+    return a2 / max(denom, 1e-30);
+}
+
+// α = roughness²，a2 = α² = roughness⁴（JPOV/Filament 口径）。
+float ggxAlpha2(float roughness) {
+    float a = roughness * roughness;
+    return a * a;
 }
 
 float geometrySchlickGGX(float NdotX, float roughness) {
@@ -830,8 +839,8 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
 
     // ── Representative Point (Karis 2013) ──
     // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
-    // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
-    // 能从不同区域命中镜面 lobe → 金属面不会全黑。
+    // 的有效入射方向（**只改方向**）。它的作用只是让金属面在点光下别全黑；
+    // “灯越大、高光越柔/越宽”是下面 θ 那一项（带宽）的事。
     // physicalRadius = 0 时退化为原始点光源行为。
     float sourceRadius = light.physicalRadius;
     vec3 spec_dir = light_dir;  // default: same as point light
@@ -861,7 +870,13 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         float NdotV = max(dot(N, V), 0.0);
         vec3 F0 = mix(vec3(0.04), base_color, metallic);
         vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-        float D = distributionGGX(N, H, roughness);
+        // 光源角半径 θ（**逐像素**）：球在 P 处张的角 = asin(R/dist)。与平行光同一条公式：
+        // a2_eff = roughness⁴ + (θ/2)²（半向量只偏 θ/2；写 θ² 会过宽 4 倍）。
+        // 没有它：r=0 的表面在点光下 D ≡ 0（全黑）；有光泽的表面也只能得到「点」高光，
+        // 与灯泡/灯笼的实际尺寸无关（代表点只改方向，不改 lobe 宽度）。
+        float theta = asin(clamp(sourceRadius / max(dist, sourceRadius), 0.0, 1.0));
+        float a2 = min(ggxAlpha2(roughness) + 0.25 * theta * theta, 0.25);
+        float D = distributionGGX(N, H, a2);
         float G = geometrySmith(N, V, spec_dir, roughness);
         vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
         total_specular += light.color * light.intensity * spec * NdotL_s * attenuation;
@@ -973,11 +988,15 @@ void main() {
             total_diffuse += light_col * (kD * base_color / PI) * NdotL;
 
             // specular（GGX Cook-Torrance）
+            // a2_eff = roughness⁴ + (θ/2)²：光源角半径给 δ BRDF 一个带宽下限。
+            // r=0 时没有这一项 D 恒为 0（太阳的像彻底消失）—— 见 docs/jpov_specular_bandwidth.md。
             vec3 H = normalize(L + V);
             float NdotV = max(dot(N, V), 0.0);
             vec3 F0 = mix(vec3(0.04), base_color, metallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-            float D = distributionGGX(N, H, roughness);
+            float sun_a2 = ggxAlpha2(roughness) +
+                           0.25 * uSunAngularRadius * uSunAngularRadius;
+            float D = distributionGGX(N, H, sun_a2);
             float G = geometrySmith(N, V, L, roughness);
             vec3 spec = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
             total_specular += light_col * spec * NdotL;
