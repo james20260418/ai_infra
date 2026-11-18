@@ -220,7 +220,7 @@ inline void ApplyCase(jpov_skylight::SkylightApp& app, const SsrGoldCase& c) {
     app.deg_.sun_azim_deg = c.sun_azim_deg;
     app.deg_.moon_red = 0.0f;
     app.deg_.night_blue = 0.0f;
-    app.deg_.elev_fog_on = false;
+    app.deg_.dist_fog_on = false;
     app.SetEnvSpecular(true, 1.0f);
     app.ssr_scale_ = c.ssr_scale;
     app.ssr_rough_to_lod_ = c.rough_to_lod;

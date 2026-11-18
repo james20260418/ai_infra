@@ -476,21 +476,23 @@ public:
             cmds->smaa = sc;
         }
 
-        // 远景仰角雾（空气透视）：几何属性走滑条；**雾色由天光推导**
-        // （SkyCommand::ElevationFogColor() = 地平线附近天光色），使远景收敛到天边。
-        if (deg_.elev_fog_on) {
-            const jpov::Color fc = nl.sky.ElevationFogColor();
-            jpov::ElevationFogConfig ef;
-            ef.enabled = true;
-            ef.start_distance = deg_.elev_fog_start;
-            ef.full_distance = deg_.elev_fog_full;
-            ef.elev_inner_deg = deg_.elev_fog_inner_deg;
-            ef.elev_outer_deg = deg_.elev_fog_outer_deg;
-            ef.density = deg_.elev_fog_density;
-            ef.use_sky_color = deg_.elev_fog_use_sky;
-            ef.color = {fc.r * deg_.elev_fog_gain, fc.g * deg_.elev_fog_gain,
-                        fc.b * deg_.elev_fog_gain, 1.0f};
-            cmds->elevation_fog = ef;
+        // 远景雾（空气透视）：一块**真实体积雾**，由 froxel 场注入（不是独立 pass）。
+        // 雾色是**用户给定**的收敛色；这里取「地平线附近天光色 × 增益」只是查看器的取值
+        // （渲染侧不做任何天光推导 —— 见 DistanceFog 头注释）。
+        // 盒底压在 y=0（地面/水面）：雾只在水上，与水体介质空间不相交。
+        if (deg_.dist_fog_on) {
+            const jpov::Color hz = nl.sky.AmbientTricolor()[1];   // [天, 天际线, 地]
+            jpov::DistanceFog df;
+            df.enabled = true;
+            df.center = {0.0f, deg_.dist_fog_top * 0.5f, 0.0f};
+            df.size = {deg_.dist_fog_extent * 2.0f, deg_.dist_fog_top,
+                       deg_.dist_fog_extent * 2.0f};
+            df.radius = deg_.dist_fog_radius;
+            df.sigma = deg_.dist_fog_sigma;
+            df.color = {hz.r * deg_.dist_fog_gain, hz.g * deg_.dist_fog_gain,
+                        hz.b * deg_.dist_fog_gain, 1.0f};
+            df.attenuation = deg_.dist_fog_atten;
+            cmds->distance_fog = df;
         }
 
         // 场景（下拉）：
@@ -784,10 +786,10 @@ private:
         ui_.Checkbox("遮丑① 补洞 (1px 缝)", &ssr_filter_hole_, row(0, 14));
         ui_.Checkbox("遮丑② 离群抑制 (方差)", &ssr_filter_clamp_, row(0, 15));
 
-        // 远景仰角雾的 UI 已按 Danis 要求整段删除（2026-11-13）：
-        // 场景里 elev_fog_on 默认 false，SSR 对比时它只会干扰判断。数据/命令仍在
-        // （skylight_scene.h 的 deg_ 字段 + render_command 的 elevation_fog），需要时
-        // 由代码设置，不再暴露面板。
+        // 远景雾的 UI 已按 Danis 要求整段删除（2026-11-13；当时叫「远景仰角雾」）：
+        // 场景里 dist_fog_on 默认 false，SSR 对比时它只会干扰判断。数据/命令仍在
+        // （skylight_scene.h 的 deg_ 字段 + render_command 的 distance_fog），需要时
+        // 由代码设置（拍摄分支就是这么用的），不再暴露面板。
 
         // ── 右列 0..2：掠射淡出（2026-11-13）──
         // 放在列首：不受 SSR 总闸影响也能看见（关掉 SSR 时它不生效，但不会"找不到"）。

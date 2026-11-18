@@ -127,3 +127,22 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 远景雾（DistanceFog）**inject 链路** GPU 测试（headless GL / llvmpipe）：
+# 直接驱动 FogRenderer::Build，读回 scatter 纹理断言 τ/S 的闭式值 + 软边剖面。
+# 远景雾没有独立 pass，这是唯一能读到它绝对量的地方（gold 只能看观感）。
+cc_test(
+    name = "distance_fog_gpu_test",
+    srcs = ["distance_fog_gpu_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/fog:fog_renderer",
+        "//tools/jpov/src:primitives3d_renderer",   # BuildMVP（相机约定唯一出处）
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

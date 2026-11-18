@@ -133,9 +133,14 @@ void WaterBendDir(vec3 raw_dir, out vec3 dir, out float gain)
 - **禁止**写成 `if (underwater) 走另一条天空分支` —— 那是把水耦合进天空逻辑。
 - 地色填充、光晕、地平线处理、日盘形状 **一行都不改**。
 
-### 3.2 两趟必须一致
+### 3.2 所有「天空输出」共用一个方向变换
 
-`kFull`（主色）与 `kAtmoOnly`（远景雾的收敛色，`HorizonFogRenderer` 按同像素 uv 采样）都要调用同一个 `WaterBendDir`。只弯主色不弯 `kAtmoOnly` ⇒ 窗内远景雾会朝未折射的天色收敛，出现一层雾色偏差。
+天空 pass 只有两趟：`kFull`（主色，含日月盘/光晕）与 `kEnvProbe`（环境探针，**不弯**，见 §3.3）。
+两者都过同一个 `WaterBendDir` 入口 —— 探针自己不弯是**方向函数**的物理性质，不是分支特例。
+
+> 2026-11-18 更新：原先还有第三趟 `kAtmoOnly`（只出大气色，供远景雾当收敛色，按同像素 uv
+> 采样）。远景雾改成 froxel 全局介质后**不再需要**这趟（它收敛到用户配置的雾色），
+> `kAtmoOnly` 与其 FBO 已删除。
 
 ### 3.3 探针 cube **不弯**
 

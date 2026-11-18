@@ -6,6 +6,8 @@
 //   2. BuildTileFogIndexData：把团列表投影成「每 tile ≤K 个团索引」的 tile 索引纹理数据
 //      （RGBA8；每 tile kTexelsPerTile 个 texel，每 texel RGBA 各 1 个 uint8 团索引）。
 //   3. BuildTileZRangeData：每 tile 的**保守 z 范围**，供 inject 短路「该切片是否可能碰雾」。
+//   4. LowerDistanceFog：把命令层 DistanceFog（远景雾）校验并降维成 inject 需要的形状量
+//      （它**不是**团：不走 tile 剔除、不占每 tile 预算、不吃光照）。
 //
 // MVP 约定：只有 kRoundBox（圆角盒，替换早期点雾/球）；PointFog.sigma 为消光系数（点处
 // σ = sigma·w，w 由圆角盒距离 + 剖面给出），albedo 为散射色（乘光照），emission 为自发光
@@ -70,6 +72,50 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     b.params[0] = static_cast<float>(fog.attenuation);
     b.params[1] = fog.radius;   // 外侧圆角壳厚度
     return b;
+}
+
+// 远景雾的**后端形状量**（inject 只需要这些）：轴对齐圆角盒 + 剖面 + σ + 用户给定色。
+//
+// 与 FogBody 刻意分开：远景雾不参与 tile 剔除 / 每 tile 预算，也**没有** albedo / emission
+// （内散射色由 color 直接给定，不吃光照）。字段与 fog_shader.h 里 `DistanceFogBody()`
+// 组装的 FogBodyData 及那几个 uDistFog* uniform 一一对应。
+struct DistanceFogShape {
+    Vec3f center;       // 盒中心（世界坐标）
+    Vec3f bound_half;   // 容器半尺寸 = 内盒半 size/2 + 外侧圆角壳厚度 radius
+    float radius;       // 外侧圆角壳厚度（米）
+    int attenuation;    // FogAttenuation 的底层值（shader 按 int 分派剖面）
+    float sigma;        // σ_t（1/m）
+    Vec3f color;        // 内散射色（线性 HDR，用户给定）
+};
+
+// 命令层远景雾 → 后端形状量（含全部校验）。
+// Pre-conditions（不满足直接 CHECK）: size 各分量 > 0；radius >= 0；sigma > 0；
+//   color 各通道 >= 0；attenuation != kUniform（硬边盒没有意义）。
+inline DistanceFogShape LowerDistanceFog(const DistanceFog& fog) {
+    CHECK_GT(fog.size.x(), 0.0f) << "DistanceFog.size 各分量必须 > 0";
+    CHECK_GT(fog.size.y(), 0.0f) << "DistanceFog.size 各分量必须 > 0";
+    CHECK_GT(fog.size.z(), 0.0f) << "DistanceFog.size 各分量必须 > 0";
+    CHECK_GE(fog.radius, 0.0f) << "DistanceFog.radius（外侧圆角壳厚度）必须 >= 0";
+    CHECK_GT(fog.sigma, 0.0f)
+        << "DistanceFog.sigma（消光系数 1/m）必须 > 0：要关请用 DistanceFog::enabled=false";
+    CHECK_GE(fog.color.r, 0.0f) << "DistanceFog.color 各通道必须 >= 0";
+    CHECK_GE(fog.color.g, 0.0f) << "DistanceFog.color 各通道必须 >= 0";
+    CHECK_GE(fog.color.b, 0.0f) << "DistanceFog.color 各通道必须 >= 0";
+    CHECK(fog.attenuation != FogAttenuation::kUniform)
+        << "DistanceFog.attenuation 不得为 kUniform（w≡1 = 盒面硬缝）；"
+           "软边用 kLinear / kExponential / kQuadratic";
+
+    DistanceFogShape out;
+    out.center = fog.center;
+    // 容器半尺寸 = 内盒半 (size/2) + 外侧圆角壳厚度 radius（与 LowerPointFog 同一口径）。
+    out.bound_half = Vec3f(fog.size.x() * 0.5f + fog.radius,
+                           fog.size.y() * 0.5f + fog.radius,
+                           fog.size.z() * 0.5f + fog.radius);
+    out.radius = fog.radius;
+    out.attenuation = static_cast<int>(fog.attenuation);
+    out.sigma = fog.sigma;
+    out.color = Vec3f(fog.color.r, fog.color.g, fog.color.b);
+    return out;
 }
 
 // 某 OBB（团容器 / 点光源影响球）覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒
