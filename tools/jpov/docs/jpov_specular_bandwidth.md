@@ -14,6 +14,9 @@
 > - 点光源：`jpov_skylight_viewer --capture-point-specular`；gold `test/object3d:jpov_point_specular_gold_test`
 > - 水皮：`--capture-water-sun`
 >
+> **没有"关闭带宽"的开关**：`DirectionalLight::angular_radius` 填 0 会被 renderer CHECK 打回；
+> `PointLight::physical_radius` 填 0 由 CPU 侧钳到 `kMinPointLightAngularRadiusRad`（≈1 屏幕像素）。
+>
 > 仍未做：点光的**可见性 v**（盘被挡一部分时的能量）、像素足迹（`dFdx(H)` 斜率方差）
 > 并入 PBR 的 `a2`、三份 `distributionGGX` 收敛成一份共享 GLSL。
 

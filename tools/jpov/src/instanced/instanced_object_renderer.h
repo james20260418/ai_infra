@@ -834,14 +834,16 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
     float dist = length(L);
     if (dist >= light.radius) return;
 
-    vec3 light_dir = L / dist;
+    vec3 light_dir = L / max(dist, 1e-6);   // dist=0（片元与灯重合）时不留 0/0 → NaN
     float attenuation = 1.0 - (dist / light.radius);
 
     // ── Representative Point (Karis 2013) ──
     // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
     // 的有效入射方向（**只改方向**）。它的作用只是让金属面在点光下别全黑；
     // “灯越大、高光越柔/越宽”是下面 θ 那一项（带宽）的事。
-    // physicalRadius = 0 时退化为原始点光源行为。
+    // 注意：CPU 侧已把 physicalRadius 钳到 kMinPointLightAngularRadiusRad（见
+    // src/lights_texture.cc），所以这里实际拿到的最小是 1.5 mm；下面的 `> 0` 判断
+    // 只是防御（shader 单元自洽，不依赖 CPU 一定钳过）。
     float sourceRadius = light.physicalRadius;
     vec3 spec_dir = light_dir;  // default: same as point light
     if (sourceRadius > 0.0) {
@@ -870,12 +872,17 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         float NdotV = max(dot(N, V), 0.0);
         vec3 F0 = mix(vec3(0.04), base_color, metallic);
         vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-        // 光源角半径 θ（**逐像素**）：球在 P 处张的角 = asin(R/dist)。与平行光同一条公式：
-        // a2_eff = roughness⁴ + (θ/2)²（半向量只偏 θ/2；写 θ² 会过宽 4 倍）。
-        // 没有它：r=0 的表面在点光下 D ≡ 0（全黑）；有光泽的表面也只能得到「点」高光，
-        // 与灯泡/灯笼的实际尺寸无关（代表点只改方向，不改 lobe 宽度）。
-        float theta = asin(clamp(sourceRadius / max(dist, sourceRadius), 0.0, 1.0));
-        float a2 = min(ggxAlpha2(roughness) + 0.25 * theta * theta, 0.25);
+        // 光源角半径 θ（**逐像素**）：球在 P 处张的角 = asin(R/dist)，同平行光那条公式
+        // `a2_eff = roughness⁴ + (θ/2)²`（半向量只偏 θ/2；写 θ² 会过宽 4 倍）。
+        // R 已由 CPU 侧钳到 `kMinPointLightAngularRadiusRad`（lights_texture.cc）⇒ 永不会退化成 δ。
+        // 性能：asin 是逐灯逐像素一次超越函数；x 很小时（远处小灯，最常见）asin(x) 与 x 的差
+        //   ≤ x³/6：x<0.1 时 (θ/2)² 的相对误差 <0.35%，直接省掉这次 asin。
+        // 数值：clamp 盖住 asin 定义域；dist→0 时 x→1，再由 a2 上限 0.25 兜底。
+        float x = clamp(sourceRadius / max(dist, sourceRadius), 0.0, 1.0);
+        float theta = (x < 0.1) ? x : asin(x);
+        // ⚠️ 上限只能钳**带宽那一项**：GGX 的 a2 = roughness⁴ 本来就可以到 1（r=1 的漫反射面），
+        //   把整个 a2 钳到 0.25 会改掉粗糙面的高光（实测 D 峰值 0.318 → 1.27、变窄变亮）。
+        float a2 = ggxAlpha2(roughness) + min(0.25 * theta * theta, 0.25);
         float D = distributionGGX(N, H, a2);
         float G = geometrySmith(N, V, spec_dir, roughness);
         vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);

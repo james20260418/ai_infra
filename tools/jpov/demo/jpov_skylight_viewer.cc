@@ -716,15 +716,10 @@ int RunCaptureWaterSun(const std::string& out_dir) {
 //   ⇒ 太阳的像精确落在画面正中（原点）。太阳本身也在画面上方 ⇒ 一张图里能直接比较
 //   「天上的日盘」与「地上的像」的大小与亮度。
 //
-// 出图（同一机位/同一太阳，只切对照条件）：
-//   mirror_r0_pure.png             关 env/ambient ⇒ 除太阳的像外地面纯黑（最干净的一张）
-//   mirror_r0_pure_no_bandwidth.png 同上，但 θ = 1e-6（等效 δ）⇒ 亮盘必须**消失**
-//   mirror_r0_mirror.png           开 env/SSR ⇒ 正常镜子观感（映天空与方块）+ 太阳的像
-//   mirror_r0_mirror_no_bandwidth.png 同上，θ = 1e-6
-//   mirror_r02_pure.png            roughness=0.02 的同一条对照（θ 主导，应与 r=0 几乎同图）
-//
-// "θ = 1e-6" 不是调试开关：它就是光源的角半径这个**物理参数**本身 —— 缩到比像素尺寸
-//   小 5 个量级，等价于「没有带宽的 δ 光源」，也正是修之前 shader 完全忽略 θ 时的行为。
+// 出图（同一机位/同一太阳，只切地面条件）：
+//   mirror_r0_pure.png     关 env/ambient ⇒ 除太阳的像外地面纯黑（最干净的一张）
+//   mirror_r0_mirror.png   开 env/SSR ⇒ 正常镜子观感（映天空与方块）+ 太阳的像
+//   mirror_r02_pure.png    roughness=0.02 的同一条对照（θ 主导，应与 r=0 几乎同图）
 int RunCaptureMirrorSpecular(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 镜面高光带宽（headless）";
@@ -772,42 +767,21 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
         app.ClearAmbientOverride();
     };
 
-    // 只换光源的**角半径**（其余方向/颜色/强度全取当前天光推导值）：
-    //   0    = 用默认（太阳的 0.004654 rad）；
-    //   1e-6 = 等效 δ（没有带宽）—— 与修之前 shader 忽略 θ 时的行为一致。
-    auto shoot_with_angular_radius = [&](float theta, const char* name) {
-        if (theta > 0.0f) {
-            jpov::DirectionalLight sun =
-                jpov_skylight::MakeSkyLighting(app.deg_, /*tricolor_ambient=*/false).dir_light;
-            sun.angular_radius = theta;
-            app.SetSunOverride(sun);
-        } else {
-            app.ClearSunOverride();
-        }
-        shoot(name);
-        app.ClearSunOverride();
-    };
-
-    // ① 钱图：纯太阳高光。修复后正中一颗亮盘 + 一枚竖向拉长的拖尾
+    // ① 钱图：纯太阳高光。正中一颗亮盘 + 一枚竖向拉长的拖尾
     //    （低太阳掠过地面时 lobe 沿视线方向被投影拉长，是正确行为）。
     app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
     only_sun_specular();
-    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r0_pure");
+    shoot("mirror_r0_pure");
 
-    // ② 负向对照：同一块地面、同一颗太阳，只把 θ 缩到 1e-6（等效 δ）⇒ 亮盘必须消失。
-    //    这张就是「没有带宽」的样子（= 修之前那一版）。
-    shoot_with_angular_radius(/*theta=*/1.0e-6f, "mirror_r0_pure_no_bandwidth");
-
-    // ③ 正常镜子观感：地面映天空与散布方块，太阳的像叠在上面（带带宽）。
+    // ② 正常镜子观感：地面映天空与散布方块，太阳的像叠在上面。
     full_mirror();
-    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r0_mirror");
-    shoot_with_angular_radius(/*theta=*/1.0e-6f, "mirror_r0_mirror_no_bandwidth");
+    shoot("mirror_r0_mirror");
 
-    // ④ 对照：roughness=0.02（JPOV 镜面地板预设）。修复前被 `max(denom,1e-7)` 护栏
-    //    钳成一块暗糊团（越光滑反而越暗）；修复后与 r=0 几乎同一颗盘（θ 主导）。
+    // ③ roughness=0.02（JPOV 镜面地板预设）：修之前被 `max(denom,1e-7)` 护栏钳成一块
+    //    暗糊团（越光滑反而越暗）；现在与 r=0 几乎同一颗盘（θ 主导）。
     app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.02f));
     only_sun_specular();
-    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r02_pure");
+    shoot("mirror_r02_pure");
 
     app.ClearSunOverride();
     app.ClearAmbientOverride();
@@ -831,7 +805,6 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
 //   另画一个自发光小球（直径 = 2R）当灯的参照物，一眼能对上「天上的灯 / 地上的像」。
 //
 // 出图（同一机位，只改灯的物理半径）：
-//   point_r0.000_pure.png   等效 δ（R=0）⇒ 地面上**没有**灯的像，是修之前的行为
 //   point_r0.020_pure.png   小球灯
 //   point_r0.100_pure.png   中等（≈人手一个灯笼）
 //   point_r0.500_pure.png   大球灯 ⇒ 像最大最柔
@@ -882,12 +855,7 @@ int RunCapturePointSpecular(const std::string& out_dir) {
         app.SetAmbientOverride(no_ambient);
     };
 
-    // ① 等效 δ（R=0）：修之前的行为 —— 地面上没有灯的像。
-    pure();
-    app.SetPointLamp(/*physical_radius*/ 0.0f);
-    shoot("point_r0.000_pure");
-
-    // ② 灯越来越大 ⇒ 地上的像越来越大越柔（带宽 = (θ/2)²，θ = asin(R/3.5m)）。
+    // ① 灯越来越大 ⇒ 地上的像越来越大越柔（带宽 = (θ/2)²，θ = asin(R/3.5m)）。
     struct LampShot {
         float radius;
         const char* name;
@@ -898,6 +866,7 @@ int RunCapturePointSpecular(const std::string& out_dir) {
         {0.50f, "point_r0.500_pure"},
     };
     for (const LampShot& s : lamp_shots) {
+        pure();
         app.SetPointLamp(s.radius);
         shoot(s.name);
     }
