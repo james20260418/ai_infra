@@ -5,6 +5,7 @@
 #include "tools/jpov/src/lights_texture.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）。
@@ -67,6 +68,16 @@ void UploadLightDataTexture(const RenderCommandList& cmds, unsigned int tex) {
     std::vector<float> data(static_cast<size_t>(count) * kLightDataRows * 4, 0.0f);
     for (int i = 0; i < count; ++i) {
         const PointLight& l = cmds.point_lights[static_cast<size_t>(i)];
+        // 防御式检查（每帧 1 次、每盏灯 4 条，代价可忽略）：这几个值会直接进片元的
+        // 分母/指数，NaN 或 0 会让整块像素静默变黑，比崩掉难查得多。
+        // ⚠️ NaN 也会被这些比较捕获（NaN 与任何数比较都是 false）。
+        CHECK_GT(l.linear_radius, 0.0f)
+            << "PointLight::linear_radius 必须 > 0（衰减分母）";
+        CHECK_GE(l.intensity, 0.0f) << "PointLight::intensity 必须 >= 0";
+        CHECK_GE(l.physical_radius, 0.0f) << "PointLight::physical_radius 必须 >= 0";
+        CHECK(std::isfinite(l.position.x()) && std::isfinite(l.position.y()) &&
+              std::isfinite(l.position.z()))
+            << "PointLight::position 出现 NaN/inf";
         const size_t row0 = static_cast<size_t>(i) * 4;
         const size_t row1 = (static_cast<size_t>(count) + static_cast<size_t>(i)) * 4;
         const size_t row2 = (static_cast<size_t>(count) * 2 + static_cast<size_t>(i)) * 4;
@@ -78,7 +89,10 @@ void UploadLightDataTexture(const RenderCommandList& cmds, unsigned int tex) {
         data[row1 + 1] = l.color.g;
         data[row1 + 2] = l.color.b;
         data[row1 + 3] = l.intensity;
-        data[row2 + 0] = l.physical_radius;
+        // 带宽下限：physical_radius 填 0 时不能退化成 δ（δ 光源打在光滑面上 D ≡ 0
+        // ⇒ 高光静默消失）。这里统一钳到 kMinPointLightAngularRadiusRad，
+        // 保证片元里的 θ = asin(R/dist) 永不为 0（单一出处，shader 不再各写一份）。
+        data[row2 + 0] = std::max(l.physical_radius, kMinPointLightAngularRadiusRad);
     }
 
     // 在**本单元**（kTexUnitLightData）上做上传，并把 active texture 还原：

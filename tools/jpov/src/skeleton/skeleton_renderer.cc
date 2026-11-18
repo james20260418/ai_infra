@@ -618,6 +618,8 @@ void SkeletonRenderer::UploadSunData(
     glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"),
                 sun->color.r, sun->color.g, sun->color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunIntensity"), sun->intensity);
+    // 光源角半径（弧度）：GGX 的带宽下限（见 shader 里 uSunAngularRadius）。
+    glUniform1f(shader_mgr.GetUniform(prog, "uSunAngularRadius"), sun->angular_radius);
 
     // 各级联 far 距离 + 阴影淡出范围。
     CHECK_LE(cascade_count, ShadowConfig::kMaxCascades);

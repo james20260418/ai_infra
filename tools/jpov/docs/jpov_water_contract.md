@@ -1,6 +1,6 @@
 # 水体 / 水皮 / 天球折射 —— 契约（2026-11-16 Danis 定稿）
 
-> 本文只写**职责边界与口径**，不写实现教程。已知缺陷见 `tools/jpov/known_issue.md` §10 / §11。
+> 本文只写**职责边界与口径**，不写实现教程。已知缺陷见 `tools/jpov/known_issue.md` §10；镜面高光的带宽见 `docs/jpov_specular_bandwidth.md`。
 > 目的：把"水体这块到底谁负责什么"压缩成三条可背诵的判据，不再每次重新推导。
 
 ---
@@ -47,7 +47,7 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S)
 
 **为什么这是精确的**：水体水平均匀 ⇒ 直线与折线经过同一组深度，`J` 与剩余衰减都只依赖深度，测度换算正好等于 `dτ/dt` ⇒ 换元前后积分值相同。**唯一的损失是成像位置**（哪条线上的哪个物体），那是明确不管的。
 
-**前提（写死）**：这条精确性依赖**水平均匀**。水体形状化（体素/任意形状）后必须改成沿折射路径 DDA —— 见 `known_issue.md` §11.5。
+**前提（写死）**：这条精确性依赖**水平均匀**。水体形状化（体素/任意形状）后必须改成沿折射路径 DDA —— 见 `docs/jpov_specular_bandwidth.md` §1.5。
 
 ### 1.3 雾只在水上（约束，不是假设）
 
@@ -100,7 +100,7 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S)
 也是错的（会把 sun 乘上 A）；正确形式见上表。
 
 ⚠️ 没有 `θ` 之前这一项是 δ（点值无穷、逐像素只能拿到 0 或 ∞），所以旧版才写“不做”；
-带宽来源与业界解法见 `known_issue.md` §11。
+带宽来源与业界解法见 `docs/jpov_specular_bandwidth.md`。
 
 接 SSR 时三个易错点：
 

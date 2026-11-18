@@ -138,7 +138,7 @@ void main() {
     H = (hlen > 1.0e-6) ? (H / hlen) : vec3(0.0, 1.0, 0.0);
     vec3 dHdx = dFdx(H);
     vec3 dHdy = dFdy(H);
-    // 像素足迹并入斜率方差（specular AA 口径，known_issue §11.3③）：
+    // 像素足迹并入斜率方差（specular AA 口径，docs/jpov_specular_bandwidth.md §1.3③）：
     // 平面法线恒定，H 的变化全来自视线 ⇒ 掠射时这一项自动变大，正好抵消投影压缩。
     float footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
     vec3 sun_spec = vec3(0.0);

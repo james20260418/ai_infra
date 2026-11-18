@@ -316,7 +316,7 @@ TEST(WaterMediumMath, DecayLengthLimits) {
 }
 
 // L0：水上视线在水里的**路径长度**要按折射后的角度算（τ 比值 = cosθi/cosθw < 1）。
-// 这条守的是"掠射时不要多算 50% 衰减"——曾经的实现偏差（见 known_issue §11.4）。
+// 这条守的是"掠射时不要多算 50% 衰减"——曾经的实现偏差（见 docs/jpov_specular_bandwidth.md §1.4）。
 TEST(WaterMediumMath, RefractedViewPathIsShorter) {
     WaterMediumSample m = PureWater();
     m.has_sun = false;   // 只看 τ，不看 S

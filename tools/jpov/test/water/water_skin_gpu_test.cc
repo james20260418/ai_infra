@@ -503,7 +503,7 @@ TEST(WaterSkinGpu, DepthRejectionLeavesLayerEmpty) {
 
 // 水上：太阳的像（解析 GGX，盘状光源）必须逐像素等于 CPU 参考。
 //
-// 口径（known_issue §11.6）：
+// 口径（docs/jpov_specular_bandwidth.md §1.6）：
 //   · 带宽 = (θ/2)²（半向量只偏一半），不是 θ²；
 //   · 出射 = E·F·D·G/(4 NoV NoL)·NoL，F 用**同一个**界面菲涅尔（与探针支路同源）；
 //   · 太阳项是**加法**，不吃任何 SSR 权重（此刻还没有 SSR）。

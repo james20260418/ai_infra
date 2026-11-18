@@ -485,14 +485,18 @@ struct PointLight {
     Color color;              // 光源**色调/色温**（暖白/火光/霓虹等），区间 [0,1]
     float linear_radius;      // 线性衰减的最大有效距离（米）
 
-    // 光源球体的物理半径（米）。
+    // 光源球体的物理半径（米）。**这是光源的几何属性**，两个作用：
     //
-    // Representative Point（Karis 2013, 'Real Shading in Unreal Engine 4')：
-    // 默认 0 = 退化到纯点光源；非零时把光源当作一个有体积的球面，
-    // 从光源球上选一个"代表点"（沿反射方向）来打 specular，
-    // 让粗糙/金属表面也能从球的不同区域命中 specular lobe，
-    // 避免金属面在纯点光源下"全黑"。这是光源变亮(面积大)时
-    // 高光会柔化/扩大的原理。
+    //  ① Representative Point（Karis 2013, 'Real Shading in Unreal Engine 4'）：
+    //     把光源当作有体积的球，从光源球上选一个“代表点”（沿反射方向）来打 specular，
+    //     避免金属/光滑面在纯点光源下“全黑”。
+    //  ② 镜面高光的**带宽下限**（逐像素角半径 θ = asin(R/dist)，并进 `a2 += (θ/2)²`）：
+    //     这才是“灯越大高光越柔/越宽”的来源 —— ① 只挪方向，**不改 lobe 宽度**。
+    //
+    // ⚠️ **不需要**、也**不允许**把带宽关掉：填 0 时 JPOV 按
+    //   `kMinPointLightAngularRadiusRad`（≈1 屏幕像素的角半径）兜底，不会退化成 δ。
+    //   理由：δ 光源打在光滑面上 D ≡ 0 ⇒ 高光静默消失（镜子里看不到灯的像），
+    //   那是数值陷阱而不是物理（真实灯的半径永远 > 0）。想要“灯的圆盘像”就填真实半径。
     // 典型值：灯泡 ~0.02–0.05，方块大小 ~0.5。
     float physical_radius = 0.0f;
 
@@ -506,6 +510,17 @@ struct PointLight {
     // 后续支持其他衰减函数时可通过此接口区分。
     float effective_range() const { return linear_radius; }
 };
+
+// 点光源的**最小角半径**（弧度）。
+//
+// 语义：`PointLight::physical_radius` 填 0（或极小的值）时，JPOV 在把光源数据上传成
+// 纹理时把它钳到这个下限（见 src/lights_texture.cc），于是光滑表面仍然拿得到一个
+// **可采样**的带宽，而不是退化成 δ（δ × δ ⇒ D ≡ 0 ⇒ 高光静默消失）。
+//
+// 取值的依据：720p / 60° 垂直 FOV 下 1 个屏幕像素 ≈ 0.0015 rad。带宽小于一个像素
+// 就又会掉回“有时命中有时不命中”的闪烁区间，所以下限取 1 像素级。
+// ⚠️ 它只影响**带宽**（`a2 += (θ/2)²`），对代表点的方向影响可忽略（1.5 mm）。
+inline constexpr float kMinPointLightAngularRadiusRad = 0.0015f;
 
 // 点雾体的衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
 //
