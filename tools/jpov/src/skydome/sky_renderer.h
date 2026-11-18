@@ -25,6 +25,7 @@
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/render_command.h"   // WaterWaves（可选的水面波浪配置）
 #include "tools/jpov/src/shader_manager.h"
 
 namespace jpov {
@@ -78,6 +79,10 @@ uniform int uSkyOutput;
 uniform int   uSkyBendOn;     // 0 = 关
 uniform float uSkyBendIor;    // 界面折射率（> 0）
 uniform float uSkyBendLevelY; // 水面世界高度（米，y-up）
+// 天球折射消费水面 displacement（2026-11-18）：有波浪时用法线做矢量 Snell，
+// 否则水下 Snell 窗边缘永远是个死圆，而水皮那边按真实法线判 TIR ⇒ 窗缘失配。
+uniform int   uSkyBendWaveOn;      // 0 = 用平面法线（零回归）
+uniform float uSkyBendPixelAngle;  // 每像素弧度（谱截断用，与水皮同口径）
 
 uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_FragCoord→NDC
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
@@ -307,6 +312,10 @@ float discGlow(float ang, float disc_radius, float strength, float glow_width_sc
 
 const float kPadSin = 0.0523359562;   // sin(3°)：环边气侧仰角下限（契约 §3.4）
 
+// 和水皮 `kHorizonEps` **必须一致**（≈1 px @720p/60°）。水面与天空的"有没有水面"
+// 判定卡在同一条线上时，边界那一行会露地色/漏反射 —— 两趟必须用同一个钳位。
+const float kHorizonEps = 0.0016;
+
 // 天球方向的水面折射：**只在方向入口做一次**，其余天空逻辑（Preetham / 盘 / 光晕 /
 // 地色）一行不改。输出的 gain 是能量因子（水内观察到的天球要 ×n²）。
 //   · 射线没穿过水面（t ≤ 0）或与水面平行 ⇒ 原样返回；
@@ -317,6 +326,16 @@ vec3 SkyBendDir(vec3 raw, out float gain) {
     if (!(uSkyBendIor > 0.0)) {
         return raw;
     }
+    // 地平线钳位（与水皮同一条规则）：±1px 内的射线都拉到水面一侧，
+    // 否则两趟对「这一像素有没有水面」的判定会差一行。
+    if (abs(raw.y) < kHorizonEps) {
+        float sgn = (uCamPos.y < uSkyBendLevelY) ? 1.0 : -1.0;
+        float xz = length(raw.xz);
+        if (xz > 1.0e-6) {
+            float s = sqrt(max(0.0, 1.0 - kHorizonEps * kHorizonEps)) / xz;
+            raw = vec3(raw.x * s, sgn * kHorizonEps, raw.z * s);
+        }
+    }
     if (abs(raw.y) < 1.0e-6) {
         return raw;
     }
@@ -325,15 +344,50 @@ vec3 SkyBendDir(vec3 raw, out float gain) {
         return raw;   // 射线背离水面：不跨介质
     }
     bool from_water = (uCamPos.y < uSkyBendLevelY);
+
+    // ── 法线：有波浪时取高度场在**平面交点处**的解析梯度 ──
+    // 位移对法线是一阶小量（真实交点与平面交点差 O(波高)），所以不需要精确求交，
+    // 省掉 12 次二分。与水皮那边的 N 只差 O(h·∂N)，窗缘一致性足够。
+    vec3 N = vec3(0.0, 1.0, 0.0);
+    // 性能：明显全内反射的像素（水皮那边 α=1 会把天空整片盖掉）不需要精确法线——
+    // 先用平面法线判一次，确定超临界就直接返回，省掉 12 次二分。
+    // 只有窗缘附近（判据跨界的窄带）才走完整求交，避免"漏牙龈"那类两趟错位。
+    if (uSkyBendWaveOn != 0 && uWaveCount > 0) {
+        // 只在**明显**超临界时提前退出：留 15% 余量（临界 cos≈0.661 ⇒ 0.56），
+        // 否则「平面判 TIR、波浪法线判窗内」的那条窄带会拿到未折射的天空，
+        // 在水皮以 α=F 透出时形成一条缝（正是之前"漏牙龈"的同类问题）。
+        float cos_plane = clamp(abs(raw.y), 0.0, 1.0);
+        float eta_plane = (uCamPos.y < uSkyBendLevelY) ? uSkyBendIor : (1.0 / uSkyBendIor);
+        if (cos_plane < 0.56 &&
+            eta_plane * eta_plane * (1.0 - cos_plane * cos_plane) >= 1.0) {
+            return raw;   // 已确定 TIR：方向原样返回（会被水皮盖掉）
+        }
+    }
+    if (uSkyBendWaveOn != 0 && uWaveCount > 0) {
+        // ⚠️ 必须和水皮**调同一个求交函数**、拿到同一个 P/N。
+        //    掠射时 t 对波高极敏感（Δt ≈ h/|rd.y|），用「平面交点处的梯度」近似时，
+        //    λ=3.5 m 的波上法线能差近一个相位 ⇒ 两趟对 TIR 的判定不一致 ⇒
+        //    暗环里漏出一块块天空色（用户说的"漏牙龈"）。
+        //    水皮本来就为同一批像素做 12 次二分，这边多花的成本可以接受。
+        float t_wave = t;
+        vec3 pos_w;
+        vec3 nrm_w;
+        float footprint = uSkyBendPixelAngle * t / max(abs(raw.y), 0.15);
+        if (WaveSurfaceHit(uCamPos, raw, uSkyBendLevelY, footprint, t_wave, pos_w, nrm_w)) {
+            N = nrm_w;
+        }
+    }
+
+    // ── 矢量 Snell（N 不再是 (0,1,0)，不能用「缩放 xz」那套）──
+    vec3 Nn = (dot(raw, N) < 0.0) ? N : -N;   // 法线朝向入射侧
+    float cos_i = clamp(-dot(raw, Nn), 0.0, 1.0);
     float eta = from_water ? uSkyBendIor : (1.0 / uSkyBendIor);
-    float sin2_i = max(0.0, 1.0 - raw.y * raw.y);
-    float sin2_t = eta * eta * sin2_i;
+    float sin2_t = eta * eta * max(0.0, 1.0 - cos_i * cos_i);
     if (sin2_t >= 1.0) {
         return raw;   // 全内反射：方向不变（留给水皮的环外分支）
     }
     float cos_t = sqrt(max(0.0, 1.0 - sin2_t));
-    float k = (sin2_i > 1.0e-12) ? sqrt(sin2_t / sin2_i) : eta;
-    vec3 out_dir = normalize(vec3(raw.x * k, sign(raw.y) * cos_t, raw.z * k));
+    vec3 out_dir = normalize(eta * raw + (eta * cos_i - cos_t) * Nn);
     // 环边 padding（契约 §3.4）：气侧仰角钳到 ≥3°，避开天空模型的地平线奇点与窗缘硬边。
     // **钳方向不钳颜色**：C0 连续，且保留方位依赖（太阳侧白天顶侧暗）。
     if (out_dir.y < kPadSin) {
@@ -536,10 +590,13 @@ void main() {
     // Pre-condition: cam.up 非零、target != position
     //   output: 本趟画什么（见 SkyOutput）。kAtmoOnly = 只出大气色（不含日月盘/光晕），
     //           供远景仰角雾当收敛色；kEnvProbe = 环境反射探针（不含盘/晕，下半球用地色）。
+    // waves：可选的水面波浪配置。非空且 enabled 时，天球折射用**波浪法线**做矢量
+    //   Snell（水下 Snell 窗边缘随波起伏）；nullptr ⇒ 平面法线（逐字节零回归）。
     static void DrawSky(const SkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr,
-                        SkyOutput output = SkyOutput::kFull);
+                        SkyOutput output = SkyOutput::kFull,
+                        const WaterWaves* waves = nullptr);
 
     // ---- DrawSkyEnvCube ----
     // 把程序化天光渲进一张**立方体贴图**（环境镜面 IBL 的反射源）。

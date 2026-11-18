@@ -1666,8 +1666,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 水场景里那条“地缝”由水皮多盖几像素解决（见 water_skin_shader.h 的地平线钳位），
             // 不用填色兜底 —— 填色会让陆地场景的色调被水污染（Danis 2026-11-17 定）。
 
+            // 水下时天球折射要消费水面波浪法线（Snell 窗边缘随波起伏）。
+            // 相机在水上 / 没开波浪 ⇒ nullptr ⇒ 平面法线（逐字节零回归）。
+            const WaterWaves* sky_waves =
+                (cmds.water.has_value() && cmds.water->waves.enabled)
+                    ? &cmds.water->waves
+                    : nullptr;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves);
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
             // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
@@ -1676,7 +1682,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly, sky_waves);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
             // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
@@ -1697,6 +1703,13 @@ void Renderer::Render(const RenderCommandList& cmds,
                     // 探针必须与主天空用**同一份**命令：下半球的水面语义在这里生效。
                     SkyRenderer::DrawSkyEnvCube(sky_cmd_for_draw, kSkyEnvCubeSize,
                                                 sky_env_tex_, sky_env_fbo_, shader_mgr_);
+                    // mip 链：MIN_FILTER 一直是 LINEAR_MIPMAP_LINEAR（注释也写着
+                    // 「粗糙度→mip 级的廉价预滤波」），但**从来没生成过 mip**
+                    // ⇒ 所有 LOD>0 的采样都在读未定义的层。
+                    // 水面波浪现在按「像素内法线方差」选 LOD（specular AA），必须真的有链。
+                    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_tex_);
+                    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+                    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
                 }
             }
 
@@ -2077,6 +2090,16 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.level_y = cmds.water->level_y;
                 wsi.ior = cmds.water->ior;
                 wsi.medium = water_medium_ptr;
+                // 波浪（法线扰动/高度置换）：enabled=false 或 num_waves=0 ⇒ 纯平面（零回归）。
+                wsi.waves = cmds.water->waves.enabled ? &cmds.water->waves : nullptr;
+                wsi.wave_debug = cmds.water->waves.debug;
+                if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
+                    const unsigned int flow_gl =
+                        texture_mgr_.GetGLTexture(cmds.water->waves.flow_texture_id);
+                    CHECK_NE(flow_gl, 0u)
+                        << "water.waves.flow_texture_id 未注册到 TextureManager";
+                    wsi.wave_flow_tex = flow_gl;
+                }
                 // 太阳的像：与介质分开传（介质可关，水面依然该有日盘像）。
                 if (eff_sun.has_value()) {
                     const Vec3f sd = eff_sun->direction;   // 传播方向

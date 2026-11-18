@@ -274,6 +274,8 @@ cc_library(
         ":shader_manager",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
+        # 天球折射消费水面波浪法线（part 1）
+        "//tools/jpov/src/water:water_wave_math",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

@@ -7,6 +7,9 @@
 
 #include "tools/jpov/src/skydome/sky_renderer.h"
 
+#include "tools/jpov/src/water/water_wave_math.h"     // kWaveGravity / 谱参数
+#include "tools/jpov/src/water/water_wave_shader.h"   // kWaterWaveGlsl（折射用其法线）
+
 #include <cmath>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
@@ -110,9 +113,50 @@ bool Mat4Invert(const float m[16], float out[16]) {
 
 namespace jpov {
 
+namespace {
+
+// 把波浪谱传给天空 program（天球折射要用它的法线）。
+// ⚠️ 逐个 glUniform4f/2f：MinGW 的 gl_loader 没有数组版（*fv）。
+// ⚠️ 天光 pass **不绑 flow map**（part 1 里 flow 未启用）；接 flow 时要同步，
+//    否则大尺度流向上窗缘会有偏差（known_issue §10.12b）。
+void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves& w) {
+    const int count = std::min(w.num_waves, WaterWaves::kMaxWaves);
+    glUniform1i(mgr.GetUniform(prog, "uWaveCount"), count);
+    const int l_loc = mgr.GetUniform(prog, "uWaveL[0]");
+    const int d_loc = mgr.GetUniform(prog, "uWaveDir[0]");
+    const float k_two_pi = 6.28318530717958647692f;
+    for (int i = 0; i < count; ++i) {
+        const WaterWave& wv = w.waves[i];
+        // 与 water_skin_renderer 同一口径：非法波长直接 crash，不静默跳过
+        //（静默跳过会让天光/水皮用两套谱，窗缘必然错位）。
+        CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
+        CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
+        const float k = k_two_pi / wv.wavelength_m;
+        const float omega = std::sqrt(water::kWaveGravity * k) * w.speed_scale;
+        glUniform4f(l_loc + i, k, omega, wv.amplitude_m, wv.phase_rad);
+        const float dl = std::sqrt(wv.dir_x * wv.dir_x + wv.dir_z * wv.dir_z);
+        const bool has_dir = dl > 1.0e-6f;
+        glUniform2f(d_loc + i, has_dir ? (wv.dir_x / dl) : 1.0f,
+                    has_dir ? (wv.dir_z / dl) : 0.0f);
+    }
+    glUniform1f(mgr.GetUniform(prog, "uWaveTime"), w.time_s);
+    glUniform1f(mgr.GetUniform(prog, "uWaveFadeStart"), w.fade_start_m);
+    glUniform1f(mgr.GetUniform(prog, "uWaveFadeEnd"), w.fade_end_m);
+    glUniform1f(mgr.GetUniform(prog, "uWaveFlowAlign"), w.flow_align);
+    glUniform1f(mgr.GetUniform(prog, "uWaveFlowWindGain"), w.flow_wind_gain);
+    glUniform1f(mgr.GetUniform(prog, "uWaveFlowStrength"), 0.0f);
+    glUniform2f(mgr.GetUniform(prog, "uWaveFlowUvScale"), 0.0f, 0.0f);
+    glUniform1i(mgr.GetUniform(prog, "uWaveHasFlow"), 0);
+    glUniform1i(mgr.GetUniform(prog, "uWaveDisplace"), 1);
+    glUniform1i(mgr.GetUniform(prog, "uWaveDebug"), 0);
+}
+
+}  // namespace
+
 void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
-                          ShaderManager& shader_mgr, SkyOutput output) {
+                          ShaderManager& shader_mgr, SkyOutput output,
+                          const WaterWaves* waves) {
     // ---- 构建 相机 逆(Proj*View) ----
     const float aspect = static_cast<float>(fbo_w) / static_cast<float>(std::max(fbo_h,1));
     const float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
@@ -133,7 +177,17 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     // 太阳位置（sun_dir 是 y-up 单位向量，直接上传）
 
     // ---- 渲染（全屏三角形，画当前绑定 FBO 的整张背景）----
-    unsigned int prog = shader_mgr.GetOrCreate("sky", {kSkyVs, kSkyFs});
+    // 波浪片段必须拼进天空 FS（天球折射要用法线）。一次性构造、静态缓存。
+    static const std::string kSkyFsWithWaves = [] {
+        std::string s(kSkyFs);
+        const std::string ver = "#version 330 core\n";
+        const size_t pos = s.find(ver);
+        if (pos != std::string::npos) {
+            s.insert(pos + ver.size(), water::kWaterWaveGlsl);
+        }
+        return s;
+    }();
+    unsigned int prog = shader_mgr.GetOrCreate("sky_waves", {kSkyVs, kSkyFsWithWaves.c_str()});
     glUseProgram(prog);
 
     glUniformMatrix4fv(shader_mgr.GetUniform(prog, "uInvVP"), 1, GL_FALSE, inv_vp);
@@ -191,6 +245,17 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendOn"), bend_on);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendIor"), bend_ior);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendLevelY"), bend_level);
+
+    // 天球折射是否消费波浪法线：只有「水面折射开 + 有波浪」时才开。
+    const bool wave_on = (waves != nullptr) && waves->enabled && waves->num_waves > 0 &&
+                         bend_on != 0;
+    glUniform1i(shader_mgr.GetUniform(prog, "uSkyBendWaveOn"), wave_on ? 1 : 0);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSkyBendPixelAngle"),
+                2.0f * std::tan(0.5f * fov_rad) /
+                    static_cast<float>(std::max(fbo_h, 1)));
+    if (wave_on) {
+        UploadWaveSpectrum(shader_mgr, prog, *waves);
+    }
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);
