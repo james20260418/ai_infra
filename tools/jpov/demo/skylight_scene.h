@@ -154,6 +154,25 @@ inline jpov::PBRMaterial MirrorClutterMaterial() {
         /*roughness*/ 0.6f);
 }
 
+// ── 镜面高光带宽验收（光源角半径 θ）用的大镜面 ──
+//
+// **为什么 base_color 取 0.42 而不是 0.95**：环境镜面会把天光整片映上来，亮银镜在
+//   「太阳的像」那个方向映的正是日盘周围最亮的天光 ⇒ 两者一起过曝成白，日盘的像
+//   反而看不见了（实测 0.95 时被天光反射完全淹没）。0.42 的暗银镜既能看出"这是镜子"，
+//   又给太阳的像留出对比度。
+//
+// roughness = 0 是 δ BRDF 的极端：没有光源角半径（带宽）时 D 恒为 0 ⇒ 地面上一个高光像素
+// 都没有（docs/jpov_specular_bandwidth.md）。r=0.02 是 JPOV 镜面地板预设，修复前被 1e-7 护栏钳成暗糊团。
+inline constexpr float kMirrorFloorBaseColor = 0.42f;
+
+inline jpov::PBRMaterial MirrorFloorMaterial(float roughness) {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {kMirrorFloorBaseColor, kMirrorFloorBaseColor,
+                   kMirrorFloorBaseColor, 1.0f},
+        /*metallic*/ 1.0f,
+        /*roughness*/ roughness);
+}
+
 // ── 反射地面材质阶梯（2026-11-02，SSR 粗糙度验收用）──
 //
 // 四段刻意只差 metallic / roughness（albedo 各自取该材质的常识值），用来回答一个问题：

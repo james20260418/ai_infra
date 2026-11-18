@@ -716,3 +716,86 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# Gold Image + Test — 镜面高光的带宽（光源角半径 θ / known_issue §11）
+#   场景：一块金属地面 + 只有一个太阳，roughness 阶梯 0 / 0.005 / 0.02 / 0.05 / 0.30；
+#   机位让反射方向与太阳方向在原点精确重合（太阳的像落在画面正中）。
+#   修复前 bad case：r=0 面板上**完全没有**太阳的像（D ≡ 0），r=0.02 被 1e-7 护栏
+#   钳成灰斑。修复后：每个小 roughness 档都应是一块 ≈19 px 的日盘（θ = 0.53°）。
+# ============================================================================
+cc_binary(
+    name = "jpov_specular_bandwidth_gold_generator",
+    srcs = [
+        "jpov_specular_bandwidth_gold_common.h",
+        "jpov_specular_bandwidth_gold_generator.cc",
+    ],
+    deps = [
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_specular_bandwidth_gold_test",
+    srcs = [
+        "jpov_specular_bandwidth_gold_common.h",
+        "jpov_specular_bandwidth_gold_test.cc",
+    ],
+    deps = [
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# ============================================================================
+# Gold Image — 点光源的镜面带宽（逐像素角半径 θ = asin(R/dist)）
+#
+# 与 jpov_specular_bandwidth_gold_* 同一套语言：skylight viewer 的镜面地板场景、
+# 机位/灯位算死（灯的像落在画面正中）、每张只差灯的物理半径。
+# ============================================================================
+cc_binary(
+    name = "jpov_point_specular_gold_generator",
+    srcs = [
+        "jpov_point_specular_gold_common.h",
+        "jpov_point_specular_gold_generator.cc",
+    ],
+    deps = [
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_point_specular_gold_test",
+    srcs = [
+        "jpov_point_specular_gold_common.h",
+        "jpov_point_specular_gold_test.cc",
+    ],
+    deps = [
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

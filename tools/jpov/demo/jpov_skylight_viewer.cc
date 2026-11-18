@@ -17,6 +17,10 @@
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 // 环境镜面 A/B（--capture-env <out_dir>）：固定机位只切“天光消费量”（0 / 0.5 / 1），
 //   验收工件 = 第三方块（金属，metallic=1）—— 关时发黑，开时能看见天光渐变与地色。
+// 镜面高光带宽（--capture-mirror-specular <out_dir>）：地面换成 roughness=0 的大镜面，
+//   机位算死使太阳的像落在画面正中 —— 验收「δ 光源 × δ BRDF」的带宽（docs/jpov_specular_bandwidth.md）。
+// 点光源镜面带宽（--capture-point-specular <out_dir>）：同场景换成“只有一盏球灯”，
+//   灯放在原点处的反射方向上使它的像落在画面正中 —— 扫 physical_radius 看像变大变柔。
 //
 // 架构：与 model viewer 同构（主程序只做装配 + 事件循环；场景/天光装配在
 // skylight_scene.h，渲染核心 + 面板在 skylight_viewer_app.h）。
@@ -697,6 +701,223 @@ int RunCaptureWaterSun(const std::string& out_dir) {
     return 0;
 }
 
+// 用法：jpov_skylight_viewer --capture-mirror-specular <out_dir>
+//
+// **镜面高光的带宽（光源角半径 θ）** 的人类可读验收拍摄。
+//
+// 要验的一件事：`metallic=1, roughness=0` 的大镜面地面 + 平行光（太阳）⇒ 地面上必须
+//   出现**太阳的像**（一个 ≈6 px 的亮盘，与天上那颗日盘同尺寸）。
+//   完美镜面 + 平行光 = 两个 δ 相乘，逐像素采样只能拿到 ∞ 或 0 ⇒ 修之前整块地面是死的
+//   （纯黑，一个比底色亮的像素都没有，见 docs/jpov_specular_bandwidth.md）；把太阳的角半径 θ 并进
+//   GGX 的带宽（`a2 += (θ/2)²`）后 D 才有有限峰值 ⇒ 亮盘出现。
+//
+// 机位是**算死**的，不靠肉眼对齐：地面 y=0，相机 = (R cosφ sinθ, R sinφ, R cosφ cosθ)
+//   看向原点；原点处的反射方向 = 仰角 φ、方位 θ+180。取 θ+180 = 太阳方位、φ = 太阳仰角
+//   ⇒ 太阳的像精确落在画面正中（原点）。太阳本身也在画面上方 ⇒ 一张图里能直接比较
+//   「天上的日盘」与「地上的像」的大小与亮度。
+//
+// 出图（同一机位/同一太阳，只切对照条件）：
+//   mirror_r0_pure.png             关 env/ambient ⇒ 除太阳的像外地面纯黑（最干净的一张）
+//   mirror_r0_pure_no_bandwidth.png 同上，但 θ = 1e-6（等效 δ）⇒ 亮盘必须**消失**
+//   mirror_r0_mirror.png           开 env/SSR ⇒ 正常镜子观感（映天空与方块）+ 太阳的像
+//   mirror_r0_mirror_no_bandwidth.png 同上，θ = 1e-6
+//   mirror_r02_pure.png            roughness=0.02 的同一条对照（θ 主导，应与 r=0 几乎同图）
+//
+// "θ = 1e-6" 不是调试开关：它就是光源的角半径这个**物理参数**本身 —— 缩到比像素尺寸
+//   小 5 个量级，等价于「没有带宽的 δ 光源」，也正是修之前 shader 完全忽略 θ 时的行为。
+int RunCaptureMirrorSpecular(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 镜面高光带宽（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    app.InstallMirrorFloorScene();   // 地面 + 散布方块（不装模型/蓝人，无需外部资产）
+    app.SetMirrorSpecularView();     // 相机/太阳：太阳的像落在画面正中
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    auto shoot = [&](const char* name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture: " << path;
+    };
+
+    // 关 env / SSR + 环境光置零 = 把「太阳的镜面项」完全隔离出来：
+    // 地面上除了太阳的像什么都没有。（要关环境光是因为 metallic 目前仍吃到 diffuse
+    // ambient 那一项 —— 那是另一件事，这里只想看高光。）
+    auto only_sun_specular = [&]() {
+        app.SetEnvSpecular(false);
+        app.SetSsr(false);
+        jpov::AmbientLight no_ambient{};
+        no_ambient.intensity = 0.0f;
+        app.SetAmbientOverride(no_ambient);
+    };
+    auto full_mirror = [&]() {
+        // 天光消费量取 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围
+        // 最亮的天光，全天光 + 暗银镜仍会把两者一起过曝成白，日盘的像就淹在白里了。
+        // 0.35 既能看出"这是镜子（映天、映方块）"，又给日盘留出对比度。
+        app.SetEnvSpecular(true, 0.35f);
+        app.SetSsr(true);
+        app.ClearAmbientOverride();
+    };
+
+    // 只换光源的**角半径**（其余方向/颜色/强度全取当前天光推导值）：
+    //   0    = 用默认（太阳的 0.004654 rad）；
+    //   1e-6 = 等效 δ（没有带宽）—— 与修之前 shader 忽略 θ 时的行为一致。
+    auto shoot_with_angular_radius = [&](float theta, const char* name) {
+        if (theta > 0.0f) {
+            jpov::DirectionalLight sun =
+                jpov_skylight::MakeSkyLighting(app.deg_, /*tricolor_ambient=*/false).dir_light;
+            sun.angular_radius = theta;
+            app.SetSunOverride(sun);
+        } else {
+            app.ClearSunOverride();
+        }
+        shoot(name);
+        app.ClearSunOverride();
+    };
+
+    // ① 钱图：纯太阳高光。修复后正中一颗亮盘 + 一枚竖向拉长的拖尾
+    //    （低太阳掠过地面时 lobe 沿视线方向被投影拉长，是正确行为）。
+    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
+    only_sun_specular();
+    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r0_pure");
+
+    // ② 负向对照：同一块地面、同一颗太阳，只把 θ 缩到 1e-6（等效 δ）⇒ 亮盘必须消失。
+    //    这张就是「没有带宽」的样子（= 修之前那一版）。
+    shoot_with_angular_radius(/*theta=*/1.0e-6f, "mirror_r0_pure_no_bandwidth");
+
+    // ③ 正常镜子观感：地面映天空与散布方块，太阳的像叠在上面（带带宽）。
+    full_mirror();
+    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r0_mirror");
+    shoot_with_angular_radius(/*theta=*/1.0e-6f, "mirror_r0_mirror_no_bandwidth");
+
+    // ④ 对照：roughness=0.02（JPOV 镜面地板预设）。修复前被 `max(denom,1e-7)` 护栏
+    //    钳成一块暗糊团（越光滑反而越暗）；修复后与 r=0 几乎同一颗盘（θ 主导）。
+    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.02f));
+    only_sun_specular();
+    shoot_with_angular_radius(/*theta=*/0.0f, "mirror_r02_pure");
+
+    app.ClearSunOverride();
+    app.ClearAmbientOverride();
+    app.ClearFloorMaterialOverride();
+    app.Finalize();
+    LOG(INFO) << "mirror specular captured to " << out_dir;
+    return 0;
+}
+
+// 用法：jpov_skylight_viewer --capture-point-specular <out_dir>
+//
+// **点光源的镜面带宽（逐像素角半径 θ = asin(R/dist)）** 的人类可读验收拍摄。
+//
+// 与 `--capture-mirror-specular`（平行光）同一个问题，只是 θ 逐像素、由灯泡尺寸决定：
+//   · 修之前 `physical_radius` 只用来挪 `spec_dir`（代表点），**a2 一点没变** ⇒
+//     r=0 的镜面地面上完全没有灯的高光；有光泽的地面上也只是一个「点」（与灯多大无关）。
+//   · 接上 θ 后 a2 += (θ/2)² ⇒ 灯越大，地上那块「灯的像」越大越柔（能量守恒）。
+//
+// 机位与灯位是**算死**的（推导见 SkylightApp::PlacePointLampAtScreenCenter）：
+//   灯放在「原点处的反射方向」上 3.5 m 处 ⇒ 灯的像精确落在画面正中。
+//   另画一个自发光小球（直径 = 2R）当灯的参照物，一眼能对上「天上的灯 / 地上的像」。
+//
+// 出图（同一机位，只改灯的物理半径）：
+//   point_r0.000_pure.png   等效 δ（R=0）⇒ 地面上**没有**灯的像，是修之前的行为
+//   point_r0.020_pure.png   小球灯
+//   point_r0.100_pure.png   中等（≈人手一个灯笼）
+//   point_r0.500_pure.png   大球灯 ⇒ 像最大最柔
+//   point_r0.100_mirror.png 开天光反射（普通镜子观感，灯像叠在上面）
+// 「pure」= 关 env/SSR + 环境光置零 + 太阳置零 ⇒ 画面里唯一的照明就是那盏灯。
+int RunCapturePointSpecular(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 点光源镜面带宽（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    app.InstallMirrorFloorScene();
+    app.SetPointSpecularView();
+
+    // 地面：纯镜面（roughness=0）。这样地面上的高光**只能**来自灯的角半径 ——
+    // 如果带宽没接上，D ≡ 0，画面里就一块灯的像都没有。
+    app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
+
+    // 太阳与环境光全关：否则太阳的高光（比灯亮几个量级）会盖住要看的东西。
+    jpov::DirectionalLight no_sun{};
+    no_sun.direction = {0.0f, -1.0f, 0.0f};
+    no_sun.intensity = 0.0f;
+    app.SetSunOverride(no_sun);
+    jpov::AmbientLight no_ambient{};
+    no_ambient.intensity = 0.0f;
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    auto shoot = [&](const char* name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture: " << path;
+    };
+    auto pure = [&]() {
+        app.SetEnvSpecular(false);
+        app.SetSsr(false);
+        app.SetAmbientOverride(no_ambient);
+    };
+
+    // ① 等效 δ（R=0）：修之前的行为 —— 地面上没有灯的像。
+    pure();
+    app.SetPointLamp(/*physical_radius*/ 0.0f);
+    shoot("point_r0.000_pure");
+
+    // ② 灯越来越大 ⇒ 地上的像越来越大越柔（带宽 = (θ/2)²，θ = asin(R/3.5m)）。
+    struct LampShot {
+        float radius;
+        const char* name;
+    };
+    const LampShot lamp_shots[] = {
+        {0.02f, "point_r0.020_pure"},
+        {0.10f, "point_r0.100_pure"},
+        {0.50f, "point_r0.500_pure"},
+    };
+    for (const LampShot& s : lamp_shots) {
+        app.SetPointLamp(s.radius);
+        shoot(s.name);
+    }
+
+    // ③ 普通镜子观感：开天光反射（地面映天空与方块），灯的像叠在上面。
+    app.SetPointLamp(/*physical_radius*/ 0.10f);
+    app.SetEnvSpecular(true, 0.35f);
+    app.SetSsr(true);
+    app.ClearAmbientOverride();
+    shoot("point_r0.100_mirror");
+
+    app.ClearPointLamp();
+    app.ClearSunOverride();
+    app.ClearAmbientOverride();
+    app.ClearFloorMaterialOverride();
+    app.Finalize();
+    LOG(INFO) << "point specular captured to " << out_dir;
+    return 0;
+}
+
 // 「水体消费的是光，不是 sky」的验证拍摄。
 // 用法：jpov_skylight_viewer --capture-water-light <out_dir>
 //
@@ -1287,6 +1508,8 @@ int main(int argc, char** argv) {
     std::string water_tricolor_out_dir;
     std::string water_light_out_dir;
     std::string water_sun_out_dir;
+    std::string mirror_spec_out_dir;
+    std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
     float smaa_threshold = 0.1f;
@@ -1311,6 +1534,10 @@ int main(int argc, char** argv) {
             water_light_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-sun") == 0 && i + 1 < argc) {
             water_sun_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-mirror-specular") == 0 && i + 1 < argc) {
+            mirror_spec_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-point-specular") == 0 && i + 1 < argc) {
+            point_spec_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-camera-cross") == 0 && i + 1 < argc) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
@@ -1336,6 +1563,12 @@ int main(int argc, char** argv) {
     }
     if (!water_sun_out_dir.empty()) {
         return RunCaptureWaterSun(water_sun_out_dir);
+    }
+    if (!mirror_spec_out_dir.empty()) {
+        return RunCaptureMirrorSpecular(mirror_spec_out_dir);
+    }
+    if (!point_spec_out_dir.empty()) {
+        return RunCapturePointSpecular(point_spec_out_dir);
     }
     if (!camera_cross_out_dir.empty()) {
         return RunCaptureCameraCross(camera_cross_out_dir);

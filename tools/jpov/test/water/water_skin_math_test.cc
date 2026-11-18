@@ -180,7 +180,7 @@ TEST(WaterSkinMath, DepthBiasToleranceIsTight) {
 
 // ─────────────── 太阳的像（解析 GGX，盘状光源）───────────────
 //
-// 这组断言对应 known_issue §11：镜面高光的带宽 = max(材质 roughness, 光源角半径, 像素足迹)。
+// 这组断言对应 docs/jpov_specular_bandwidth.md：镜面高光的带宽 = max(材质 roughness, 光源角半径, 像素足迹)。
 // 水皮没有 roughness ⇒ 带宽完全来自 θ 与足迹，所以这三条必须钉死。
 
 // 带宽 = (θ/2)²。写成 θ² 会过宽 4 倍，这条会立刻红。

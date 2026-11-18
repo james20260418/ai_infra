@@ -28,6 +28,7 @@
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <vector>
@@ -233,6 +234,94 @@ public:
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
     void SetWaterScene(bool on) { scene_index_ = on ? kSceneWater : 0; }
+
+    // ── 镜面高光带宽（光源角半径 θ）验收：场景与机位 ─────────────────────
+    //
+    // 地面 = 200×200 m 的大镜面（材质走 SetFloorMaterialOverride(MirrorFloorMaterial(r))），
+    // 太阳是画面里唯一的强光。机位**算死**：原点处的反射方向 = 仰角 φ、方位 θ+180，
+    // 故取 φ = 太阳仰角、θ = 太阳方位 − 180° ⇒ 太阳的像精确落在画面正中（原点）。
+    // 为什么要它：完美镜面（roughness=0）+ 平行光 = 两个 δ 相乘，没有光源角半径（带宽）
+    // 时逐像素采样只能拿到 ∞ 或 0 ⇒ 地面上**一个高光像素都没有**（docs/jpov_specular_bandwidth.md）。
+    static constexpr float kMirrorSunElevDeg = 12.0f;   // 低斜阳：日盘与它的像同框
+    static constexpr float kMirrorSunAzimDeg = 180.0f;
+    static constexpr double kMirrorCameraRadiusM = 20.0;
+
+    // 装配「镜面地板」场景所需的最小资源（地面 + 散布方块）。不装模型/蓝人：
+    // 本验收不需要外部资产（拍摄与单测都能直接跑）。
+    void InstallMirrorFloorScene(int clutter_count = 24) {
+        if (box_mesh_ == 0) {
+            box_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(
+                jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
+                jpov_skylight::kBoxHalf));
+        }
+        if (ground_mesh_ == 0) {
+            ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
+        }
+        mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
+        BuildClutter(clutter_count);
+        scene_index_ = 1;   // 镜面地板场景（地板 = ssr_reflector）
+    }
+
+    // 把相机与太阳摆到「太阳的像落在画面正中」的那一套几何上。
+    void SetMirrorSpecularView() {
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        deg_.turbidity       = jpov_skylight::kTurbidityDef;
+        deg_.daylight_season = 0.0f;
+        deg_.sun_elev_deg    = kMirrorSunElevDeg;
+        deg_.sun_azim_deg    = kMirrorSunAzimDeg;
+        view_ = jpov_viewer::DefaultView();
+        view_.phi   = static_cast<double>(kMirrorSunElevDeg) * kDegToRad;
+        view_.theta = static_cast<double>(kMirrorSunAzimDeg - 180.0f) * kDegToRad;
+        view_.R     = kMirrorCameraRadiusM;
+    }
+
+    // ── 点光源镜面验收：灯的像落在画面正中 ──────────────────────────────
+    //
+    // 与太阳那套同一个思路，但点光源没有「方向」可拿来对齐，所以反过来算：
+    //   相机 C 看向原点 P ⇒ 原点处的视线 v = −C，关于地面 y=0 镜像得 r；
+    //   把灯放在 P + d·r ⇒ 原点处 H = normalize(r − v) = +Y = 地面法线 ⇒ 高光正中。
+    // 灯的**角半径**逐像素为 asin(R/dist)（R = physical_radius），所以 R 越大，
+    // 地面上那块「灯的像」越大越糊 —— 这就是点光源角半径验收要看的量。
+    static constexpr float kPointLampDistanceM = 3.5f;  // 灯到原点（=反射点）的距离
+    static constexpr float kPointLampIntensity = 1.0f;
+    static constexpr float kPointLampRangeM = 40.0f;    // linear_radius（衰减范围）
+
+    // 相机：俯视 30°（不像 12° 那样把像拉成细条，灯的圆盘读得清）。
+    void SetPointSpecularView() {
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        deg_.turbidity       = jpov_skylight::kTurbidityDef;
+        deg_.daylight_season = 0.0f;
+        deg_.sun_elev_deg    = 30.0f;
+        deg_.sun_azim_deg    = 180.0f;
+        view_ = jpov_viewer::DefaultView();
+        view_.phi   = 30.0 * kDegToRad;
+        view_.theta = 0.0;
+        view_.R     = 12.0;
+    }
+
+    // 把一盏球灯（半径 physical_radius）放到「它的像正好落在画面正中」的位置。
+    // Pre-condition: 已调用过 SetPointSpecularView()（灯的位置依赖当前相机）。
+    void PlacePointLampAtScreenCenter(float physical_radius) {
+        const jpov::Vec3f c = view_.Position();
+        const float len = std::sqrt(c.x() * c.x() + c.y() * c.y() + c.z() * c.z());
+        CHECK_GT(len, 1.0e-6f);
+        // v = P − C = −C（P = 原点）⇒ r = 关于 y=0 的镜像 = (−Cx, +Cy, −Cz)/|C|
+        jpov::PointLight lamp;
+        lamp.position = {-c.x() / len * kPointLampDistanceM,
+                         c.y() / len * kPointLampDistanceM,
+                         -c.z() / len * kPointLampDistanceM};
+        lamp.color = {1.0f, 0.96f, 0.90f, 1.0f};
+        lamp.linear_radius = kPointLampRangeM;
+        lamp.physical_radius = physical_radius;
+        lamp.intensity = kPointLampIntensity;
+        point_lamp_ = lamp;
+    }
+
+    // 点光源覆盖（headless 拍摄 / 单测用）。不设 = 场景里没有点光源。
+    std::optional<jpov::PointLight> point_lamp_;
+    void SetPointLamp(float physical_radius) { PlacePointLampAtScreenCenter(physical_radius); }
+    void ClearPointLamp() { point_lamp_.reset(); }
+
     // 镜面地板这一场景里随机摆放的方块（固定种子，装配一次；不逐帧随机）。
     struct Clutter {
         jpov::Vec3f center;
@@ -271,6 +360,15 @@ public:
     bool  ssr_on_ = false;
     // 地面材质档位（镜面 / 金属 / 石砖 / 岩石 / 四段拼接）。见 skylight_scene.h 的预设。
     int   floor_preset_ = 0;
+    // 地面材质覆盖（headless 拍摄专用；不设 = 用 floor_preset_ 的预设）。
+    // 为什么要这个口子：镜面高光的带宽要拿**roughness=0 的大镜面地面**验收，而面板的
+    // 四个预设都是有实际用途的档位（r=0 的纯镜面没有 SSR/IBL 之外的内容，不适合当预设）。
+    // 与 sun_override_ 同一套用法：只在拍摄路径里设，交互与其它拍摄不受影响。
+    std::optional<jpov::PBRMaterial> floor_material_override_;
+    void SetFloorMaterialOverride(const jpov::PBRMaterial& material) {
+        floor_material_override_ = material;
+    }
+    void ClearFloorMaterialOverride() { floor_material_override_.reset(); }
     float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
     int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
@@ -349,6 +447,11 @@ public:
         }
         if (sun_override_.has_value()) {
             cmds->sun = *sun_override_;
+        }
+        // 点光源镜面验收（交互/其它拍摄不用）：灯的位置由 PlacePointLampAtScreenCenter()
+        // 算好，保证它的像落在画面正中（推导见那个函数的注释）。
+        if (point_lamp_.has_value()) {
+            cmds->point_lights.push_back(*point_lamp_);
         }
         cmds->tone_mapping = true;
 
@@ -452,7 +555,10 @@ public:
                 }
             } else {
                 // 整块地面：ground_mesh_ 是 40×40 的 quad（顶点 y=0），scale=5 ⇒ 200×200 m。
-                cmds->DrawObject3D(ground_mesh_, FloorMaterialOf(floor_preset_),
+                const jpov::PBRMaterial ground_mat = floor_material_override_.has_value()
+                    ? *floor_material_override_
+                    : FloorMaterialOf(floor_preset_);
+                cmds->DrawObject3D(ground_mesh_, ground_mat,
                                    /*center*/ {0.0f, 0.0f, 0.0f},
                                    /*up*/     {0.0f, 1.0f, 0.0f},
                                    /*front*/  {0.0f, 0.0f, 1.0f},
@@ -462,6 +568,19 @@ public:
             for (const Clutter& c : clutter_) {
                 cmds->DrawObject3D(box_mesh_, mat_clutter_, c.center,
                                    {0.0f, 1.0f, 0.0f}, c.front, c.scale);
+            }
+            // 点光源参照物：自发光小球（直径 = 2×physical_radius）。
+            // 灯本身不是几何 —— 没有它，这张图就只剩「地上一块亮斑」，看不出亮斑是灯、
+            // 更看不出「灯越大，像越大」。R=0（等效 δ）时不画（本来就没有尺寸）。
+            if (point_lamp_.has_value() && point_lamp_->physical_radius > 0.0f) {
+                jpov::PBRMaterial lamp_mat;
+                lamp_mat.base_color = {0.0f, 0.0f, 0.0f, 1.0f};
+                lamp_mat.emissive = point_lamp_->color;
+                // box_mesh_ 是 1×1×1（半宽 0.5）⇒ scale = 直径 = 2R
+                cmds->DrawObject3D(box_mesh_, lamp_mat, point_lamp_->position,
+                                   /*up*/ {0.0f, 1.0f, 0.0f},
+                                   /*front*/ {0.0f, 0.0f, 1.0f},
+                                   /*scale*/ 2.0f * point_lamp_->physical_radius);
             }
             // 镜面皮肤的蓝人（**曲面**反射体）：单独一条命令（材质不同），带 ssr_reflector。
             // 4 个随机站位，固定种子；属性 pass 会为它们写逐顶点（曲面）视空间法线。
