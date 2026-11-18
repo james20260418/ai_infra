@@ -49,6 +49,19 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 水面波浪 CPU 单测（GL-free）：无波零回归 / 单波解析式 / 梯度数值差分 /
+# flow 调制 / 淡出 / 求交残差。
+cc_test(
+    name = "water_wave_math_test",
+    srcs = ["water_wave_math_test.cc"],
+    deps = [
+        "//tools/jpov/src/water:water_wave_math",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 水皮 CPU 单测（GL-free）：临界角 / 菲涅尔 / 平面交点 / 深度拒绝。
 cc_test(
     name = "water_skin_math_test",

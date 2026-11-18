@@ -319,7 +319,10 @@ TEST(WaterMediumGpu, LayerInterleavesWithMedium) {
 
             // 合成公式（front-to-back，1 层）：
             //   L = S(z) + exp(−τ(z))·C + (1−α)·(S_op − S(z))
-            //   T = (1−α)·exp(−(τ_op − τ(z)))
+            //   T = (1−α)·exp(−τ_op)
+            // ⚠️ T 必须是**全路径**衰减：背景在层之后 ⇒ 相机→层那一段水柱也要算。
+            //    旧写法 exp(−(τ_op−τ(z))) 欠了 exp(−τ(z))：水下仰望时整段水柱的吸收被跳过
+            //    （实测 9 m 深看水上物体几乎不衰减）。
             const float c[3] = {alpha * 1.0f, alpha * 0.5f, alpha * 0.25f};
             const float layer_t = 1.0f - alpha;
             const float tau_l_arr[3] = {tau_l.x(), tau_l.y(), tau_l.z()};
@@ -331,8 +334,7 @@ TEST(WaterMediumGpu, LayerInterleavesWithMedium) {
             for (int ch = 0; ch < 3; ++ch) {
                 const float L = S_l_arr[ch] + std::exp(-tau_l_arr[ch]) * c[ch] +
                                 layer_t * (S_op_arr[ch] - S_l_arr[ch]);
-                const float T =
-                    layer_t * std::exp(-(tau_op_arr[ch] - tau_l_arr[ch]));
+                const float T = layer_t * std::exp(-tau_op_arr[ch]);
                 const float expected = L + kBg[ch] * T;
                 const float tol = 3.0e-3f + 4.0e-3f * std::fabs(expected);
                 EXPECT_NEAR(f.pixels[base + ch], expected, tol)

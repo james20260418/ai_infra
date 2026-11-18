@@ -932,6 +932,73 @@ struct WaterMedium {
     float phase_g = 0.0f;
 };
 
+// ── 水面波浪（法线扰动 / 高度置换）──
+//
+// 纯高度场 Gerstner 谱（**无水平位移/choppy** —— 求交必须是单值高度图）：
+//   h(p, t) = Σ A_i · sin(k_i·dot(dir_i, p.xz) − ω_i·t + φ_i)
+//   水面世界高度 = level_y + h；法线 = normalize(−∂h/∂x, 1, −∂h/∂z)。
+//   深水色散 ω = sqrt(g·k)（g = 9.81），所以「波长」决定传播速度，不另给周期。
+//
+// `enabled = false` 或 `num_waves = 0` ⇒ h ≡ 0 ⇒ 与旧的纯平面水皮**逐字节一致**。
+struct WaterWave {
+    // 传播方向（水平单位向量，xz 平面）。只取 xz，y 由调用方保证为 0。
+    float dir_x = 1.0f;
+    float dir_z = 0.0f;
+    // 波长（米，> 0）。决定波数 k = 2π/λ 与色散速度。
+    float wavelength_m = 10.0f;
+    // 振幅（米，>= 0）。
+    float amplitude_m = 0.1f;
+    // 初相（弧度）。
+    float phase_rad = 0.0f;
+};
+
+// 波浪谱 + 大尺度流向（flow map）配置。
+// 与 src/water/water_wave_math.h（CPU 参考 + GLSL 同源）一一对应。
+struct WaterWaves {
+    // false（默认）= 不启用：零回归。
+    bool enabled = false;
+
+    // 波数上限（与 GLSL uniform 数组长度一致）。
+    static constexpr int kMaxWaves = 8;
+
+    // 实际使用的波数 [0, kMaxWaves]。0 视同关闭。
+    int num_waves = 0;
+
+    // 波表。只有前 num_waves 项有效。
+    WaterWave waves[kMaxWaves];
+
+    // 时间倍率：ω 乘它。1 = 真实深水色散速度；0 = 冻结。
+    float speed_scale = 1.0f;
+
+    // true（默认）= 真位移（求交沿高度场）；false = **法线 only**（求交仍用平面，
+    // 只把法线换成高度场的梯度）。后者物理上不一致，**只用于 debug 二分**：
+    // 用来判断「噪点」是求交引起的还是法线/着色引起的。
+    bool displacement = true;
+
+    // debug：0 = 正常；1 = 把交点法线编码成颜色输出（N*0.5+0.5）。
+    // 只用于定位「法线噪点」，不属于产品配置。
+    int debug = 0;
+
+    // 时刻（秒）。由场景每帧推进。
+    float time_s = 0.0f;
+
+    // ── 大尺度流向（flow map）──
+    // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。
+    // texture_id = 0 ⇒ 无 flow（各向同性谱）。
+    uint32_t flow_texture_id = 0;      // TextureManager id；0 = 无 flow
+    float flow_uv_scale = 1.0f / 200.0f;  // 世界米 → uv（默认一张纹理覆盖 200 m）
+    float flow_strength = 1.0f;        // flow 向量整体增益（|flow| ≤ strength）
+    // 波方向朝 flow 对齐的强度 [0,1]：0 = 不调方向，1 = 完全顺流。
+    float flow_align = 0.5f;
+    // flow 强度对振幅的增益：A *= (1 + flow_wind_gain·|flow|)。
+    float flow_wind_gain = 1.0f;
+
+    // 远处淡出（按相机水平距离，米）：dist ≥ fade_end ⇒ 波消失（回纯平面）。
+    // fade_end <= fade_start ⇒ 不淡出（恒 1）。
+    float fade_start_m = 150.0f;
+    float fade_end_m = 900.0f;
+};
+
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。
 //
 // 存在 ≠ 有水：`cmds.water` 有值 = **要画界面层**；`medium.enabled` = **要算体积**。
@@ -956,6 +1023,11 @@ struct WaterCommand {
 
     // 水体介质（吸收/散射）。enabled = true 时合成趟会把介质积分进画面。
     WaterMedium medium;
+
+    // 水面波浪（法线扰动/高度置换）。enabled = false ⇒ 纯平面（零回归）。
+    // ⚠️ 波浪只改**界面几何**（水皮求交与法线）；水体介质仍按 level_y 的半空间积分
+    //    （波浪化介质见 known_issue §11.5，另 PR）。
+    WaterWaves waves;
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。

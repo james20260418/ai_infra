@@ -21,6 +21,7 @@
 #include "tools/jpov/src/transparent_layer.h"
 #include "tools/jpov/src/water/water_medium_math.h"
 #include "tools/jpov/src/water/water_skin_math.h"
+#include "tools/jpov/src/water/water_wave_math.h"
 #include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
@@ -39,6 +40,16 @@ public:
         float ior = water::kWaterIorDefault;  // 水的折射率（> 0）
         // 水体介质（水下支路的「深海积分反射」要用它；nullptr = 无介质 ⇒ S_P(∞) = 0）。
         const water::WaterMediumSample* medium = nullptr;
+
+        // ── 水面波浪（法线扰动 / 高度置换）──
+        // nullptr / !enabled / num_waves = 0 ⇒ 纯平面（与旧版逐字节一致）。
+        // 波浪只改界面几何（求交与法线）；水体介质仍按 level_y 的半空间积分。
+        const WaterWaves* waves = nullptr;
+        // flow map 的 GL 2D 纹理（RG 编码 (flow*0.5+0.5)；0 = 无 flow）。
+        // 由 Renderer 从 WaterWaves::flow_texture_id 经 TextureManager 解析。
+        unsigned int wave_flow_tex = 0;
+        // debug：0 = 正常；1 = 把交点法线编码成颜色输出（定位法线噪点用）。
+        int wave_debug = 0;
 
         // ── 太阳的像（解析 GGX，盘状光源）──
         // 与介质那份 sun 分开：介质可以关，水面依然该有日盘像。
@@ -80,6 +91,8 @@ public:
 private:
     void EnsureTarget(int w, int h);
     void UploadCommonUniforms(unsigned int prog, const Inputs& inputs);
+    // 波浪谱 / flow map / 淡出等 uniform（uWave*）。
+    void UploadWaveUniforms(unsigned int prog, const Inputs& inputs);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;

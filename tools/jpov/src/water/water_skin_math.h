@@ -18,6 +18,7 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/src/water/water_optics.h"   // 菲涅尔 / 临界角 / ior（唯一出处）   // Vec3f（header-only，无 GL）
+#include "tools/jpov/src/water/water_wave_math.h"  // 波浪高度场求交（WaterWaves / IntersectWaveSurface）
 
 namespace jpov {
 namespace water {
@@ -60,6 +61,17 @@ inline Vec3f ReflectDirection(const Vec3f& incident) {
     return Vec3f{incident.x(), -incident.y(), incident.z()};
 }
 
+// 绕任意单位法线 N 的反射：incident 指向水面，N 朝上（可为波浪法线）。
+// N = (0,1,0) 时与 ReflectDirection 逐位一致。
+// Pre-condition: N 为单位向量。
+inline Vec3f ReflectDirectionAbout(const Vec3f& incident, const Vec3f& normal) {
+    const float d = incident.x() * normal.x() + incident.y() * normal.y() +
+                    incident.z() * normal.z();
+    return Vec3f{incident.x() - 2.0f * d * normal.x(),
+                 incident.y() - 2.0f * d * normal.y(),
+                 incident.z() - 2.0f * d * normal.z()};
+}
+
 // 把反射方向夹到地平线以上并重新归一化。
 //
 // ⚠️ 「先夹 y、再归一化」会把 y 拉回夹值以下（缩放因子 < 1）—— 这里改成
@@ -98,28 +110,53 @@ inline float LinearizeDepthNdc(float ndc_z, float near_plane, float far_plane) {
 struct WaterPixel {
     bool hit = false;          // 打中水面且没被场景挡住
     float view_z = 0.0f;       // 命中点的视轴深度（米）
-    float cos_i = 0.0f;        // 入射角余弦（|dir_y|）
+    float cos_i = 0.0f;        // 入射角余弦（|dot(rd, N)|）
     float reflectance = 0.0f;  // 界面反射率（= WBO 的 α）
+    Vec3f normal = {0.0f, 1.0f, 0.0f};        // 交点法线（波浪时为扰动法线）
     Vec3f reflect_dir = {0.0f, 1.0f, 0.0f};   // 反射方向（已夹地平线；水下不使用）
 };
 
-// 逐像素判定：视线 ∩ 平面 → 场景深度拒绝 → 菲涅尔。
+// 逐像素判定：视线 ∩ 水面 → 场景深度拒绝 → 菲涅尔。
 //   cam_pos / cam_fwd  相机位置与朝向（cam_fwd 用来把 t 换成视轴深度，与 MRT#1 同口径）
 //   ray_dir            该像素的世界射线方向（单位向量）
 //   scene_ndc_z        MRT#1 场景深度（1.0 = 背景/远平面）
+//   waves              波浪谱（nullptr / !enabled / num_waves=0 ⇒ 纯平面，与旧版逐字节一致）
+//   flow_x / flow_z    waves 非空时的 flow 向量（CPU 参考在整条射线取同一值）
 // Pre-condition: ray_dir 与 cam_fwd 单位化且 dot > 0；0 < near < far。
 inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
                                const Vec3f& ray_dir, float level_y, float ior,
                                float scene_ndc_z, float near_plane, float far_plane,
-                               WaterPixel* out /*output*/) {
+                               WaterPixel* out /*output*/,
+                               const WaterWaves* waves = nullptr,
+                               float flow_x = 0.0f, float flow_z = 0.0f,
+                               float pixel_angle_rad = 0.0f) {
     if (out == nullptr) {
         return false;
     }
     *out = WaterPixel{};
 
     float t = 0.0f;
-    if (!PlaneHitDistance(cam_pos.y(), level_y, ray_dir.y(), &t)) {
-        return false;
+    Vec3f normal{0.0f, 1.0f, 0.0f};
+    if (waves != nullptr && waves->enabled && waves->num_waves > 0) {
+        // 像素在水面上覆盖的世界尺寸（与着色器同一公式：掠射按 |rd.y| 放大）。
+        float footprint = 0.0f;
+        const float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
+        if (pixel_angle_rad > 0.0f && t_plane > 0.0f) {
+            const float rdy = (std::fabs(ray_dir.y()) < 0.15f) ? 0.15f
+                                                              : std::fabs(ray_dir.y());
+            footprint = t_plane * pixel_angle_rad / rdy;
+        }
+        WaveSurfaceHit wh;
+        if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
+                                  waves->time_s, footprint, &wh)) {
+            return false;
+        }
+        t = wh.t;
+        normal = wh.normal;
+    } else {
+        if (!PlaneHitDistance(cam_pos.y(), level_y, ray_dir.y(), &t)) {
+            return false;
+        }
     }
 
     // 视轴深度：t × (射线在相机前方向上的投影)。MRT#1 存的是 gl_FragCoord.z，
@@ -143,8 +180,11 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
 
     out->hit = true;
     out->view_z = view_z;
-    out->cos_i = std::fabs(ray_dir.y());
-    out->reflect_dir = ClampReflectionAboveHorizon(ReflectDirection(ray_dir));
+    out->normal = normal;
+    // 入射角余弦：与法线夹角（波浪下不能再写 |rd.y|）。
+    out->cos_i = std::fabs(ray_dir.x() * normal.x() + ray_dir.y() * normal.y() +
+                           ray_dir.z() * normal.z());
+    out->reflect_dir = ClampReflectionAboveHorizon(ReflectDirectionAbout(ray_dir, normal));
     if (cam_pos.y() < level_y) {
         out->reflectance = FresnelDielectric(out->cos_i, ior, 1.0f);   // 水→空气（含 TIR）
     } else {
