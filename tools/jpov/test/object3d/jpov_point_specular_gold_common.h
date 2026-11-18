@@ -68,7 +68,7 @@ inline void ApplyShot(jpov_skylight::SkylightApp* app, const Shot& shot) {
     CHECK(app != nullptr);
 
     app->SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(shot.floor_roughness));
-    app->SetPointLamp(shot.lamp_radius);
+    app->PlacePointLampAtScreenCenter(shot.lamp_radius);
 
     // 正常镜子观感（地面映天光与散布方块；太阳在 InstallScene 里已置零）。
     // 刻意**不**关 env —— 关掉后地面几乎全黑，检查时容易被误读成"渲染坏了"

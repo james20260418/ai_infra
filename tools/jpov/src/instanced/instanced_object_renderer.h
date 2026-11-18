@@ -877,7 +877,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         // R 已由 CPU 侧钳到 `kMinPointLightAngularRadiusRad`（lights_texture.cc）⇒ 永不会退化成 δ。
         // 性能：asin 是逐灯逐像素一次超越函数；x 很小时（远处小灯，最常见）asin(x) 与 x 的差
         //   ≤ x³/6：x<0.1 时 (θ/2)² 的相对误差 <0.35%，直接省掉这次 asin。
-        // 数值：clamp 盖住 asin 定义域；dist→0 时 x→1，再由 a2 上限 0.25 兜底。
+        // 数值：clamp 盖住 asin 定义域；dist→0 时 x→1，再由下面「带宽项上限 0.25」兜底。
         float x = clamp(sourceRadius / max(dist, sourceRadius), 0.0, 1.0);
         float theta = (x < 0.1) ? x : asin(x);
         // ⚠️ 上限只能钳**带宽那一项**：GGX 的 a2 = roughness⁴ 本来就可以到 1（r=1 的漫反射面），

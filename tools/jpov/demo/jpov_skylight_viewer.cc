@@ -750,18 +750,14 @@ int RunCaptureMirrorSpecular(const std::string& out_dir) {
         LOG(INFO) << "capture: " << path;
     };
 
-    auto full_mirror = [&]() {
-        // 天光消费量取 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围
-        // 最亮的天光，全天光 + 暗银镜仍会把两者一起过曝成白，日盘的像就淹在白里了。
-        // 0.35 既能看出"这是镜子（映天、映方块）"，又给日盘留出对比度。
-        app.SetEnvSpecular(true, 0.35f);
-        app.SetSsr(true);
-        app.ClearAmbientOverride();
-    };
+    // 天光消费量取 0.35（不是 1.0）：镜面在「太阳的像」那个方向映的正是日盘周围最亮
+    // 的天光，全天光 + 暗银镜会把两者一起过曝成白，日盘的像就淹在白里了。
+    // 0.35 既能看出"这是镜子（映天、映方块）"，又给日盘留出对比度。
+    app.SetEnvSpecular(true, 0.35f);
+    app.SetSsr(true);
 
     // ① 钱图（r=0 完美镜面）：地面映天空与散布方块，日盘的像叠在正中。
     //    低太阳掠过地面时 lobe 沿视线方向被投影拉长，是正确行为。
-    full_mirror();
     app.SetFloorMaterialOverride(jpov_skylight::MirrorFloorMaterial(/*roughness*/ 0.0f));
     shoot("mirror_r0.000");
 
@@ -852,7 +848,7 @@ int RunCapturePointSpecular(const std::string& out_dir) {
         {0.50f, "point_r0.500"},
     };
     for (const LampShot& s : lamp_shots) {
-        app.SetPointLamp(s.radius);
+        app.PlacePointLampAtScreenCenter(s.radius);
         shoot(s.name);
     }
 

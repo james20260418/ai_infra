@@ -248,7 +248,7 @@ public:
 
     // 装配「镜面地板」场景所需的最小资源（地面 + 散布方块）。不装模型/蓝人：
     // 本验收不需要外部资产（拍摄与单测都能直接跑）。
-    void InstallMirrorFloorScene(int clutter_count = 24) {
+    void InstallMirrorFloorScene() {
         if (box_mesh_ == 0) {
             box_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(
                 jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
@@ -258,7 +258,7 @@ public:
             ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
         }
         mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
-        BuildClutter(clutter_count);
+        BuildClutter(/*count=*/24);   // 固定 24 个散布方块：给镜子一点"有内容"的倒影
         scene_index_ = 1;   // 镜面地板场景（地板 = ssr_reflector）
     }
 
@@ -319,7 +319,6 @@ public:
 
     // 点光源覆盖（headless 拍摄 / 单测用）。不设 = 场景里没有点光源。
     std::optional<jpov::PointLight> point_lamp_;
-    void SetPointLamp(float physical_radius) { PlacePointLampAtScreenCenter(physical_radius); }
     void ClearPointLamp() { point_lamp_.reset(); }
 
     // 镜面地板这一场景里随机摆放的方块（固定种子，装配一次；不逐帧随机）。
