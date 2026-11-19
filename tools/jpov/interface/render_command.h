@@ -998,6 +998,37 @@ struct WaterWaves {
     float fade_start_m = 150.0f;
     float fade_end_m = 900.0f;
 
+    // ── 大尺度相位扭曲（domain warp）──
+    // 把整片波场按低频位移场 u(p) 平移：θ_i += k_i·dot(u, d_i)，u = Σ_j A_j·dir_j·sin(...)。
+    // 为什么要它：h 是**平面波之和**，每条波峰都是无限长直线，4 个平面波的干涉必然是
+    // 晶格（“周期性花纹”）。纯靠加波数只能把晶格变密，不能消掉。低频位移让波峰弯曲/
+    // 分叉/长度不一，这是**唯一**在不引入 choppy 的前提下打破平面波特性的手段。
+    // 仍然是解析、单值高度场：求交结构一行不用改，|h| ≤ ΣA 也不变。
+    // warp_amplitude_m = 0 ⇒ 关（默认，逐字节旧行为）。
+    float warp_amplitude_m = 0.0f;
+    // 两条低频载波：波长（米，> 0）与方向（xz，单位向量）。
+    float warp_wavelength_m[2] = {57.0f, 131.0f};
+    float warp_dir_x[2] = {0.83f, -0.47f};
+    float warp_dir_z[2] = {0.56f, 0.88f};
+    // 两条载波的初相（弧度）。不同场景给不同值即可错开图案。
+    float warp_phase_rad[2] = {0.9f, 2.7f};
+
+    // ── 二阶 Stokes 谐波（深水，尖峰平谷）──
+    // h_i += −½·k_i·A_i²·cos(2θ_i)。真实风浪的非线性最低阶修正：峰更尖、谷更平，
+    // 且峰谷不再对称（线性叠加的偏度恒为 0）。解析、单值 ⇒ 求交结构不变；
+    // 用已有 sinθ/cosθ 的双角恒等式求值 ⇒ **0 次额外三角函数**。
+    // 代价：求交区间上界从 ΣA 变成 Σ(A + ½kA²)（陡度 0.07 时约 +3.5%）。
+    bool stokes_second_order = false;
+
+    // ── 细节短波（只进法线，不进几何）──
+    // 与 `short_wave`（只进 MSS→粗糙度）正交：这里的波**真的改法线**，
+    // 但**不参与高度/求交**（求交只走 waves[]，否则二分成本 ×N）。
+    // 用途：近场 0.3~2 m 的 chop —— 照片里的“棱角/碎光”主要来自这一档。
+    // 被像素足迹截断的部分照旧折进斜率方差（WaveFilteredVariance），不会丢能量。
+    static constexpr int kMaxDetailWaves = 12;
+    int num_detail_waves = 0;
+    WaterWave detail_waves[kMaxDetailWaves];
+
     // ── 短波（毛细波/短重力波）────────────────────────────────────────
     // 它们在任意可见距离上都被像素吞掉 ⇒ **不进几何**（不改 displacement / 法线 / 求交），
     // 只贡献斜率方差。配置 = 2D 风向 + 风速（MSS 由 Cox–Munk 实测关系给出）。

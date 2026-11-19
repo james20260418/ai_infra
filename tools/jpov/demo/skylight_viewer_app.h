@@ -223,7 +223,15 @@ public:
     jpov::WaterWaves water_waves_ = MakeDefaultWaves();
     bool water_waves_on_ = false;
     float water_wave_amp_scale_ = 1.0f;
+    // true ⇒ 帧内直接用 water_waves_.num_waves（capture 用整份配置覆盖时打开）。
+    bool water_use_config_count_ = false;
     void SetWaterWaves(bool on) { water_waves_on_ = on; }
+    // 用一整份配置替换默认谱（海面报告 / 参数扫描用）。
+    // 位置参数不可读时无法用指定初始化，直接整体赋值最清楚。
+    void SetWaterWavesConfig(const jpov::WaterWaves& waves) {
+        water_waves_ = waves;
+        water_use_config_count_ = true;
+    }
     void SetWaterWaveAmplitudeScale(float scale) { water_wave_amp_scale_ = scale; }
     void SetWaterFlowTexture(uint32_t id) { water_waves_.flow_texture_id = id; }
     void SetWaterWaveDisplacement(bool on) { water_waves_.displacement = on; }
@@ -234,6 +242,8 @@ public:
     void SetWaterWaveTime(float sec) { water_wave_time_s_ = sec; water_wave_time_freeze_ = true; }
     void SetWaterWaveTimeFrozen(bool on) { water_wave_time_freeze_ = on; }
     int water_wave_debug_ = 0;   // 0 正常 / 1 法线颜色（capture 用）
+    // 曝光（tone map 之前的线性增益）。1.0 = 物理锚点（默认）。
+    float exposure_ = 1.0f;
     void SetWaterWaveDebug(int mode) { water_wave_debug_ = mode; }
     // 面板：法线可视化开关 + 波数（SliderFloat 只能用 float）。
     bool water_wave_normal_view_ = false;
@@ -497,6 +507,9 @@ public:
             cmds->point_lights.push_back(*point_lamp_);
         }
         cmds->tone_mapping = true;
+        // 曝光（EV=0 基准）。海面报告用它把「物理锚点」下的亮度对齐到照片观感；
+        // 默认 1.0 ⇒ 旧行为逐字节不变。
+        cmds->exposure = exposure_;
 
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
@@ -681,7 +694,9 @@ public:
             if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
                 wv.enabled = true;
-                int n = static_cast<int>(water_wave_count_f_ + 0.5f);
+                int n = water_use_config_count_
+                            ? water_waves_.num_waves
+                            : static_cast<int>(water_wave_count_f_ + 0.5f);
                 if (n < 1) {
                     n = 1;
                 }
@@ -691,6 +706,9 @@ public:
                 wv.num_waves = n;
                 for (int i = 0; i < n; ++i) {
                     wv.waves[i].amplitude_m *= water_wave_amp_scale_;
+                }
+                for (int i = 0; i < wv.num_detail_waves; ++i) {
+                    wv.detail_waves[i].amplitude_m *= water_wave_amp_scale_;
                 }
                 // 60 fps 的拍摄时钟（capture 每帧固定一帧，所以时间可复现）。
                 wv.time_s = water_wave_time_freeze_
