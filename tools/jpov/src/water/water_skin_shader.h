@@ -238,16 +238,23 @@ void main() {
     float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
     // 深度拒绝。
     //
-    // ⚠️ `horizon_clamped` 的像素必须**无条件跳过**：钳位后 t ≈ (level−cam.y)/1e-4 ≈ 数十 km，
-    //    `view_z` 远超 far；只要该像素的 scene_ndc 不是严格的 1.0（天空不写深度，但远处几何、
-    //    深度纹理的浮点残差、或不同后端对背景值的编码差一点都可能），
-    //    `view_z > scene_z + bias` 必然成立 ⇒ **整行水面被剔** ⇒ 露出天空在地平线以下填的
-    //    ground 色（暗蓝灰），表现为一条"深色裂隙"。
-    //    那个距离上不存在能挡住它的几何，跳过测试是物理上正确的，不是投机。
+    // ⚠️ `horizon_clamped` 的像素**不能直接用 view_z**：钳位后 t ≈ 数十 km，`view_z` 远超 far，
+    //    只要 scene_ndc 不是严格 1.0（浮点残差/远处的背面/后端编码差）就会**整行被剔** ⇒
+    //    露出天球地色（"深色裂隙"）。但也不能像旧版那样整条跳过 —— 那会把地平线那 1~2 行
+    //    的近处物体一起盖掉。判据改成「这一像素有没有几何」：钳位射线打到的是无穷远水面，
+    //    所以任何不透明几何都在它前面。
     //    debug=3 仍然保留成"全局跳过"，用于对比。
     if (uWaveDebug == 3) {
         // 全局跳过（debug）
-    } else if (!horizon_clamped && scene_ndc < kBackgroundDepth) {
+    } else if (horizon_clamped) {
+        // 地平线钳位像素：水面交点在"无穷远" ⇒ **任何不透明几何都挡在它前面**。
+        // ⚠️ 旧版这里整条跳过深度测试，结果地平线那 1~2 行会把近处物体一起盖掉
+        //    （2026-11-19 报的「box 被水皮锯」：箱子上沿被水面切掉 3 行）。
+        //    正确做法：不能用 view_z（钳位后是数十 km），只看"这一像素有没有几何"。
+        if (scene_ndc < kBackgroundDepth) {
+            discard;
+        }
+    } else if (scene_ndc < kBackgroundDepth) {
         float scene_z = LinearizeDepthNdc(scene_ndc, uNear, uFar);
         if (view_z > scene_z + uDepthBiasM) {
             discard;   // 不透明场景挡在水面前

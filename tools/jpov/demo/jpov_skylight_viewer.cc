@@ -781,6 +781,62 @@ int RunCaptureWaterCoverage(const std::string& out_dir) {
     return 0;
 }
 
+// 地平线遮挡回归（Danis 2026-11-19 16:41 报的「box 被水皮锯」）：
+// 近水面机位，箱子上沿被水面盖掉 3 行。根因是水皮对「地平线钳位」像素整条跳过深度测试。
+// 用法：jpov_skylight_viewer --capture-box-cut <out_dir>
+//
+//   box_1_default.png   全开（箱子应当完整）
+//   box_2_skin_off.png  关水皮（对照：箱子本来长这样）
+//   box_3_waves_off.png 关波浪
+int RunCaptureBoxCut(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — box 被水皮锯（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterMedium(true);
+    app.SetWaterSkin(true);
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterLevel(0.0f);
+
+    // 他 16:41 截图：pos (-8.6907061, 0.40962684, -2.30289817) -> (0,0,0), fov 60
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.04552;
+    app.view_.theta = -1.8299;
+    app.view_.R     = 9.0;
+
+    app.RunOnce(input, winfo, (out_dir + "/box_1_default.png").c_str());
+    app.SetWaterSkin(false);
+    app.RunOnce(input, winfo, (out_dir + "/box_2_skin_off.png").c_str());
+    app.SetWaterSkin(true);
+    app.SetWaterWaves(false);
+    app.RunOnce(input, winfo, (out_dir + "/box_3_waves_off.png").c_str());
+    app.SetWaterWaves(true);
+
+    LOG(INFO) << "box cut captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 // 水面波浪（法线扰动/高度置换）A/B：同一机位/光照/介质，只切**波幅倍率**。
 // 用法：jpov_skylight_viewer --capture-water-waves <out_dir>
 //
@@ -1807,6 +1863,7 @@ int main(int argc, char** argv) {
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
+    std::string box_cut_out_dir;
     std::string water_sweep_out_dir;
     std::string water_tricolor_out_dir;
     std::string water_light_out_dir;
@@ -1839,6 +1896,8 @@ int main(int argc, char** argv) {
             horizon_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
             water_coverage_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-box-cut") == 0 && i + 1 < argc) {
+            box_cut_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-sweep") == 0 && i + 1 < argc) {
             water_sweep_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-tricolor") == 0 && i + 1 < argc) {
@@ -1861,6 +1920,9 @@ int main(int argc, char** argv) {
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!box_cut_out_dir.empty()) {
+        return RunCaptureBoxCut(box_cut_out_dir);
     }
     if (!water_coverage_out_dir.empty()) {
         return RunCaptureWaterCoverage(water_coverage_out_dir);
