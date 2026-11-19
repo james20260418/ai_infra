@@ -63,7 +63,7 @@ inline WaveWarpSample SampleWaveWarp(const WaterWaves& waves, float x, float z) 
         return out;
     }
     const float kTwoPi = 6.28318530717958647692f;
-    for (int j = 0; j < 2; ++j) {
+    for (int j = 0; j < WaterWaves::kWarpCarriers; ++j) {
         const float lam = waves.warp_wavelength_m[j];
         if (!(lam > 0.0f)) {
             continue;

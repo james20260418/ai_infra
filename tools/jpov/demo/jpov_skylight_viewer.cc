@@ -1052,10 +1052,21 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
             ss >> v;
             out->waves.stokes_second_order = (v != 0);
         } else if (tag == "warp") {
-            ss >> out->waves.warp_amplitude_m >> out->waves.warp_wavelength_m[0] >>
-                out->waves.warp_dir_x[0] >> out->waves.warp_dir_z[0] >>
-                out->waves.warp_wavelength_m[1] >> out->waves.warp_dir_x[1] >>
-                out->waves.warp_dir_z[1];
+            ss >> out->waves.warp_amplitude_m;
+            for (int j = 0; j < jpov::WaterWaves::kWarpCarriers; ++j) {
+                float lam = 0.0f;
+                float dx = 0.0f;
+                float dz = 0.0f;
+                if (!(ss >> lam >> dx >> dz)) {
+                    if (j == 0) {
+                        LOG(FATAL) << "warp 行至少需要 1 条载波: " << line;
+                    }
+                    break;
+                }
+                out->waves.warp_wavelength_m[j] = lam;
+                out->waves.warp_dir_x[j] = dx;
+                out->waves.warp_dir_z[j] = dz;
+            }
         } else if (tag == "wave" || tag == "detail") {
             jpov::WaterWave w;
             if (!(ss >> w.dir_x >> w.dir_z >> w.wavelength_m >> w.amplitude_m >>
