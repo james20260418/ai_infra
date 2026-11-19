@@ -44,6 +44,55 @@ struct WaterWaveSample {
     float dh_dz = 0.0f;      // ∂h/∂z
 };
 
+// 低频位移场 u(p)（米）与它的空间导数（域扭曲 / domain warp）。
+// u = Σ_j A_j·dir_j·sin(k_j·dot(dir_j, p) + φ_j)；相位偏移 θ_i += k_i·dot(u, d_i)。
+struct WaveWarpSample {
+    float ux = 0.0f;
+    float uz = 0.0f;
+    float dux_dx = 0.0f;
+    float dux_dz = 0.0f;
+    float duz_dx = 0.0f;
+    float duz_dz = 0.0f;
+};
+
+// 采样低频位移场。warp_amplitude_m = 0 ⇒ 全 0（旧行为）。
+// Pre-condition: warp_wavelength_m[j] > 0（配置校验在 renderer 侧）。
+inline WaveWarpSample SampleWaveWarp(const WaterWaves& waves, float x, float z) {
+    WaveWarpSample out;
+    if (!(waves.warp_amplitude_m > 0.0f)) {
+        return out;
+    }
+    const float kTwoPi = 6.28318530717958647692f;
+    for (int j = 0; j < 2; ++j) {
+        const float lam = waves.warp_wavelength_m[j];
+        if (!(lam > 0.0f)) {
+            continue;
+        }
+        float dx = waves.warp_dir_x[j];
+        float dz = waves.warp_dir_z[j];
+        const float dl = std::sqrt(dx * dx + dz * dz);
+        if (dl > 1.0e-6f) {
+            dx /= dl;
+            dz /= dl;
+        } else {
+            dx = 1.0f;
+            dz = 0.0f;
+        }
+        const float k = kTwoPi / lam;
+        const float ph = k * (dx * x + dz * z) + waves.warp_phase_rad[j];
+        const float s = std::sin(ph);
+        const float c = std::cos(ph);
+        const float a = waves.warp_amplitude_m;
+        out.ux += a * dx * s;
+        out.uz += a * dz * s;
+        out.dux_dx += a * dx * k * dx * c;
+        out.dux_dz += a * dx * k * dz * c;
+        out.duz_dx += a * dz * k * dx * c;
+        out.duz_dz += a * dz * k * dz * c;
+    }
+    return out;
+}
+
 // 标准 smoothstep（u 先 clamp 到 [0,1]）。
 inline float SmoothStep01(float u) {
     const float c = std::clamp(u, 0.0f, 1.0f);
@@ -131,9 +180,12 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
     }
     v = ShortWaveVariance(waves);
     const int n = std::min(waves.num_waves, WaterWaves::kMaxWaves);
-    for (int i = 0; i < n; ++i) {
-        const float k = 6.283185307179586f / waves.waves[i].wavelength_m;
-        const float amp = waves.waves[i].amplitude_m * fade;
+    const int nd = std::min(waves.num_detail_waves, WaterWaves::kMaxDetailWaves);
+    for (int i = 0; i < n + nd; ++i) {
+        // 0..n-1：主波；n..n+nd-1：只进法线的细节短波（被足迹截断的部分也必须折进方差）。
+        const WaterWave& wv = (i < n) ? waves.waves[i] : waves.detail_waves[i - n];
+        const float k = 6.283185307179586f / wv.wavelength_m;
+        const float amp = wv.amplitude_m * fade;
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
@@ -145,8 +197,8 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
         }
         const float a = amp * k;
         const float w = 0.5f * a * a * (1.0f - lod_amp * lod_amp);
-        float dx = waves.waves[i].dir_x;
-        float dz = waves.waves[i].dir_z;
+        float dx = wv.dir_x;
+        float dz = wv.dir_z;
         const float dl = std::sqrt(dx * dx + dz * dz);
         if (dl > 1.0e-6f) {
             dx /= dl;
@@ -160,6 +212,51 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
         v.zz += w * dz * dz;
     }
     return v;
+}
+
+// 细节短波对法线的贡献（**只是梯度，不改高度**）。
+// 与主波同一份相位/色散/淡出/足迹规则，但不进求交（否则二分成本 ×N）。
+// Pre-condition: wavelength_m > 0。
+inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, float time_s,
+                                   float fade, float pixel_footprint_m,
+                                   const WaveWarpSample& warp, WaterWaveSample* out) {
+    if (out == nullptr || !waves.enabled || fade <= 0.0f) {
+        return;
+    }
+    const int nd = std::clamp(waves.num_detail_waves, 0, WaterWaves::kMaxDetailWaves);
+    const float kTwoPi = 6.28318530717958647692f;
+    for (int i = 0; i < nd; ++i) {
+        const WaterWave& wv = waves.detail_waves[i];
+        float dx = wv.dir_x;
+        float dz = wv.dir_z;
+        const float dl = std::sqrt(dx * dx + dz * dz);
+        if (dl > 1.0e-6f) {
+            dx /= dl;
+            dz /= dl;
+        } else {
+            dx = 1.0f;
+            dz = 0.0f;
+        }
+        const float k = kTwoPi / wv.wavelength_m;
+        const float omega = std::sqrt(kWaveGravity * k) * waves.speed_scale;
+        float lod_amp = 1.0f;
+        if (pixel_footprint_m > 1.0e-6f) {
+            const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
+            if (wavelength_px <= 2.0f) {
+                lod_amp = 0.0f;
+            } else if (wavelength_px < 8.0f) {
+                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            }
+        }
+        const float amp = wv.amplitude_m * fade * lod_amp;
+        const float wx = k * (warp.dux_dx * dx + warp.duz_dx * dz);
+        const float wz = k * (warp.dux_dz * dx + warp.duz_dz * dz);
+        const float phase = k * (dx * x + dz * z) - omega * time_s + wv.phase_rad +
+                            k * (warp.ux * dx + warp.uz * dz);
+        const float cos_p = std::cos(phase);
+        out->dh_dx += amp * (k * dx + wx) * cos_p;
+        out->dh_dz += amp * (k * dz + wz) * cos_p;
+    }
 }
 
 // 采样高度场（含 flow 调制）。
@@ -194,6 +291,7 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
     const float amp_gain = 1.0f + waves.flow_wind_gain * std::clamp(flow_len, 0.0f, 1.0f);
 
     const float kTwoPi = 6.28318530717958647692f;
+    const WaveWarpSample warp = SampleWaveWarp(waves, x, z);
     const int count = std::clamp(waves.num_waves, 0, WaterWaves::kMaxWaves);
     for (int i = 0; i < count; ++i) {
         const WaterWave& w = waves.waves[i];
@@ -227,13 +325,26 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
             }
         }
         const float amp = w.amplitude_m * amp_gain * fade * lod_amp;
-        const float phase = k * (dx * x + dz * z) - omega * time_s + w.phase_rad;
+        // 域扭曲：θ += k·dot(u, d)，梯度多一项 k·(∂u/∂x, ∂u/∂z)·d。
+        const float wx = k * (warp.dux_dx * dx + warp.duz_dx * dz);
+        const float wz = k * (warp.dux_dz * dx + warp.duz_dz * dz);
+        const float phase = k * (dx * x + dz * z) - omega * time_s + w.phase_rad +
+                            k * (warp.ux * dx + warp.uz * dz);
         const float sin_p = std::sin(phase);
         const float cos_p = std::cos(phase);
+        const float gx = k * dx + wx;
+        const float gz = k * dz + wz;
 
         out.height_m += amp * sin_p;
-        out.dh_dx += amp * k * dx * cos_p;
-        out.dh_dz += amp * k * dz * cos_p;
+        out.dh_dx += amp * gx * cos_p;
+        out.dh_dz += amp * gz * cos_p;
+        if (waves.stokes_second_order) {
+            // −½·k·A²·cos 2θ：峰抬尖、谷抬平。cos2θ = 1 − 2sin²θ，sin2θ = 2sinθcosθ。
+            const float sin2 = 2.0f * sin_p * cos_p;
+            out.height_m += -0.5f * k * amp * amp * (1.0f - 2.0f * sin_p * sin_p);
+            out.dh_dx += k * amp * amp * sin2 * gx;
+            out.dh_dz += k * amp * amp * sin2 * gz;
+        }
     }
     return out;
 }
@@ -262,7 +373,13 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
                 lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
             }
         }
-        sum += waves.waves[i].amplitude_m * lod_amp;
+        const float a = waves.waves[i].amplitude_m * lod_amp;
+        sum += a;
+        if (waves.stokes_second_order) {
+            // 二阶谐波把峰值再抬高 ½·k·A²：二分区间必须覆盖它，否则端点不变号。
+            const float k = 6.28318530717958647692f / waves.waves[i].wavelength_m;
+            sum += 0.5f * k * a * a;
+        }
     }
     return sum * amp_gain * fade;
 }
@@ -355,9 +472,12 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
         const float dx = p.x() - cam_pos.x();
         const float dz = p.z() - cam_pos.z();
         const float dist = std::sqrt(dx * dx + dz * dz);
-        const WaterWaveSample s =
-            SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z,
-                            WaveFadeFactor(waves, dist), pixel_footprint_m);
+        const float fade_here = WaveFadeFactor(waves, dist);
+        WaterWaveSample s =
+            SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z, fade_here,
+                            pixel_footprint_m);
+        AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
+                               SampleWaveWarp(waves, p.x(), p.z()), &s);
         out->hit = true;
         out->t = t;
         out->sample = s;
@@ -411,9 +531,12 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     const float dx = p.x() - cam_pos.x();
     const float dz = p.z() - cam_pos.z();
     const float dist = std::sqrt(dx * dx + dz * dz);
-    const WaterWaveSample s =
-        SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z,
-                        WaveFadeFactor(waves, dist), pixel_footprint_m);
+    const float fade_here = WaveFadeFactor(waves, dist);
+    WaterWaveSample s =
+        SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z, fade_here,
+                        pixel_footprint_m);
+    AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
+                           SampleWaveWarp(waves, p.x(), p.z()), &s);
     out->hit = true;
     out->t = t;
     out->sample = s;
