@@ -184,6 +184,9 @@ void main() {
     if (t <= 0.0) {
         discard;   // 交点在相机后方
     }
+    // 平面交点距离：**平滑**、与波浪无关。只用于深度测试（见 ④）——波浪求交的 t 在掠射时
+    // 会因"先撞到哪个波峰"在相邻像素间跳几十米到几公里，用它比较会出单像素级的误剔/误留。
+    float t_plane = t;
 
     // ── ③b 法线 + 像素内法线方差（specular AA 的唯一正确来源）──
     //    ⚠️ 这里**不能 discard**：dFdx/dFdy 必须在近 uniform 的控制流里求值。
@@ -234,7 +237,9 @@ void main() {
     }
 
     // ── ④ 场景深度拒绝（用视轴深度比较：MRT#1 存的是 gl_FragCoord.z）──
-    float view_z = t * dot(rd, uCamFwd);
+    // ⚠️ 用**平面**交点距离，不用波浪求交的 t：后者在掠射时相邻像素能差几公里 ⇒
+    //    view_z 抖动 ⇒ 与场景深度比较会在单像素上翻转（偶发单像素"z 不对"）。
+    float view_z = t_plane * dot(rd, uCamFwd);
     float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
     // 深度拒绝。
     //
@@ -411,7 +416,10 @@ void main() {
     // ── WBO 覆盖集 ──
     oAccum  = vec4(C, alpha);
     oReveal = alpha;
-    oDepth  = t * alpha;      // 代表深度 = 射线距离 × 遮挡率
+    // 代表深度 = 射线距离 × 遮挡率。
+    // ⚠️ 波浪求交的 t 在掠射时会在相邻像素间跳（先撞哪个波峰由亚像素方向决定），
+    //    所以合成趟**不用这个值做排序**：水体层在合成里被强制排到最前（见 fog_composite）。
+    oDepth  = t * alpha;
 }
 )glsl";
 

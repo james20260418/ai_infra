@@ -252,6 +252,12 @@ void main() {
         if (!ResolveLayer(i, uv, c, t, z)) {
             continue;
         }
+        // 水体层强制排最前：它是「水面」，相机在水上时必然是最外层的界面。
+        // 而且它写进 WBO 的代表深度用的是**波浪求交**的 t（掠射时可跳几公里），
+        // 拿它排序会在单像素上翻转顺序 ⇒ 直接用 -1 钉死。
+        if (i == uWaterLayerIndex) {
+            z = -1.0;
+        }
         int j = n;
         while (j > 0 && layer_z[j - 1] > z) {
             layer_c[j] = layer_c[j - 1];
