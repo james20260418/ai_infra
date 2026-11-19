@@ -83,6 +83,8 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
         // 相机在水下、视线向上：水体到水面为止（再往上就是空气）
         t1 = std::min(t1, (m.level_y - ro.y()) / rd.y());
     }
+    // len 允许是 +inf（背景像素 = 无穷远）：下面的闭式在 len → ∞ 时收敛，
+    //   τ → ∞ ⇒ 背景透射率 0；DecayLength → 1/σt。数据通路里没有会发散的项。
     const float len = t1 - t0;
     if (!(len > 0.0f)) {
         return;
@@ -108,9 +110,11 @@ inline void WaterAt(const WaterMediumSample& m, const Vec3f& ro, const Vec3f& rd
     const float st_r = m.sigma_a.x() + m.sigma_s.x();
     const float st_g = m.sigma_a.y() + m.sigma_s.y();
     const float st_b = m.sigma_a.z() + m.sigma_s.z();
-    tau->x() = st_r * len_w;
-    tau->y() = st_g * len_w;
-    tau->z() = st_b * len_w;
+    // 逐通道防爆：σt = 0 且 len = ∞ 时 0·∞ = NaN。σt = 0 的通道本来就是"无衰减"，
+    // 透射率恒 1、注入项恒 0 ⇒ 直接把 τ 置 0 最干净。
+    tau->x() = (st_r > 0.0f) ? st_r * len_w : 0.0f;
+    tau->y() = (st_g > 0.0f) ? st_g * len_w : 0.0f;
+    tau->z() = (st_b > 0.0f) ? st_b * len_w : 0.0f;
 
     // ── 直射项（闭式）：∫ exp(−σt·[(t−t0) + d(t)/u_w.y]) dt ──
     //   d(t) = level − p(t).y 是「该点到水面」的深度，沿折射后的太阳方向上去的路程 = d/u_w.y。

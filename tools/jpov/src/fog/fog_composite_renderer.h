@@ -147,6 +147,18 @@ uniform sampler2D uLayer3Accum;
 uniform sampler2D uLayer3Reveal;
 uniform sampler2D uLayer3Depth;
 
+// 深度 1.0 的语义 = 无穷远（= jpov::kDepthInfinityM），**不是 camera.far**。
+// 相机 far 只负责裁剪远处的模型；雾/介质要的是「背景到底有多远」。
+uniform float uDepthInfinityM;
+// 水凝胶的"无穷远"射线参数：**真 +inf**（解析解在 len→∞ 时收敛）。
+// 放在这里而不是介质片段里：没有介质时这个 uniform 也必须在，否则 main 会编译失败。
+uniform float uWaterInfiniteZ;
+// 水皮层在层集合里的下标（-1 = 没有 / 相机在水下）。
+// 约定（2026-11-19 Danis 定）：**相机在水上时，水皮一定包住水体** ⇒
+//   水皮就是水面 ⇒ 它之前的介质前缀恒为空（只有空气）。所以水体层不乘 exp(−tau_i)，
+//   也不贡献 S_i；它之后的水柱整段由 W=层透射率 衰减。
+uniform int uWaterLayerIndex;
+
 // 解析第 i 个透明层 → 预乘色 c、层透射率 t、代表深度 z（视空间米）。
 // 返回 false = 该像素上此层为空（accum.a≈0），不产生深度边界。
 bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
@@ -186,19 +198,21 @@ bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
 // 场的累积 (τ, S)：froxel 雾场 + 额外介质提供者 MediumAt（水体的解析项）。
 // 两者都是「相机 → z」的前缀累积量，所以直接相加；froxel 的 τ 是标量（σ 灰），
 // 广播到三个通道 —— 水体逐通道由 MediumAt 自己负责。
-void FieldAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
+// z_fog 与 z_med 分开：雾是有限体积（到 z_op 为止），水凝胶是半空间解析解，
+// 背景像素要积到**无穷远**才是"水体铺到地平线"。见 camera.h 的深度约定。
+void FieldAt(vec3 ro, vec3 rd, float z_fog, float z_med, out vec3 tau, out vec3 S) {
     vec3 fog_tau = vec3(0.0);
     vec3 fog_S = vec3(0.0);
     if (uHasFog != 0) {
         float ct;
         vec3 cS;
-        SampleFogBilinear(gl_FragCoord.xy, DepthToEll(z), ct, cS);
+        SampleFogBilinear(gl_FragCoord.xy, DepthToEll(z_fog), ct, cS);
         fog_tau = vec3(ct);
         fog_S = cS;
     }
     vec3 med_tau;
     vec3 med_S;
-    MediumAt(ro, rd, z, med_tau, med_S);   // 无水时恒等（kDefaultMediumGlsl）
+    MediumAt(ro, rd, z_med, med_tau, med_S);   // 无水时恒等（kDefaultMediumGlsl）
     tau = fog_tau + med_tau;
     S = fog_S + med_S;
 }
@@ -213,6 +227,14 @@ void main() {
     vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
     vec3 p_scene = pw.xyz / pw.w;
     float z_op = length(p_scene - ro);
+    // 背景像素（深度 = 1.0）的语义是**无穷远**：
+    //   雾积到 uDepthInfinityM（有限，够大）；水凝胶积到 +inf（解析解在 len→∞ 收敛）。
+    //   两者都不会发散；camera.far 不参与这里（见 camera.h 的深度约定）。
+    float z_med = z_op;
+    if (dndc >= 0.999999) {
+        z_op = uDepthInfinityM;      // 雾：有限但足够远
+        z_med = uWaterInfiniteZ;     // 水体：真无穷（解析解收敛）
+    }
     vec3  rd = normalize(p_scene - ro);   // 水体/介质提供者需要单位射线
 
     // ── 收集有效层 → 按代表深度升序（近→远）插入排序 ──
@@ -250,12 +272,14 @@ void main() {
     vec3  tau_prev = vec3(0.0);
     vec3  S_prev = vec3(0.0);
     for (int i = 0; i < n; ++i) {
-        float zi = min(layer_z[i], z_op);   // 层深度不超过不透明表面
+        bool is_water = (i == uWaterLayerIndex);
+        // 水体层：前缀恒空（水皮 = 水面，其上方只有空气）。
+        float zi = is_water ? 0.0 : min(layer_z[i], z_op);
         vec3  tau_i;
         vec3  S_i;
-        FieldAt(ro, rd, zi, tau_i, S_i);
+        FieldAt(ro, rd, zi, zi, tau_i, S_i);
         L += W * (S_i - S_prev);
-        L += W * exp(-tau_i) * layer_c[i];
+        L += W * exp(-tau_i) * layer_c[i];   // 水体层 tau_i = 0 ⇒ 不衰减
         W *= vec3(layer_t[i]);
         tau_prev = tau_i;
         S_prev = S_i;
@@ -263,7 +287,7 @@ void main() {
 
     vec3 tau_op;
     vec3 S_op;
-    FieldAt(ro, rd, z_op, tau_op, S_op);
+    FieldAt(ro, rd, z_op, z_med, tau_op, S_op);
     L += W * (S_op - S_prev);
     vec3 T = W * exp(-tau_op);   // 背景透射率（逐通道）：必须是**全路径**衰减
 
@@ -315,7 +339,9 @@ void main() {
               const float view_proj[16],
               const FogParams& params,
               const TransparentLayerSet& layers,
-              const water::WaterMediumSample* medium = nullptr);
+              const water::WaterMediumSample* medium = nullptr,
+              // 水皮层下标（-1 = 无 / 相机在水下）
+              int water_layer_index = -1);
 
 private:
     ShaderManager* shader_mgr_ = nullptr;

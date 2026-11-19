@@ -128,6 +128,23 @@ float LinearizeDepthNdc(float ndc_z, float near_plane, float far_plane) {
     return 2.0 * near_plane * far_plane / (far_plane + near_plane - ndc * (far_plane - near_plane));
 }
 
+// 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
+//   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
+// 掠射时远低于平面菲涅尔：2° 仰角下 0.80 → 0.36（MSS≈0.017）/0.26（0.05）/0.17（0.15）。
+// 差额就是进了透射的那部分（T_eff = 1 − R_eff）→ 海面因此不会“水天一色”。
+//
+// 解析近似（对 12×6 的 Monte-Carlo 表拟合，平均误差 0.026，掠射段 <0.03）：
+//   R_eff ≈ mix( F(cos_i + 0.52·√a2^0.72), F(cos_i), smoothstep(0.05, 0.5, cos_i) )
+//   前者负责掠射（粗面把掠射峰压下去），后者保证高仰角回到平面值。
+float RoughFresnelAlbedo(float cos_i, float a2, float ior) {
+    float s = sqrt(max(a2, 0.0));
+    float shifted = FresnelDielectric(clamp(cos_i + 0.52 * pow(max(s, 1.0e-6), 0.72),
+                                           1.0e-4, 0.999), 1.0, ior);
+    float plain = FresnelDielectric(clamp(cos_i, 1.0e-4, 0.999), 1.0, ior);
+    float w = smoothstep(0.05, 0.5, cos_i);
+    return mix(shifted, plain, w);
+}
+
 void main() {
     vec3 rd = normalize(uCamFwd
                         + uCamRight * (vNdc.x * uTanHalfFov * uAspect)
@@ -167,18 +184,21 @@ void main() {
     if (t <= 0.0) {
         discard;   // 交点在相机后方
     }
+
     // ── ③b 法线 + 像素内法线方差（specular AA 的唯一正确来源）──
     //    ⚠️ 这里**不能 discard**：dFdx/dFdy 必须在近 uniform 的控制流里求值。
     //    wave_ok=false 的像素留到最后再 discard（它们只在边缘，导数误差可忽略）。
     vec3 N = vec3(0.0, 1.0, 0.0);        // 无波浪 = 纯平面法线
     bool wave_ok = true;
+    // 像素在水面上覆盖的世界尺寸（用平面 t 估；掠射时按 |rd.y| 放大）。
+    // ⚠️ `max(|rd.y|, 0.15)` 是人为地板：它让「距离 > 6.7×相机高度」以后的足迹被**低估**，
+    //    谱截断因此杀得不够（known_issue 已记）。修它之前不要指望 fade 能被删掉。
+    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
+    float footprint = t * pixel_angle / max(abs(rd.y), 0.15);
     if (uWaveCount > 0) {
         vec3 pos_w = vec3(0.0);
         vec3 nrm_w = vec3(0.0, 1.0, 0.0);
         float t_wave = t;
-        // 像素在水面上覆盖的世界尺寸（用平面 t 估；掠射时按 |rd.y| 放大）。
-        float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
-        float footprint = t * pixel_angle / max(abs(rd.y), 0.15);
         wave_ok = WaveSurfaceHit(uCamPos, rd, uWaterLevelY, footprint, t_wave, pos_w, nrm_w);
         t = wave_ok ? t_wave : t;
         N = wave_ok ? nrm_w : vec3(0.0, 1.0, 0.0);
@@ -195,6 +215,20 @@ void main() {
     // 横向邻居始终是水面 ⇒ dFdx 安全。各向同性下 E|dN/dx|² = E|dN/dy|²，
     // 所以 0.5·|dFdx|² 与原来的 0.25·(|dx|²+|dy|²) 期望相同。
     float normal_var_px = 0.5 * dot(dNdx, dNdx);
+    // ── ③d 法线场过滤：把「看不见的波」折算成粗糙度 ─────────────────────────
+    //   mss = E|∇h|² = 被足迹截断的斜率方差 + 短波（毛细波/短重力波）。
+    //   各向同性下 GGX 的 a2 = 2σ² = mss ⇒ 可直接当 a2 用（与 normal_var_px 同量纲）。
+    //   本 PR 只有 F_eff 消费它；拉宽/拉糊见 known_issue §10.16。
+    float fade_at_p = WaveFadeFactor(length((uCamPos + rd * t).xz - uCamPos.xz));
+    float sxx, sxz, szz;
+    WaveSlopeTensor(footprint, fade_at_p, sxx, sxz, szz);
+    // 投影到入射面方向（视线在 xz 上的投影）——这才是影响镜面波瓣的那一维。
+    vec2 td = rd.xz;
+    float tdl = length(td);
+    td = (tdl > 1.0e-6) ? (td / tdl) : vec2(1.0, 0.0);
+    float var_p = td.x * td.x * sxx + 2.0 * td.x * td.y * sxz + td.y * td.y * szz;
+    // 本 PR 只做透射率补偿：拉宽 / 拉糊两个消费者按 known_issue §10.16 暂缓，
+    // 所以 a2 与 env LOD 仍走旧的 dFdx 口径（normal_var_px），只有 F_eff 吃 var_p。
     if (!wave_ok) {
         discard;   // 求交失败 / 交点跑到相机后方
     }
@@ -225,11 +259,16 @@ void main() {
     float cos_i = abs(dot(rd, N));
     float F = under ? FresnelDielectric(cos_i, uWaterIor, 1.0)
                     : FresnelDielectric(cos_i, 1.0, uWaterIor);
+    // ③ 角度平均菲涅尔：粗糙界面的方向反照率。反射↓、透射↑（两边一起动）。
+    //    没有开关 —— 这是正确算法（掠射 2° 平面 0.80 → 0.36@MSS0.017）。
+    if (!under) {
+        F = RoughFresnelAlbedo(cos_i, var_p, uWaterIor);
+    }
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
     vec3 sun_spec = vec3(0.0);
+    float NoV = dot(Vw, N);
     if (uHasSun != 0) {
-        float NoV = dot(Vw, N);
         float NoL = dot(uSunToward, N);
         if (NoV > 0.0 && NoL > 0.0) {
             float NoH = max(dot(H, N), 0.0);
@@ -250,8 +289,8 @@ void main() {
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
-            // 界面反射率：与探针支路同一个 F 口径。
-            float Fw = FresnelDielectric(cos_i, 1.0, uWaterIor);
+            // 界面反射率：与探针支路同一个 F 口径（含角度平均修正）。
+            float Fw = F;
             sun_spec = uSunIrradiance * (Fw * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
         }
     }
@@ -312,6 +351,7 @@ void main() {
         //    将来接 SSR 时写成 F*(A*SSR + (1-A)*sky) + sun_spec，
         //    千万别把 sun_spec 也乘上 A（那会让日盘像随 SSR 命中与否闪）。
         C = F * refl + sun_spec;
+
         // 透射率 = (1−F)/n²（辐射度跨介质守恒）；WBO 的 α 是“背景衰减率”= 1 − T。
         alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
     }

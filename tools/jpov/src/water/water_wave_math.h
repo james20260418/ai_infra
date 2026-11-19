@@ -68,6 +68,100 @@ inline float WaveFadeFactor(const WaterWaves& waves, float horizontal_dist_m) {
     return 1.0f - x * x * (3.0f - 2.0f * x);   // smoothstep
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 法线场过滤：远处亚像素波 → BRDF 粗糙度
+//
+// 量：MSS = E|∇h|²（斜率均方，无量纲）。各向同性下 GGX 的 a2 = 2σ² = MSS，
+//     所以这个数可以直接当 a2 用（与 `normal_var_px` 同量纲）。
+//
+// 唯一来源：**这份波谱自己**。被像素足迹截断的那部分波不再贡献几何，
+// 但它们的方差不能丢，必须转进 BRDF（否则远处退化成一面临界平面镜）。
+// 4 个波之外的短波一概不建模 —— 想更粗糙就加波或加振幅，不引入别的参数。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 送进 BRDF 的方差 = “被截断的 4 波方差” + 短波方差（张量相加）。
+//   pixel_footprint_m ≤ 0 ⇒ 不做截断（近场，只剩短波）。
+//   fade 与 WaveSampleField 同口径（远处淡出的振幅也不再贡献方差）。
+// 斜率方差张量（xz 平面）：xx = E[(∂h/∂x)²]，xz = E[∂h/∂x·∂h/∂z]，zz = E[(∂h/∂z)²]。
+struct SlopeVariance {
+    float xx = 0.0f;
+    float xz = 0.0f;
+    float zz = 0.0f;
+};
+
+// 短波的贡献：总量 slope_rms²，按 2.7:1 分到沿风/横风（Cox–Munk 实测比例）。
+inline float CoxMunkMeanSquareSlope(float wind_speed_ms) {
+    if (!(wind_speed_ms > 0.0f)) {
+        return 0.0f;
+    }
+    const float u = std::min(wind_speed_ms, 20.0f);
+    return 0.00512f * u + 0.003f + 0.00192f * u;
+}
+
+inline SlopeVariance ShortWaveVariance(const WaterWaves& waves) {
+    SlopeVariance v;
+    const float mss = CoxMunkMeanSquareSlope(waves.short_wave.wind_speed_ms);
+    if (!(mss > 0.0f)) {
+        return v;
+    }
+    float dx = waves.short_wave.dir_x;
+    float dz = waves.short_wave.dir_z;
+    const float dl = std::sqrt(dx * dx + dz * dz);
+    if (dl > 1.0e-6f) {
+        dx /= dl;
+        dz /= dl;
+    } else {
+        return SlopeVariance{mss * 0.5f, 0.0f, mss * 0.5f};   // 无方向 ⇒ 各向同性
+    }
+    const float along = mss * 0.73f;    // 2.7:1 ⇒ 0.73 / 0.27
+    const float cross = mss * 0.27f;
+    const float px = -dz;
+    const float pz = dx;
+    v.xx = along * dx * dx + cross * px * px;
+    v.xz = along * dx * dz + cross * px * pz;
+    v.zz = along * dz * dz + cross * pz * pz;
+    return v;
+}
+
+inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_footprint_m,
+                                          float fade) {
+    SlopeVariance v;
+    if (!waves.enabled || fade <= 0.0f) {
+        return v;   // 波浪整个关掉 = 镜面水：短波也不参与（与 GLSL 同口径）
+    }
+    v = ShortWaveVariance(waves);
+    const int n = std::min(waves.num_waves, WaterWaves::kMaxWaves);
+    for (int i = 0; i < n; ++i) {
+        const float k = 6.283185307179586f / waves.waves[i].wavelength_m;
+        const float amp = waves.waves[i].amplitude_m * fade;
+        float lod_amp = 1.0f;
+        if (pixel_footprint_m > 1.0e-6f) {
+            const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
+            if (wavelength_px <= 2.0f) {
+                lod_amp = 0.0f;
+            } else if (wavelength_px < 8.0f) {
+                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            }
+        }
+        const float a = amp * k;
+        const float w = 0.5f * a * a * (1.0f - lod_amp * lod_amp);
+        float dx = waves.waves[i].dir_x;
+        float dz = waves.waves[i].dir_z;
+        const float dl = std::sqrt(dx * dx + dz * dz);
+        if (dl > 1.0e-6f) {
+            dx /= dl;
+            dz /= dl;
+        } else {
+            dx = 1.0f;
+            dz = 0.0f;
+        }
+        v.xx += w * dx * dx;
+        v.xz += w * dx * dz;
+        v.zz += w * dz * dz;
+    }
+    return v;
+}
+
 // 采样高度场（含 flow 调制）。
 //   flow_x / flow_z  该点的 flow 向量（世界水平方向 × 强度；0 = 无流）。
 //                    GPU 侧由 flow map 纹理采样得到，CPU 侧由调用方给出。
@@ -146,8 +240,10 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
 
 // 高度上界：Σ A_i · amp_gain · fade（含 flow 的风浪增益）。
 // 用于二分求交的区间半径 —— |h| 永远不超过它（fade∈[0,1]）。
+// 有效振幅上界 ΣA·fade·lod_amp —— 必须与 GLSL 的 WaveAmplitudeSum(fade, footprint) 同口径，
+// 否则二分区间在 GPU/CPU 之间不一致（成片差异只在掠射区露出来）。
 inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_z,
-                              float fade) {
+                              float fade, float pixel_footprint_m = 0.0f) {
     if (!waves.enabled || waves.num_waves <= 0 || fade <= 0.0f) {
         return 0.0f;
     }
@@ -156,7 +252,17 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
     const int count = std::clamp(waves.num_waves, 0, WaterWaves::kMaxWaves);
     float sum = 0.0f;
     for (int i = 0; i < count; ++i) {
-        sum += waves.waves[i].amplitude_m;
+        // 与 SampleWaveField 的 anti-aliasing 截断同一份权重
+        float lod_amp = 1.0f;
+        if (pixel_footprint_m > 1.0e-6f) {
+            const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
+            if (wavelength_px <= 2.0f) {
+                lod_amp = 0.0f;
+            } else if (wavelength_px < 8.0f) {
+                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            }
+        }
+        sum += waves.waves[i].amplitude_m * lod_amp;
     }
     return sum * amp_gain * fade;
 }
@@ -219,9 +325,15 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     // 所以二分是全局收敛的；相邻像素的区间连续 ⇒ 收敛点也连续 ⇒ 不会出现「交点乱跳」。
     // （Newton 在波谷/陡坡处 f' = rd.y − ∇h·rd.xz 会趋近 0，dt 爆炸或跳到相邻根 ——
     //   实测就是「浪坑里一批法线像噪点」的来源。）
-    const float fade_bound = 1.0f;   // 区间半径取上界（不含 fade 衰减，保守）
-    const float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound);
+    // 区间半径用**平面交点处的有效振幅**（含 fade；足迹截断在 CPU 参考里默认关）。
+    // 与 GLSL 同口径：远处谱已截断成平面 ⇒ span→0 ⇒ t 连续。
     const float t_plane = t;
+    const Vec3f p_plane{cam_pos.x() + rd.x() * t_plane, cam_pos.y() + rd.y() * t_plane,
+                        cam_pos.z() + rd.z() * t_plane};
+    const float dxp = p_plane.x() - cam_pos.x();
+    const float dzp = p_plane.z() - cam_pos.z();
+    const float fade_bound = WaveFadeFactor(waves, std::sqrt(dxp * dxp + dzp * dzp));
+    const float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound, pixel_footprint_m);
 
     const auto height_at = [&](float tt) {
         const Vec3f p{cam_pos.x() + rd.x() * tt,

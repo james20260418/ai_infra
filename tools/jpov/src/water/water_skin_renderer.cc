@@ -222,6 +222,13 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
                 (on && w->displacement) ? 1 : 0);
     glUniform1i(shader_mgr_->GetUniform(prog, "uWaveHasFlow"),
                 (on && in.wave_flow_tex != 0u) ? 1 : 0);
+    // 短波：只进方差（不进几何）。方向与斜率 RMS 由调用方给。
+    float swx = on ? w->short_wave.dir_x : 0.0f;
+    float swz = on ? w->short_wave.dir_z : 0.0f;
+    float swwind = on ? w->short_wave.wind_speed_ms : 0.0f;
+    glUniform2f(shader_mgr_->GetUniform(prog, "uShortWaveDir"), swx, swz);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uShortWaveMss"),
+                water::CoxMunkMeanSquareSlope(swwind));
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {

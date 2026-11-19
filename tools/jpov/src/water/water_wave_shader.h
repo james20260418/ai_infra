@@ -32,6 +32,9 @@ uniform sampler2D uWaveFlowMap;    // RG 编码 (flow*0.5+0.5)
 uniform vec2  uWaveFlowUvScale;    // p.xz * scale -> uv
 uniform float uWaveFlowStrength;   // flow 整体增益
 uniform int   uWaveDisplace;       // 0 = 法线 only（debug）；1 = 真位移
+// 法线场过滤（远处亚像素波 → 粗糙度）
+uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各向同性）
+uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
 
 const int kWaveBisectIters = 12;
 // 抗锯齿：一个波长占的像素数 ≤ 2 就消失、≥ 8 就全幅。
@@ -58,6 +61,55 @@ vec2 WaveFlowAt(vec2 p) {
     }
     vec2 rg = texture(uWaveFlowMap, p * uWaveFlowUvScale).rg;
     return (rg * 2.0 - 1.0) * uWaveFlowStrength;
+}
+
+// ── 法线场过滤：远处亚像素波 → BRDF 粗糙度（斜率方差张量）─────────────
+// 与 CPU 的 WaveFilteredVariance 同源。输出 xz 平面的 2x2 张量：
+//   xx = E[(∂h/∂x)²]、xz = E[∂h/∂x·∂h/∂z]、zz = E[(∂h/∂z)²]
+// 来源 = 被足迹截断的 4 波（不再贡献几何的那部分）+ 短波（2.7:1 各向异性）。
+void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, out float szz) {
+    sxx = 0.0; sxz = 0.0; szz = 0.0;
+    if (uWaveCount > 0 && fade > 0.0) {
+        for (int i = 0; i < 8; ++i) {
+            if (i >= uWaveCount) {
+                break;
+            }
+            float k = uWaveL[i].x;
+            float amp = uWaveL[i].z * fade;
+            float lod_amp = 1.0;
+            if (footprint > 1.0e-6) {
+                float wavelength_px = (6.283185307179586 / k) / footprint;
+                if (wavelength_px <= kWaveLodPxMin) {
+                    lod_amp = 0.0;
+                } else if (wavelength_px < kWaveLodPxMax) {
+                    float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                    lod_amp = u * u * (3.0 - 2.0 * u);
+                }
+            }
+            float a = amp * k;
+            float w = 0.5 * a * a * (1.0 - lod_amp * lod_amp);
+            vec2 d = uWaveDir[i];
+            sxx += w * d.x * d.x;
+            sxz += w * d.x * d.y;
+            szz += w * d.y * d.y;
+        }
+    }
+    if (uShortWaveMss > 0.0) {
+        vec2 d = uShortWaveDir;
+        float dl = length(d);
+        if (dl > 1.0e-6) {
+            d /= dl;
+            vec2 p = vec2(-d.y, d.x);
+            float along = 0.73 * uShortWaveMss;
+            float cross = 0.27 * uShortWaveMss;
+            sxx += along * d.x * d.x + cross * p.x * p.x;
+            sxz += along * d.x * d.y + cross * p.x * p.y;
+            szz += along * d.y * d.y + cross * p.y * p.y;
+        } else {
+            sxx += 0.5 * uShortWaveMss;
+            szz += 0.5 * uShortWaveMss;
+        }
+    }
 }
 
 // 高度 + 梯度。grad 的 x/y 分别对应 ∂h/∂x、∂h/∂z。
@@ -127,16 +179,30 @@ float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
 }
 
 // 高度上界 ΣA·(1 + wind·|flow|)：二分区间半径的依据（|h| 永远不会超过它）。
-float WaveAmplitudeSum() {
+// 有效振幅上界 ΣA·fade·lod_amp（**必须和场本身同口径**）。
+// ⚠️ 旧版用不衰减的 ΣA：在远处谱已被截断成平面，区间却仍按 ΣA/|rd.y| 撑开，
+//    掠射时 span ~ km，12 次二分的量化步长就是几十~几百米 ⇒ 交点 t 在相邻像素间乱跳，
+//    而这个 t 会作为透明层深度喂给合成趟去切介质 ⇒ 介质段长度突变 ⇒ 硬边。
+float WaveAmplitudeSum(float fade, float footprint) {
     float s = 0.0;
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
             break;
         }
-        s += uWaveL[i].z;
+        float lod_amp = 1.0;
+        if (footprint > 1.0e-6) {
+            float wavelength_px = (6.283185307179586 / uWaveL[i].x) / footprint;
+            if (wavelength_px <= kWaveLodPxMin) {
+                lod_amp = 0.0;
+            } else if (wavelength_px < kWaveLodPxMax) {
+                float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                lod_amp = u * u * (3.0 - 2.0 * u);
+            }
+        }
+        s += uWaveL[i].z * lod_amp;
     }
     float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
-    return s * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
+    return s * fade * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
 }
 
 // 视线 vs 高度场求交。
@@ -160,8 +226,11 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     }
 
     float rdy = max(abs(ray_dir.y), 1.0e-3);
-    float span = WaveAmplitudeSum() / rdy;
     float t_plane = t;
+    // 区间半径用**平面交点处的有效振幅**（含 fade 与足迹截断）：
+    // 远处谱已截断成平面 ⇒ span → 0 ⇒ t 连续，不会把量化噪声喂给合成趟的层深。
+    vec3 p_plane = cam + ray_dir * t_plane;
+    float span = WaveAmplitudeSum(WaveFadeFactor(length(p_plane.xz - cam.xz)), footprint) / rdy;
     float t_lo = max(t_plane - span, 1.0e-4);
     float t_hi = t_plane + span;
     if (t_hi <= t_lo) {

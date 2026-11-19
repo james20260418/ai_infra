@@ -1573,8 +1573,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
-        // 水体：`water` 命令存在 = 有界面层要画（层由合成器消费）；介质可单独开关。
+        // 水体：`water` 命令存在 = 世界里有水这份配置；`skin` = 画界面层，`medium.enabled` = 算体积。
+        // 两个开关互相独立（2026-11-19 Danis：要把水皮 / 介质 / 天球拆开看对齐）。
         const bool water_present = cmds.water.has_value();
+        const bool water_skin_on = water_present && cmds.water->skin;
         const bool water_medium_on = water_present && cmds.water->medium.enabled;
 
         // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
@@ -1943,7 +1945,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
             const bool run_fog = !cmds.point_fogs.empty();
             // 合成趟的触发条件：有雾场 **或** 有水体（层必须有人消费，否则水皮白画）。
-            const bool run_medium_composite = run_fog || water_present;
+            const bool run_medium_composite = run_fog || water_skin_on || water_medium_on;
 
             // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
             //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
@@ -2062,7 +2064,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    合成由下面的介质合成趟做（段 ↔ 层交替）：这样「相机 → 水面」那段水体的注入
             //    不会被层盖掉（环外 α=1 时尤其明显）。
             TransparentLayerSet layers;
-            if (water_present) {
+            // 水皮层在集合里的下标（-1 = 没有）。只有**相机在水上**时才把它标成水体层：
+            // 约定「水皮一定包住水体」只在水上成立（水下时水皮在相机头顶，前缀不是空的）。
+            int water_layer_index = -1;
+            if (water_skin_on) {
                 CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
                 CHECK(cmds.sky.has_value())
                     << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
@@ -2117,6 +2122,10 @@ void Renderer::Render(const RenderCommandList& cmds,
 
                 water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 water_skin_renderer_.Draw(wsi);
+                // 只有相机在水上时才启用「水皮包住水体」的约定。
+                if (!cam_underwater) {
+                    water_layer_index = layers.count;
+                }
                 layers.Add(water_skin_renderer_.layer());
 
                 // Draw 改了 FBO / viewport / 纹理单元：恢复主 3D 目标。
@@ -2166,7 +2175,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
 
                 fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
-                                    ff_params, layers, water_medium_ptr);
+                                    ff_params, layers, water_medium_ptr,
+                                    water_layer_index);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

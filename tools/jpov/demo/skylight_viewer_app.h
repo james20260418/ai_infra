@@ -194,7 +194,16 @@ public:
     // 散射取 0.05（清澈偏浊）：既能看出介质注入，又不把水下东西糊掉。
     static constexpr int kSceneWater = 3;
     bool IsWaterScene() const { return scene_index_ == kSceneWater; }
+    // 两个正交开关（2026-11-19 Danis 要的「拆开看对齐」）：
+    //   · water_skin_on_   = 界面层（水皮 WBO）：反射 / 透射 / 水面高光 / Snell 窗；
+    //   · water_medium_on_ = 水体介质（体积）：水下吸收 + 单次散射注入。
+    // 默认都开（旧行为逐字节不变）。
+    bool water_skin_on_ = true;
     bool water_medium_on_ = true;
+    // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
+    // 方向自动取 4 波谱的主方向；量由 Cox–Munk 风速给出（面板滑条）。
+    float water_wind_ms_ = 8.0f;
+
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
     static jpov::WaterWaves MakeDefaultWaves() {
@@ -266,6 +275,7 @@ public:
         }
     }
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
+    void SetWaterSkin(bool on) { water_skin_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
     void SetWaterScene(bool on) { scene_index_ = on ? kSceneWater : 0; }
 
@@ -657,7 +667,13 @@ public:
             jpov::WaterCommand w;
             w.level_y = water_level_y_;
             w.ior = water_ior_;
-            w.medium.enabled = water_medium_on_;
+            w.skin = water_skin_on_;
+            // 面板允许把 σ 全拖到 0；那等价于「没有介质」，不能让它撞 renderer 的 CHECK
+            //（CHECK 是给 API 误用准备的，UI 不该能触发）。全 0 ⇒ 按关闭处理。
+            const bool sigma_nonzero =
+                water_sigma_a_r_ > 0.0f || water_sigma_a_g_ > 0.0f ||
+                water_sigma_a_b_ > 0.0f || water_sigma_s_ > 0.0f;
+            w.medium.enabled = water_medium_on_ && sigma_nonzero;
             w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
             w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
             w.medium.phase_g = water_phase_g_;
@@ -683,6 +699,17 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
+                // 短波：方向 = 4 波方向的矢量和（波谱主方向），斜率 RMS 由滑条给。
+                float sx = 0.0f;
+                float sz = 0.0f;
+                for (int i = 0; i < n; ++i) {
+                    sx += wv.waves[i].dir_x;
+                    sz += wv.waves[i].dir_z;
+                }
+                const float sl = std::sqrt(sx * sx + sz * sz);
+                wv.short_wave.dir_x = (sl > 1.0e-6f) ? sx / sl : 1.0f;
+                wv.short_wave.dir_z = (sl > 1.0e-6f) ? sz / sl : 0.0f;
+                wv.short_wave.wind_speed_ms = water_wind_ms_;
                 w.waves = wv;
             }
             cmds->water = w;
@@ -746,7 +773,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 16;
+        const int   kRows    = 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -812,26 +839,14 @@ private:
                                 row(0, 12), 0.0f, 3000.0f, 0);
                 ui_.Checkbox("波浪 真位移 (关=只改法线)", &water_waves_.displacement,
                              row(0, 13));
-                ui_.SliderFloat("波浪 波数 1..4", &water_wave_count_f_, row(0, 14),
-                                1.0f, 4.0f, 0);
-                ui_.Checkbox("波浪 显示法线 (debug)", &water_wave_normal_view_, row(0, 15));
+                // 左列最后一格：水皮开关（与 row(0,1) 的「水体介质」正交）。
+                //   水皮 = 界面层 WBO（反射 / 透射 / 水面高光 / Snell 窗）；
+                //   介质 = 水下体积（吸收 + 单次散射注入）。
+                ui_.Checkbox("水皮界面层 (WBO)", &water_skin_on_, row(0, 15));
+                // 短波：只进 MSS（反射率/透射率重分配）。F_eff 本身没有开关 —— 永远开。
+                ui_.SliderFloat("风速 m/s (短波方差)", &water_wind_ms_, row(0, 16), 0.0f, 20.0f, 1);
 
-                ui_.SliderFloat("波1 振幅 m", &water_waves_.waves[0].amplitude_m,
-                                row(1, 6), 0.0f, 0.6f, 3);
-                ui_.SliderFloat("波2 振幅 m", &water_waves_.waves[1].amplitude_m,
-                                row(1, 7), 0.0f, 0.6f, 3);
-                ui_.SliderFloat("波3 振幅 m", &water_waves_.waves[2].amplitude_m,
-                                row(1, 8), 0.0f, 0.6f, 3);
-                ui_.SliderFloat("波4 振幅 m", &water_waves_.waves[3].amplitude_m,
-                                row(1, 9), 0.0f, 0.6f, 3);
-                ui_.SliderFloat("波1 波长 m", &water_waves_.waves[0].wavelength_m,
-                                row(1, 10), 2.0f, 40.0f, 1);
-                ui_.SliderFloat("波2 波长 m", &water_waves_.waves[1].wavelength_m,
-                                row(1, 11), 2.0f, 40.0f, 1);
-                ui_.SliderFloat("波3 波长 m", &water_waves_.waves[2].wavelength_m,
-                                row(1, 12), 2.0f, 40.0f, 1);
-                ui_.SliderFloat("波4 波长 m", &water_waves_.waves[3].wavelength_m,
-                                row(1, 13), 2.0f, 40.0f, 1);
+
                 // 时间：冻结 + 精确秒数（报障复现用）
                 ui_.Checkbox("波浪 冻结时间", &water_wave_time_freeze_, row(1, 14));
                 ui_.SliderFloat("波浪 时间 s", &water_wave_time_s_, row(1, 15), 0.0f, 120.0f, 2);

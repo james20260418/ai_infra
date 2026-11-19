@@ -40,6 +40,17 @@ using Vec3f = geom::Vec3<float>;
 //   - near > 0 && far > near（裁剪面有效）
 //   - up 不是零向量
 //   - viewport.width >= 0 && viewport.height >= 0
+// ── 深度约定（2026-11-19 Danis 定，别再拿 camera.far 当背景距离）──────────────
+// **NDC 1.0 的语义是「无穷远」，不是 camera.far。**
+//
+// camera.far 的职责只有一条：裁剪远处的模型。它**不能**被当成「背景像素离相机多远」——
+// 否则所有体积消费者（水凝胶介质、雾、SSR）都会被相机的裁剪面绑架：
+//   实测过的事故：水凝胶在半空间里解析，但背景像素的 z_op 由 far=1000 反解出来，
+//   于是 `MediumAt` 的积分段被砍在 1000 m，射线一旦"入水点在远平面之外"就整段作废，
+//   关掉水皮以后，地平线以下就露出一条天球地色。
+// 需要把「深度 1.0」换算成米时，用这个常量（1e6 m ≈ 水体/雾早已饱和的无穷远）。
+inline constexpr float kDepthInfinityM = 1.0e6f;
+
 struct Camera {
     Vec3f position = {0.0f, 0.0f, 10.0f};
     Vec3f target   = {0.0f, 0.0f, 0.0f};

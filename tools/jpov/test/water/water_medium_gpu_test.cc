@@ -189,7 +189,10 @@ struct Fixture {
         const float dy = p_scene.y() - ro.y();
         const float dz = p_scene.z() - ro.z();
         const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-        *z_op = len;
+        // 深度纹理恒为 1.0 ⇒ **背景像素**。按新约定（camera.h::kDepthInfinityM），
+        // 深度 1.0 的语义是「无穷远」，不是 camera.far —— 与合成趟同口径。
+        (void)len;
+        *z_op = jpov::kDepthInfinityM;
         *rd = {dx / len, dy / len, dz / len};
     }
 };

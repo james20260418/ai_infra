@@ -20,11 +20,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "tools/jpov/interface/camera.h"   // Vec3f（header-only，无 GL）
 
 namespace jpov {
 namespace water {
+
 
 // 水的折射率（20°C 纯水）。全工程唯一一处数值。
 inline constexpr float kWaterIorDefault = 1.333f;
@@ -66,6 +68,24 @@ inline float FresnelDielectric(float cos_i, float n1, float n2) {
     return 0.5f * (rs * rs + rp * rp);
 }
 
+// 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
+//   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
+// 掠射时远低于平面菲涅尔（2°、MSS=0.017 时 0.80 → 0.36）；差额进透射（T_eff = 1 − R_eff）。
+// 解析近似（对 12×6 Monte-Carlo 表拟合，平均误差 0.026）：
+//   mix( F(cosθ + 0.52·√mss^0.72), F(cosθ), smoothstep(0.05, 0.5, cosθ) )
+// ⚠️ 与 water_skin_shader.h 的 GLSL 版**同源**，改一处必须改另一处。
+inline float RoughFresnelAlbedo(float cos_i, float mss, float ior) {
+    const float s = std::sqrt(std::max(mss, 0.0f));
+    const float shifted_cos = std::min(std::max(cos_i + 0.52f * std::pow(std::max(s, 1.0e-6f), 0.72f),
+                                               1.0e-4f), 0.999f);
+    const float shifted = FresnelDielectric(shifted_cos, 1.0f, ior);
+    const float plain = FresnelDielectric(std::min(std::max(cos_i, 1.0e-4f), 0.999f), 1.0f, ior);
+    const float t = std::min(std::max((cos_i - 0.05f) / 0.45f, 0.0f), 1.0f);
+    const float w = t * t * (3.0f - 2.0f * t);
+    return shifted + (plain - shifted) * w;
+}
+
+
 // Henyey-Greenstein 相位函数（mu = 1 为前向散射）。
 // Pre-condition: g ∈ [0, 0.95]（超出会被夹住，不 crash）。
 inline float HgPhase(float mu, float g) {
@@ -106,13 +126,30 @@ inline bool RefractTowardSun(const Vec3f& air_toward_sun, float ior,
 
 // ∫₀^len exp(−sigma·rate·t) dt = (1 − e^{−sigma·rate·len}) / (sigma·rate)。
 // rate 或 sigma → 0 时极限 = len（用级数展开，避免 0/0 与精度损失）。
+// 「沿视线走过 len 米后，衰减积分的有效长度」：∫₀^len e^{−σ·rate·t} dt
+//   = (1 − e^{−σ·rate·len}) / (σ·rate)，小 x 用泰勒展开保精度。
+// 无穷远（len = +inf）：e^{−∞} = 0 ⇒ 极限是 1/(σ·rate)。
+//   ⚠️ 必须先挡住 σ·rate ≤ 0：否则 0·∞ = NaN 会把整条公式污染成 NaN。
+//   （σ·rate = 0 意味着既不吸收也不散射，调用方那份乘积本来就是 0。）
 inline float DecayLength(float sigma, float rate, float len) {
-    const float x = sigma * rate * len;
+    const float denom = sigma * rate;
+    if (!(denom > 0.0f)) {
+        // σ = 0：积分退化成 ∫1 dt = len（旧的语义，测试锁着）。
+        // len = +inf 时返回 0：调用方的 σs 此时必然也是 0，乘积必须是 0（不能 0·∞）。
+        return std::isfinite(len) ? len : 0.0f;
+    }
+    const float x = denom * len;          // len 可以是 +inf ⇒ x = +inf ⇒ exp(−x) = 0
     if (std::fabs(x) < 1.0e-4f) {
         return len * (1.0f - 0.5f * x);
     }
-    return (1.0f - std::exp(-x)) / (sigma * rate);
+    return (1.0f - std::exp(-x)) / denom;
 }
+
+// 「无穷远」的射线参数：**真无穷**（不是 1e6 那种近似）。
+// 介质是解析闭式，所有项在 len → ∞ 时都收敛（指数项 → 0，衰减长度 → 1/σt），
+// 所以可以直接用 +inf，不需要挑一个"足够大"的数。调用方要保证 σt > 0 的那些通道
+// 不会出现 0·∞（见上面的 guard 和 WaterAt 里的逐通道判据）。
+inline constexpr float kWaterInfiniteZ = std::numeric_limits<float>::infinity();
 
 }  // namespace water
 }  // namespace jpov

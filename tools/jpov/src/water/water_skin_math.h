@@ -137,9 +137,9 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
 
     float t = 0.0f;
     Vec3f normal{0.0f, 1.0f, 0.0f};
+    float footprint = 0.0f;   // 像素足迹（供 F_eff 用；着色器同一公式）
     if (waves != nullptr && waves->enabled && waves->num_waves > 0) {
         // 像素在水面上覆盖的世界尺寸（与着色器同一公式：掠射按 |rd.y| 放大）。
-        float footprint = 0.0f;
         const float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
         if (pixel_angle_rad > 0.0f && t_plane > 0.0f) {
             const float rdy = (std::fabs(ray_dir.y()) < 0.15f) ? 0.15f
@@ -189,6 +189,19 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         out->reflectance = FresnelDielectric(out->cos_i, ior, 1.0f);   // 水→空气（含 TIR）
     } else {
         out->reflectance = FresnelDielectric(out->cos_i, 1.0f, ior);   // 空气→水
+        // ③ 反射率/透射率随粗糙度重分配（与着色器同一条）：投影到入射面后取角度平均菲涅尔。
+        if (waves != nullptr && waves->enabled && waves->num_waves > 0 && t > 0.0f) {
+            const float dx = ray_dir.x() * t;
+            const float dz = ray_dir.z() * t;
+            const float hdist = std::sqrt(dx * dx + dz * dz);
+            const SlopeVariance v =
+                WaveFilteredVariance(*waves, footprint, WaveFadeFactor(*waves, hdist));
+            const float rl = std::sqrt(ray_dir.x() * ray_dir.x() + ray_dir.z() * ray_dir.z());
+            const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
+            const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;
+            const float var_p = tx * tx * v.xx + 2.0f * tx * tz * v.xz + tz * tz * v.zz;
+            out->reflectance = RoughFresnelAlbedo(out->cos_i, var_p, ior);
+        }
     }
     return true;
 }
