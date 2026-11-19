@@ -1573,8 +1573,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
 
-        // 水体：`water` 命令存在 = 有界面层要画（层由合成器消费）；介质可单独开关。
+        // 水体：`water` 命令存在 = 世界里有水这份配置；`skin` = 画界面层，`medium.enabled` = 算体积。
+        // 两个开关互相独立（2026-11-19 Danis：要把水皮 / 介质 / 天球拆开看对齐）。
         const bool water_present = cmds.water.has_value();
+        const bool water_skin_on = water_present && cmds.water->skin;
         const bool water_medium_on = water_present && cmds.water->medium.enabled;
 
         // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
@@ -1666,8 +1668,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 水场景里那条“地缝”由水皮多盖几像素解决（见 water_skin_shader.h 的地平线钳位），
             // 不用填色兜底 —— 填色会让陆地场景的色调被水污染（Danis 2026-11-17 定）。
 
+            // 水下时天球折射要消费水面波浪法线（Snell 窗边缘随波起伏）。
+            // 相机在水上 / 没开波浪 ⇒ nullptr ⇒ 平面法线（逐字节零回归）。
+            const WaterWaves* sky_waves =
+                (cmds.water.has_value() && cmds.water->waves.enabled)
+                    ? &cmds.water->waves
+                    : nullptr;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves);
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
             // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
@@ -1676,7 +1684,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly, sky_waves);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
             // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
@@ -1697,6 +1705,13 @@ void Renderer::Render(const RenderCommandList& cmds,
                     // 探针必须与主天空用**同一份**命令：下半球的水面语义在这里生效。
                     SkyRenderer::DrawSkyEnvCube(sky_cmd_for_draw, kSkyEnvCubeSize,
                                                 sky_env_tex_, sky_env_fbo_, shader_mgr_);
+                    // mip 链：MIN_FILTER 一直是 LINEAR_MIPMAP_LINEAR（注释也写着
+                    // 「粗糙度→mip 级的廉价预滤波」），但**从来没生成过 mip**
+                    // ⇒ 所有 LOD>0 的采样都在读未定义的层。
+                    // 水面波浪现在按「像素内法线方差」选 LOD（specular AA），必须真的有链。
+                    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_tex_);
+                    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+                    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
                 }
             }
 
@@ -1930,7 +1945,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
             const bool run_fog = !cmds.point_fogs.empty();
             // 合成趟的触发条件：有雾场 **或** 有水体（层必须有人消费，否则水皮白画）。
-            const bool run_medium_composite = run_fog || water_present;
+            const bool run_medium_composite = run_fog || water_skin_on || water_medium_on;
 
             // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
             //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
@@ -2049,7 +2064,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    合成由下面的介质合成趟做（段 ↔ 层交替）：这样「相机 → 水面」那段水体的注入
             //    不会被层盖掉（环外 α=1 时尤其明显）。
             TransparentLayerSet layers;
-            if (water_present) {
+            // 水皮层在集合里的下标（-1 = 没有）。只有**相机在水上**时才把它标成水体层：
+            // 约定「水皮一定包住水体」只在水上成立（水下时水皮在相机头顶，前缀不是空的）。
+            int water_layer_index = -1;
+            if (water_skin_on) {
                 CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
                 CHECK(cmds.sky.has_value())
                     << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
@@ -2077,6 +2095,16 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.level_y = cmds.water->level_y;
                 wsi.ior = cmds.water->ior;
                 wsi.medium = water_medium_ptr;
+                // 波浪（法线扰动/高度置换）：enabled=false 或 num_waves=0 ⇒ 纯平面（零回归）。
+                wsi.waves = cmds.water->waves.enabled ? &cmds.water->waves : nullptr;
+                wsi.wave_debug = cmds.water->waves.debug;
+                if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
+                    const unsigned int flow_gl =
+                        texture_mgr_.GetGLTexture(cmds.water->waves.flow_texture_id);
+                    CHECK_NE(flow_gl, 0u)
+                        << "water.waves.flow_texture_id 未注册到 TextureManager";
+                    wsi.wave_flow_tex = flow_gl;
+                }
                 // 太阳的像：与介质分开传（介质可关，水面依然该有日盘像）。
                 if (eff_sun.has_value()) {
                     const Vec3f sd = eff_sun->direction;   // 传播方向
@@ -2094,6 +2122,10 @@ void Renderer::Render(const RenderCommandList& cmds,
 
                 water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 water_skin_renderer_.Draw(wsi);
+                // 只有相机在水上时才启用「水皮包住水体」的约定。
+                if (!cam_underwater) {
+                    water_layer_index = layers.count;
+                }
                 layers.Add(water_skin_renderer_.layer());
 
                 // Draw 改了 FBO / viewport / 纹理单元：恢复主 3D 目标。
@@ -2143,7 +2175,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
 
                 fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
-                                    ff_params, layers, water_medium_ptr);
+                                    ff_params, layers, water_medium_ptr,
+                                    water_layer_index);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

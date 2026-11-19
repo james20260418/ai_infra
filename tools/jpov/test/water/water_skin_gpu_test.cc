@@ -232,13 +232,18 @@ struct LayerExpect {
 LayerExpect ExpectLayer(const Camera& cam, const Reference& ref,
                         const std::vector<float>& depth, int x, int y,
                         float level_y, float ior,
-                        const jpov::water::WaterMediumSample& medium) {
+                        const jpov::water::WaterMediumSample& medium,
+                        const jpov::WaterWaves* waves = nullptr,
+                        float flow_x = 0.0f, float flow_z = 0.0f) {
+    // 与着色器同口径：每像素弧度（GPU 侧是 2*uTanHalfFov/uViewport.y）。
+    const float pixel_angle_rad = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
     LayerExpect e;
     const Vec3f rd = RayAt(ref, x, y);
     const size_t i = static_cast<size_t>(y) * kWidth + x;
     WaterPixel px;
     if (!EvaluateWaterPixel(cam.position, ref.fwd, rd, level_y, ior, depth[i],
-                            cam.near, cam.far, &px)) {
+                            cam.near, cam.far, &px, waves, flow_x, flow_z,
+                            pixel_angle_rad)) {
         return e;
     }
     e.hit = true;
@@ -261,7 +266,7 @@ LayerExpect ExpectLayer(const Camera& cam, const Reference& ref,
         e.alpha = px.reflectance;                 // 环外 Fresnel = 1 ⇒ α = 1
     } else {
         const Vec3f rdir = jpov::water::ClampReflectionAboveHorizon(
-            jpov::water::ReflectDirection(rd));
+            jpov::water::ReflectDirectionAbout(rd, px.normal));
         e.color = Vec3f{kSkyR * kEnvScale * px.reflectance,
                         kSkyG * kEnvScale * px.reflectance,
                         kSkyB * kEnvScale * px.reflectance};
@@ -299,7 +304,9 @@ struct Fixture {
                 jpov::Vec3f sun_toward = jpov::Vec3f{0.0f, 1.0f, 0.0f},
                 jpov::Vec3f sun_irradiance = jpov::Vec3f{0.0f, 0.0f, 0.0f},
                 float sun_angular_radius = jpov::lighting::kSunAngularRadiusRad,
-                float sun_footprint = 0.0f) {
+                float sun_footprint = 0.0f,
+                const jpov::WaterWaves* waves = nullptr,
+                unsigned int wave_flow_tex = 0) {
         WaterSkinRenderer::Inputs in;
         in.camera = cam;
         in.full_w = kWidth;
@@ -316,6 +323,8 @@ struct Fixture {
         in.sun_angular_radius = sun_angular_radius;
         // 测试里默认关足迹（着色器的 dFdx 无法在 CPU 复现）；专门验足迹的用例再开。
         in.sun_footprint = sun_footprint;
+        in.waves = waves;
+        in.wave_flow_tex = wave_flow_tex;
         water.Begin(kWidth, kHeight);
         water.Draw(in);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -625,6 +634,143 @@ TEST(WaterSkinGpu, SunFootprintWidensTheLobe) {
     EXPECT_GT(on.lit, off.lit) << "足迹没把 lobe 变宽：dFdx 那条路没接上";
     EXPECT_LT(on.peak, off.peak) << "变宽必须伴随峰值下降（能量守恒），否则是在凭空加能量";
 
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// ───────────────────────── 波浪（高度置换 + 扰动法线）─────────────────────────
+
+jpov::WaterWaves MakeTestWaves() {
+    jpov::WaterWaves w;
+    w.enabled = true;
+    w.num_waves = 3;
+    w.waves[0] = jpov::WaterWave{1.0f, 0.0f, 9.0f, 0.35f, 0.2f};
+    w.waves[1] = jpov::WaterWave{0.4f, 0.9f, 5.0f, 0.18f, 1.4f};
+    w.waves[2] = jpov::WaterWave{-0.7f, 0.7f, 3.0f, 0.08f, 2.2f};
+    w.time_s = 1.3f;
+    w.fade_start_m = 0.0f;
+    w.fade_end_m = 0.0f;   // 不淡出：整屏都在波里
+    return w;
+}
+
+// 无 flow：GPU 必须与 CPU 参考逐像素一致（求交 / 法线 / 菲涅尔 / 层语义）。
+// 同时证明「位移真的把交点推动了」——否则这个用例只验证了平面。
+TEST(WaterSkinGpu, WavesMatchCpuReference) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {2.0f, 8.0f, -1.0f};
+    cam.target = {2.0f, 0.0f, 4.0f};   // 俯视约 53°
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.5f;
+    const float ior = 1.333f;
+    const jpov::WaterWaves waves = MakeTestWaves();
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const std::vector<float> reveal = ReadRed(f.water.layer().reveal_tex);
+    const std::vector<float> zsum = ReadRed(f.water.layer().depth_tex);
+    const Reference ref = BuildReference(cam);
+
+    int compared = 0;
+    int displaced = 0;
+    for (int y = 0; y < kHeight; y += 3) {
+        for (int x = 0; x < kWidth; x += 3) {
+            const LayerExpect e = ExpectLayer(cam, ref, depth, x, y, level, ior,
+                                              jpov::water::WaterMediumSample{}, &waves);
+            if (!e.hit) {
+                continue;
+            }
+            // 平面解作对照：交点被推动 > 2 cm 才计入 displaced。
+            const LayerExpect flat = ExpectLayer(cam, ref, depth, x, y, level, ior,
+                                                 jpov::water::WaterMediumSample{});
+            if (flat.hit && std::fabs(flat.ray_t - e.ray_t) > 0.02f) {
+                ++displaced;
+            }
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            EXPECT_NEAR(accum[base * 4 + 0], e.color.x(), 4.0e-3f) << "x=" << x << " y=" << y;
+            EXPECT_NEAR(accum[base * 4 + 1], e.color.y(), 4.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 2], e.color.z(), 4.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 3], e.alpha, 3.0e-3f);
+            EXPECT_NEAR(reveal[base], 1.0f - e.alpha, 3.0e-3f);
+            // att3 = 射线距离 × α：波浪交点必须与 CPU 的 Newton 解一致。
+            EXPECT_NEAR(zsum[base], e.ray_t * e.alpha, 0.02f + 0.01f * std::fabs(e.ray_t));
+            ++compared;
+        }
+    }
+    EXPECT_GT(compared, 20) << "覆盖像素太少";
+    EXPECT_GT(displaced, 5) << "波浪没有真的推动交点（求交可能退回了平面解）";
+
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// flow map：1×1 常量纹理 (1, 0) ⇒ flow = +x（强度 1）。
+// 与 CPU 参考（flow_x=1, flow_z=0）对拍：证明 GPU 采样/解码与 CPU 口径一致。
+TEST(WaterSkinGpu, WavesWithFlowMapMatchReference) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {2.0f, 8.0f, -1.0f};
+    cam.target = {2.0f, 0.0f, 4.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.5f;
+    const float ior = 1.333f;
+    const jpov::WaterWaves waves = MakeTestWaves();
+
+    // RGBA32F 1×1：精确 (1, 0)（避免 8bit 编码的 0.004 误差；RGBA 在 llvmpipe 上最稳）。
+    unsigned int flow_tex = 0;
+    glGenTextures(1, &flow_tex);
+    glBindTexture(GL_TEXTURE_2D, flow_tex);
+    const float flow_px[4] = {1.0f, 0.5f, 0.0f, 0.0f};   // 编码 (flow*0.5+0.5)：flow=(1,0)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, flow_px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/flow_tex);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const std::vector<float> zsum = ReadRed(f.water.layer().depth_tex);
+    const Reference ref = BuildReference(cam);
+
+    int compared = 0;
+    for (int y = 0; y < kHeight; y += 3) {
+        for (int x = 0; x < kWidth; x += 3) {
+            const LayerExpect e = ExpectLayer(cam, ref, depth, x, y, level, ior,
+                                              jpov::water::WaterMediumSample{}, &waves,
+                                              /*flow_x=*/1.0f, /*flow_z=*/0.0f);
+            if (!e.hit) {
+                continue;
+            }
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            EXPECT_NEAR(accum[base * 4 + 0], e.color.x(), 4.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 1], e.color.y(), 4.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 2], e.color.z(), 4.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 3], e.alpha, 3.0e-3f);
+            EXPECT_NEAR(zsum[base], e.ray_t * e.alpha, 0.02f + 0.01f * std::fabs(e.ray_t));
+            ++compared;
+        }
+    }
+    EXPECT_GT(compared, 20) << "覆盖像素太少";
+
+    glDeleteTextures(1, &flow_tex);
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }

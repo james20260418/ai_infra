@@ -561,6 +561,417 @@ int RunCaptureWater(const std::string& out_dir) {
     return 0;
 }
 
+// 地平线暗线复现：**不碰 deg_（用交互默认光照）**，波幅 0，只扫机位。
+// 用法：jpov_skylight_viewer --capture-horizon-repro <out_dir>
+//
+// 为什么要单独一个入口：`--capture-water-waves` 会把太阳压到 18°/214°（为了拍日盘像），
+// 而用户报障时用的是**默认光照** —— 地平线天空亮度和 env 探针内容都完全不同，
+// 照搬那组参数是复现不出来的。
+int RunCaptureHorizonRepro(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 地平线暗线复现（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(0.0f);
+
+    LOG(INFO) << "repro: default deg_ = elev " << app.deg_.sun_elev_deg
+              << " azim " << app.deg_.sun_azim_deg
+              << " turb " << app.deg_.turbidity;
+
+    struct View { const char* name; float phi; float theta; float radius; };
+    const View kViews[6] = {
+        {"/repro_1_ww.png",   0.22f, 0.6f,           18.0f},   // --water-waves 机位
+        {"/repro_2_default.png", 0.25f, 0.7853981634f, 9.5f},  // 交互启动默认
+        {"/repro_3.png",      0.30f, 0.6f,           20.0f},
+        {"/repro_4.png",      0.15f, 0.6f,           12.0f},
+        {"/repro_5.png",      0.35f, 0.9f,           25.0f},
+        {"/repro_6.png",      0.45f, 1.2f,           30.0f},
+    };
+    for (const View& v : kViews) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = v.phi;
+        app.view_.theta = v.theta;
+        app.view_.R = v.radius;
+        app.RunOnce(input, winfo, (out_dir + v.name).c_str());
+    }
+
+    // ── Danis 的实际机位（从他截图左上调试面板读出来）──
+    //   CAM pos (15.4197826, 4.23410654, -8.26453876) -> (0,0,0), fov 60, near 0.05
+    //   ⇒ phi = asin(4.2341/18) ≈ 0.23743, theta = atan2(x, z) ≈ 2.0629, R = 18.0
+    // 他是在 --water-waves 基础上把相机横向拖了、然后在 UI 里把「水面波浪」关掉。
+    {
+        const float kPhi = 0.27236f;    // CAM pos (8.8565, 4.8421, 14.9035) -> 原点
+        const float kTheta = 0.536186f;
+        const float kR = 18.0f;
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = kPhi;
+        app.view_.theta = kTheta;
+        app.view_.R = kR;
+        app.SetWaterWaves(true);
+        app.RunOnce(input, winfo, (out_dir + "/repro_his_waves_on.png").c_str());
+        app.SetWaterWaves(false);   // ← 他在 UI 里关掉了波浪
+        app.RunOnce(input, winfo, (out_dir + "/repro_his_waves_off.png").c_str());
+        // debug：alpha / t（波幅 0 = 与关掉等价，但能让 debug 透传）
+        app.SetWaterWaves(true);
+        app.SetWaterWaveAmplitudeScale(0.0f);
+        app.SetWaterWaveDebug(6);
+        app.RunOnce(input, winfo, (out_dir + "/repro_dbg_cover.png").c_str());
+        // 二分：关掉**水体介质**（保留水皮）——暗线还在=反射/探针；消失=介质合成
+        app.SetWaterMedium(false);
+        app.RunOnce(input, winfo, (out_dir + "/repro_no_medium.png").c_str());
+        app.SetWaterMedium(true);
+        app.SetWaterWaveDebug(4);
+        app.RunOnce(input, winfo, (out_dir + "/repro_dbg_alpha.png").c_str());
+        app.SetWaterWaveDebug(5);
+        app.RunOnce(input, winfo, (out_dir + "/repro_dbg_t.png").c_str());
+        app.SetWaterWaveDebug(0);
+        app.SetWaterWaveAmplitudeScale(1.0f);
+    }
+
+    // 对照：同一机位、**把水整个关掉**（没有 WaterCommand）。
+    // 地平线那几行的像素 = 天空在地平线以下填的 ground 色；用来判断「暗线」是不是
+    // 「水面缺失、露出地色」。
+    app.SetWaterScene(false);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = 0.27236f;
+    app.view_.theta = 0.536186f;
+    app.view_.R = 18.0f;
+    app.RunOnce(input, winfo, (out_dir + "/repro_skyonly.png").c_str());
+    app.SetWaterScene(true);
+
+    // ── 水下仰视：Snell 窗（天球折射消费波浪法线的验收）──
+    // 水位抬到 +6 ⇒ 相机 y≈-3.13（水下 9.1 m），抬头看水面：窗内是压缩的天空，
+    // 窗外是全内反射。关波浪时窗缘是死圆；开波浪时窗缘应该随法线起伏。
+    app.SetWaterLevel(6.0f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = -0.55f;
+    app.view_.theta = 0.7f + 3.14159265f;
+    app.view_.R = 6.0f;
+    app.SetWaterWaves(false);
+    app.RunOnce(input, winfo, (out_dir + "/under_snell_waves_off.png").c_str());
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(2.0f);
+    app.RunOnce(input, winfo, (out_dir + "/under_snell_waves_on.png").c_str());
+    // （水下不能关介质：renderer 有 CHECK，"水下必须开 medium"否则环外 α=1 会盖成黑环）
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterLevel(0.0f);
+
+    // ── Danis 报障机位：贴水面仰视（cam.y = -0.438，水面下 0.44 m），时间冻结 43.82 s ──
+    app.SetWaterLevel(0.0f);
+    app.SetWaterWaveTime(43.82f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = -0.0244f;
+    app.view_.theta = 3.9973f;
+    app.view_.R = 18.0f;
+    app.SetWaterWaves(true);
+    app.RunOnce(input, winfo, (out_dir + "/bug_shallow_wave_on.png").c_str());
+    // debug：alpha / wave_ok / cos_i（同一机位 + 同一冻结时间）
+    for (int dbg : {7, 8, 9}) {
+        app.SetWaterWaveDebug(dbg);
+        char nm[64];
+        std::snprintf(nm, sizeof(nm), "/bug_dbg_%d.png", dbg);
+        app.RunOnce(input, winfo, (out_dir + nm).c_str());
+    }
+    app.SetWaterWaveDebug(0);
+    app.SetWaterWaves(false);
+    app.RunOnce(input, winfo, (out_dir + "/bug_shallow_wave_off.png").c_str());
+    app.SetWaterWaves(true);
+
+    LOG(INFO) << "horizon repro captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 水面覆盖 / 合成验收（2026-11-19 三处修改的回归拍摄）
+// 用法：jpov_skylight_viewer --capture-water-coverage <out_dir>
+//
+// 出图：
+//   cov_1_default.png            他的机位（pos -181.7,141.3,-192.3 / 太阳 +4°）全开
+//   cov_2_skin_off.png           同上，关水皮 —— 验证「介质铺到地平线、无地色带」
+//   cov_3_medium_off.png         同上，关介质
+//   cov_4_horizon_cam.png        他的另一个机位（pos -172.8,15.8,-219.4 / 太阳 2°）全开
+//   cov_5_horizon_cam_sky.png    同上，完全没有水（天球自己的地平线对照）
+//
+// 历史背景（都写进 known_issue）：
+//   · 关水皮时地平线以下曾露「天球地色」⇒ 介质积到无穷远（z_med = +inf）
+//   · 低太阳远机位曾在 x≈383/895 出现竖直硬边 ⇒ 合成趟按「水皮包住水体」处理前缀
+int RunCaptureWaterCoverage(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面覆盖/合成验收（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 4.0f;
+    app.deg_.sun_azim_deg    = 45.0f;
+    app.SetWaterMedium(true);
+    app.SetWaterSkin(true);
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterLevel(0.0f);
+
+    // 机位 A：太阳贴地平线（+4°）、远机位 —— 合成硬边就出在这里
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.4907;    // pos (-181.745285, 141.326981, -192.341721)
+    app.view_.theta = -2.3844;
+    app.view_.R     = 300.0;
+    app.RunOnce(input, winfo, (out_dir + "/cov_1_default.png").c_str());
+    app.SetWaterSkin(false);
+    app.RunOnce(input, winfo, (out_dir + "/cov_2_skin_off.png").c_str());
+    app.SetWaterSkin(true);
+    app.SetWaterMedium(false);
+    app.RunOnce(input, winfo, (out_dir + "/cov_3_medium_off.png").c_str());
+    app.SetWaterMedium(true);
+
+    // 机位 B：贴水面（2° 太阳）—— 覆盖/地平线对齐
+    app.deg_.sun_elev_deg = 2.0f;
+    app.view_.phi   = 0.05658142;   // pos (-172.770751, 15.819922, -219.447536)
+    app.view_.theta = -2.47464456;
+    app.view_.R     = 279.744926;
+    app.RunOnce(input, winfo, (out_dir + "/cov_4_horizon_cam.png").c_str());
+    app.SetWaterScene(false);       // 无水对照：天球自己的地平线
+    app.RunOnce(input, winfo, (out_dir + "/cov_5_horizon_cam_sky.png").c_str());
+    app.SetWaterScene(true);
+
+    LOG(INFO) << "water coverage captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// 地平线遮挡回归（Danis 2026-11-19 16:41 报的「box 被水皮锯」）：
+// 近水面机位，箱子上沿被水面盖掉 3 行。根因是水皮对「地平线钳位」像素整条跳过深度测试。
+// 用法：jpov_skylight_viewer --capture-box-cut <out_dir>
+//
+//   box_1_default.png   全开（箱子应当完整）
+//   box_2_skin_off.png  关水皮（对照：箱子本来长这样）
+//   box_3_waves_off.png 关波浪
+int RunCaptureBoxCut(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — box 被水皮锯（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterMedium(true);
+    app.SetWaterSkin(true);
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterLevel(0.0f);
+
+    // 他 16:41 截图：pos (-8.6907061, 0.40962684, -2.30289817) -> (0,0,0), fov 60
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.04552;
+    app.view_.theta = -1.8299;
+    app.view_.R     = 9.0;
+
+    app.RunOnce(input, winfo, (out_dir + "/box_1_default.png").c_str());
+    app.SetWaterSkin(false);
+    app.RunOnce(input, winfo, (out_dir + "/box_2_skin_off.png").c_str());
+    app.SetWaterSkin(true);
+    app.SetWaterWaves(false);
+    app.RunOnce(input, winfo, (out_dir + "/box_3_waves_off.png").c_str());
+    app.SetWaterWaves(true);
+
+    LOG(INFO) << "box cut captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// 水面波浪（法线扰动/高度置换）A/B：同一机位/光照/介质，只切**波幅倍率**。
+// 用法：jpov_skylight_viewer --capture-water-waves <out_dir>
+//
+// 出图（frame_count 恒为 0 ⇒ time_s = 0，所以四张只有波幅不同，是干净的 A/B）：
+//   water_waves_off.png   波幅 0（求交仍走 Newton，但 h≡0 ⇒ 应等于纯平面）
+//   water_waves_low.png   0.6×
+//   water_waves_mid.png   1.0×（默认谱：4 波，长 24/13/7/3.5 m，振幅 0.28/0.14/0.07/0.03 m）
+//   water_waves_high.png  1.8×
+//
+// 验收点：反射的天光被扰动成碎光、太阳的像被拉成随波起伏的亮带；远处（fade_end 700 m）
+// 回到平面。水体介质在这组里不参与波浪（契约 §11.5），所以水下吸收仍是平面口径。
+int RunCaptureWaterWaves(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面波浪（法线扰动/高度置换）（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 机位：低空俯视（phi 0.30 ≈ 17°），近处能看清波纹明暗、远处是掠射碎光。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.30f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 20.0f;
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 18.0f;   // 低太阳 ⇒ 反射路径长，波浪更容易把日盘像切碎
+    // ⚠️ 日盘像只出现在「相机水平朝向 ≈ 太阳方位」的一侧：theta=0.6 ⇒ 相机朝 214.4°。
+    //    取 40° 时太阳在相机背后，水面根本收不到它的像（白拍一轮）。
+    app.deg_.sun_azim_deg    = 214.0f;
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+
+    // A/B：波浪**整个关掉**（命令里不带 waves）vs 开着但波幅 0。
+    // 这两张应当逐字节相同；不同就说明「波浪路径在 amp=0 时不等价于平面」。
+    app.SetWaterWaves(false);
+    app.RunOnce(input, winfo, (out_dir + "/debug_wave_disabled.png").c_str());
+    app.SetWaterWaves(true);
+
+    // ── 地平线暗带复现（Danis：默认参数 + 波幅 0）──
+    // 三个候选机位，逐个出图后用 2D 检测（逐像素，不信行均值）找 1px 暗线：
+    //   A = 交互启动默认（phi 0.25 / theta 45° / R 9.5）
+    //   B = --water-waves 的机位（0.22 / 0.6 / 18）
+    //   C = capture 默认（0.30 / 0.6 / 20）
+    app.SetWaterWaveAmplitudeScale(0.0f);
+    {
+        struct Repro { const char* name; float phi; float theta; float radius; };
+        const Repro kReps[3] = {
+            {"/debug_repro_a.png", 0.25f, 0.7853981634f, 9.5f},
+            {"/debug_repro_b.png", 0.22f, 0.6f, 18.0f},
+            {"/debug_repro_c.png", 0.30f, 0.6f, 20.0f},
+        };
+        for (const Repro& r : kReps) {
+            app.view_.phi = r.phi;
+            app.view_.theta = r.theta;
+            app.view_.R = r.radius;
+            app.RunOnce(input, winfo, (out_dir + r.name).c_str());
+        }
+    }
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.view_.phi = 0.30f;
+    app.view_.R = 20.0f;
+
+    // ── 二分 debug：法线 only vs 真位移（同一波幅、同一机位）──
+    //   用来定位「浪坑里的法线噪点」：若 normal_only 干净、displaced 有噪 ⇒ 求交；
+    //   两者都脏 ⇒ 法线/着色。
+    app.SetWaterWaveAmplitudeScale(3.0f);
+    app.SetWaterWaveDisplacement(false);
+    app.RunOnce(input, winfo, (out_dir + "/debug_normal_only.png").c_str());
+    app.SetWaterWaveDisplacement(true);
+    app.RunOnce(input, winfo, (out_dir + "/debug_displaced.png").c_str());
+    // 法线可视化：N*0.5+0.5。连续渐变 = 法线正常；彩色椒盐 = 法线场跳变。
+    app.SetWaterWaveDebug(1);
+    app.SetWaterWaveDisplacement(false);
+    app.RunOnce(input, winfo, (out_dir + "/debug_normal_color.png").c_str());
+    app.SetWaterWaveDisplacement(true);
+    app.RunOnce(input, winfo, (out_dir + "/debug_displaced_color.png").c_str());
+    app.SetWaterWaveDebug(2);
+    app.SetWaterWaveDisplacement(false);
+    app.RunOnce(input, winfo, (out_dir + "/debug_normalvar.png").c_str());
+    app.SetWaterWaveDebug(0);
+
+    // 四档波幅（0 / 1× / 3× / 6×）：3× 与 6× 是**夸张档**，专门让人一眼确认
+    // 「求交真的被推动了」，不是只改了法线。
+    const float kScales[4] = {0.0f, 1.0f, 3.0f, 6.0f};
+    const char* kNames[4] = {
+        "/water_waves_off.png",
+        "/water_waves_low.png",
+        "/water_waves_mid.png",
+        "/water_waves_high.png",
+    };
+    for (int i = 0; i < 4; ++i) {
+        app.SetWaterWaveAmplitudeScale(kScales[i]);
+        app.RunOnce(input, winfo, (out_dir + kNames[i]).c_str());
+    }
+
+    // 近水平掠射（phi 0.05 ≈ 2.9°）：水面几乎全反射，波纹会把天空打碎成碎银光带 ——
+    // 这是「法线扰动真的在改变反射方向」最直观的一张。
+    app.view_.phi   = 0.05f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 24.0f;
+    app.SetWaterWaveAmplitudeScale(1.5f);
+    app.RunOnce(input, winfo, (out_dir + "/water_waves_grazing.png").c_str());
+
+    // 贴近水面（R=8）：波峰剪影遮住远处物体 —— 几何置换的直接证据（不是 bump）。
+    app.view_.phi   = 0.16f;
+    app.view_.theta = 0.6f;
+    app.view_.R     = 8.0f;
+    app.SetWaterWaveAmplitudeScale(2.0f);
+    app.RunOnce(input, winfo, (out_dir + "/water_waves_close.png").c_str());
+
+    LOG(INFO) << "water waves A/B captured to " << out_dir
+              << " (water_waves_off / low / mid / high)";
+    app.Finalize();
+    return 0;
+}
+
 // 三色环境光 → 水体照明的 A/B：证明「三色 ambient 塌成纯色后确实进了水体」。
 // 用法：jpov_skylight_viewer --capture-water-tricolor <out_dir>
 //
@@ -1447,6 +1858,12 @@ int main(int argc, char** argv) {
     std::string ssr_out_dir;
     std::string mat_out_dir;
     std::string water_out_dir;
+    std::string water_waves_out_dir;
+    bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
+    float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
+    std::string horizon_repro_out_dir;
+    std::string water_coverage_out_dir;
+    std::string box_cut_out_dir;
     std::string water_sweep_out_dir;
     std::string water_tricolor_out_dir;
     std::string water_light_out_dir;
@@ -1469,6 +1886,18 @@ int main(int argc, char** argv) {
             mat_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
             water_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-waves") == 0 && i + 1 < argc) {
+            water_waves_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--water-waves") == 0) {
+            start_water_waves = true;
+        } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
+            wave_time_s = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
+            horizon_repro_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
+            water_coverage_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-box-cut") == 0 && i + 1 < argc) {
+            box_cut_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-sweep") == 0 && i + 1 < argc) {
             water_sweep_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-tricolor") == 0 && i + 1 < argc) {
@@ -1491,6 +1920,18 @@ int main(int argc, char** argv) {
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!box_cut_out_dir.empty()) {
+        return RunCaptureBoxCut(box_cut_out_dir);
+    }
+    if (!water_coverage_out_dir.empty()) {
+        return RunCaptureWaterCoverage(water_coverage_out_dir);
+    }
+    if (!horizon_repro_out_dir.empty()) {
+        return RunCaptureHorizonRepro(horizon_repro_out_dir);
+    }
+    if (!water_waves_out_dir.empty()) {
+        return RunCaptureWaterWaves(water_waves_out_dir);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);
@@ -1571,11 +2012,27 @@ int main(int argc, char** argv) {
     InstallPerson(app);
     LOG(INFO) << "[stage] InstallPerson 完成";
 
+    // --water-waves：直接进水体场景 + 打开波浪（省掉下拉/勾选两步，验收用）。
+    if (start_water_waves) {
+        app.SetWaterScene(true);
+        app.BuildWaterPeople();
+        app.SetWaterWaves(true);
+    }
+    if (wave_time_s >= 0.0f) {
+        app.SetWaterWaveTime(wave_time_s);
+    }
+
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();
     app.view_.phi   = 0.25;                       // 略俯视（~14°）
     app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位
     app.view_.R     = 9.5;
+    if (start_water_waves) {
+        // 贴近水面、低空掠过：能同时看近处的波纹明暗与远处的碎光。
+        app.view_.phi   = 0.22;
+        app.view_.theta = 0.6;
+        app.view_.R     = 18.0;
+    }
 
     // 交互事件循环（阻塞）。
     LOG(INFO) << "[stage] 进入事件循环 Run()";

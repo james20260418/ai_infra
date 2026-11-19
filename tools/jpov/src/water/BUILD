@@ -32,6 +32,24 @@ cc_library(
     linkstatic = 1,
 )
 
+# 水面波浪（GL-free CPU 参考 + GLSL 同源）：纯高度场 Gerstner 谱 + flow map 调制，
+# 提供 h(x,z,t) / 解析梯度 / 法线 / 视线求交（平面初值 + Newton）。
+# 无波（enabled=false 或 num_waves=0）⇒ h≡0，调用方行为与纯平面逐字节一致。
+cc_library(
+    name = "water_wave_math",
+    hdrs = [
+        "water_wave_math.h",
+        "water_wave_shader.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 水皮的 CPU 参考（GL-free）：视线∩平面、菲涅尔（含全内反射）、反射方向夹地平线、
 # 深度拒绝、层语义（C / α / 射线距离）。单测与 GPU 对拍共用这一份。
 cc_library(
@@ -39,6 +57,7 @@ cc_library(
     hdrs = ["water_skin_math.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":water_wave_math",
         ":water_optics",
         "//tools/jpov/interface:camera",
     ],
@@ -59,6 +78,7 @@ cc_library(
     deps = [
         ":water_medium_math",
         ":water_skin_math",
+        ":water_wave_math",
         "//tools/jpov/interface:camera",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",

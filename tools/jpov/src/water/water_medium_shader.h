@@ -58,13 +58,19 @@ float WmFresnel(float cos_i, float n1, float n2) {
 }
 
 // ∫₀^len exp(−sigma·rate·t) dt，逐分量；sigma·rate → 0 时退化到 len（级数展开）。
+// 与 CPU 的 DecayLength 同源。len 可以是 +inf（背景像素 = 无穷远）：
+//   exp(−∞) = 0 ⇒ 极限 1/(σ·rate)。必须先挡 σ·rate ≤ 0，否则 0·∞ = NaN。
 vec3 WmDecayLength(vec3 sigma, float rate, float len) {
-    vec3 x = sigma * rate * len;
-    vec3 out_v;
+    vec3 denom = sigma * rate;
+    vec3 out_v = vec3(0.0);
     for (int i = 0; i < 3; ++i) {
-        out_v[i] = (abs(x[i]) < 1.0e-4)
-            ? len * (1.0 - 0.5 * x[i])
-            : (1.0 - exp(-x[i])) / (sigma[i] * rate);
+        if (!(denom[i] > 0.0)) {
+            continue;                       // 无衰减通道：注入项本来就是 0
+        }
+        float x = denom[i] * len;           // len = inf ⇒ x = inf ⇒ exp(−x) = 0
+        out_v[i] = (abs(x) < 1.0e-4)
+            ? len * (1.0 - 0.5 * x)
+            : (1.0 - exp(-x)) / denom[i];
     }
     return out_v;
 }
@@ -133,7 +139,10 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
     float len_w = len * (abs(rd.y) / abs(dy_w));
 
     vec3 st = uWaterSigmaA + uWaterSigmaS;
-    tau = st * len_w;
+    // 逐通道防爆：σt = 0 且 len = ∞ 时 0·∞ = NaN。无衰减通道的 τ 恒 0。
+    tau = vec3(st.r > 0.0 ? st.r * len_w : 0.0,
+               st.g > 0.0 ? st.g * len_w : 0.0,
+               st.b > 0.0 ? st.b * len_w : 0.0);
 
     // ── 直射项（闭式）：指数 = σt·[(t−t0) + d(t)/u_w.y]，对 t 线性 ──
     int sun_ok = 0;

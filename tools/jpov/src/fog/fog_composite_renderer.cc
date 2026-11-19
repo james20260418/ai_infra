@@ -99,7 +99,8 @@ void FogCompositeRenderer::Draw(const FogField& field,
                                 const float view_proj[16],
                                 const FogParams& params,
                                 const TransparentLayerSet& layers,
-                                const water::WaterMediumSample* medium) {
+                                const water::WaterMediumSample* medium,
+                                int water_layer_index) {
     CHECK(shader_mgr_ != nullptr) << "FogCompositeRenderer::Init 未调用";
     if (!field.valid() && layers.count == 0 && medium == nullptr) {
         return;   // 无雾场、无层、无介质：零开销
@@ -144,6 +145,13 @@ void FogCompositeRenderer::Draw(const FogField& field,
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uScatter"), kScatterUnit);
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uHasFog"),
                 field.valid() ? 1 : 0);
+    // 【调试】背景像素的介质积分上限；0 = 关（原行为）
+    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uDepthInfinityM"),
+                jpov::kDepthInfinityM);
+    // 水凝胶的"无穷远"是**真无穷**（解析解在 len→∞ 时收敛）。
+    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uWaterInfiniteZ"),
+                jpov::water::kWaterInfiniteZ);
+    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uWaterLayerIndex"), water_layer_index);
 
     const unsigned int depth_tex =
         scene_depth_tex != 0 ? scene_depth_tex : dummy_depth_tex_;
