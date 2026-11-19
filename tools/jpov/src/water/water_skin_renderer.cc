@@ -209,13 +209,13 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
 
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveTime"), on ? w->time_s : 0.0f);
 
-    // ── 域扭曲（domain warp）：两条低频载波 → (k, dir_x, dir_z, phase) ──
+    // ── 域扭曲（domain warp）：4 条低频载波 → (k, dir_x, dir_z, phase) ──
     const float warp_amp = on ? w->warp_amplitude_m : 0.0f;
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveWarpAmp"), warp_amp > 0.0f ? warp_amp : 0.0f);
-    for (int j = 0; j < 2; ++j) {
-        const char* nm = (j == 0) ? "uWaveWarp0" : "uWaveWarp1";
+    const int warp_loc = shader_mgr_->GetUniform(prog, "uWaveWarp[0]");
+    for (int j = 0; j < WaterWaves::kWarpCarriers; ++j) {
         if (warp_amp <= 0.0f) {
-            glUniform4f(shader_mgr_->GetUniform(prog, nm), 1.0f, 1.0f, 0.0f, 0.0f);
+            glUniform4f(warp_loc + j, 1.0f, 1.0f, 0.0f, 0.0f);
             continue;
         }
         CHECK_GT(w->warp_wavelength_m[j], 0.0f)
@@ -231,7 +231,7 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
             dx = 1.0f;
             dz = 0.0f;
         }
-        glUniform4f(shader_mgr_->GetUniform(prog, nm), k, dx, dz, w->warp_phase_rad[j]);
+        glUniform4f(warp_loc + j, k, dx, dz, w->warp_phase_rad[j]);
     }
     glUniform1i(shader_mgr_->GetUniform(prog, "uWaveStokes2"),
                 (on && w->stokes_second_order) ? 1 : 0);

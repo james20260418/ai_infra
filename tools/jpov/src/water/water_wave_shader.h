@@ -34,14 +34,13 @@ uniform float uWaveFlowStrength;   // flow 整体增益
 uniform int   uWaveDisplace;       // 0 = 法线 only（debug）；1 = 真位移
 // 域扭曲（domain warp）：低频位移场，θ += k·dot(u, d)。uWaveWarpAmp = 0 ⇒ 关。
 uniform float uWaveWarpAmp;        // 每条载波的位移幅度（米）
-uniform vec4  uWaveWarp0;          // (k, dir_x, dir_z, phase)
-uniform vec4  uWaveWarp1;
+uniform vec4  uWaveWarp[4];        // 每条载波 (k, dir_x, dir_z, phase)
 // 二阶 Stokes 谐波（尖峰平谷）。0 ⇒ 关。
 uniform int   uWaveStokes2;
 // 细节短波（只进法线，不进几何）：(k, amplitude, phase, 未用) + 方向。
 uniform int   uWaveDetailCount;
-uniform vec4  uWaveDetailL[12];
-uniform vec2  uWaveDetailDir[12];
+uniform vec4  uWaveDetailL[64];    // (k, amplitude, phase, 未用)
+uniform vec2  uWaveDetailDir[64];
 // 法线场过滤（远处亚像素波 → 粗糙度）
 uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各向同性）
 uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
@@ -82,11 +81,10 @@ void WaveWarpAt(vec2 p, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
     if (uWaveWarpAmp <= 0.0) {
         return;
     }
-    vec4 W[2] = vec4[2](uWaveWarp0, uWaveWarp1);
-    for (int j = 0; j < 2; ++j) {
-        float k = W[j].x;
-        vec2 d = W[j].yz;
-        float ph = k * dot(d, p) + W[j].w;
+    for (int j = 0; j < 4; ++j) {
+        float k = uWaveWarp[j].x;
+        vec2 d = uWaveWarp[j].yz;
+        float ph = k * dot(d, p) + uWaveWarp[j].w;
         float s = sin(ph);
         float c = cos(ph);
         u += uWaveWarpAmp * d * s;
@@ -126,7 +124,7 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
             szz += w * d.y * d.y;
         }
         // 细节短波：被足迹截断的部分同样折进方差（否则远处会“白丢”能量）。
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0; i < 64; ++i) {
             if (i >= uWaveDetailCount) {
                 break;
             }
@@ -242,7 +240,7 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
     if (uWaveDetailCount <= 0 || fade <= 0.0) {
         return;
     }
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 64; ++i) {
         if (i >= uWaveDetailCount) {
             break;
         }

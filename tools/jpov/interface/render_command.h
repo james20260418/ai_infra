@@ -1007,12 +1007,15 @@ struct WaterWaves {
     // 仍然是解析、单值高度场：求交结构一行不用改，|h| ≤ ΣA 也不变。
     // warp_amplitude_m = 0 ⇒ 关（默认，逐字节旧行为）。
     float warp_amplitude_m = 0.0f;
-    // 两条低频载波：波长（米，> 0）与方向（xz，单位向量）。
-    float warp_wavelength_m[2] = {57.0f, 131.0f};
-    float warp_dir_x[2] = {0.83f, -0.47f};
-    float warp_dir_z[2] = {0.56f, 0.88f};
-    // 两条载波的初相（弧度）。不同场景给不同值即可错开图案。
-    float warp_phase_rad[2] = {0.9f, 2.7f};
+    // 低频载波（最多 4 条）：波长（米，> 0）与方向（xz，单位向量）。
+    // 4 条时波长取不可公比（37/64/112/197 m）⇒ 位移场本身接近噪声，不再是
+    // 「一个大格子掰弯小格子」（2 条载波时仍会看出单一尺度的起伏）。
+    static constexpr int kWarpCarriers = 4;
+    float warp_wavelength_m[kWarpCarriers] = {37.0f, 64.0f, 112.0f, 197.0f};
+    float warp_dir_x[kWarpCarriers] = {0.83f, -0.47f, 0.35f, -0.92f};
+    float warp_dir_z[kWarpCarriers] = {0.56f, 0.88f, 0.94f, -0.39f};
+    // 每条载波的初相（弧度）。不同场景给不同值即可错开图案。
+    float warp_phase_rad[kWarpCarriers] = {0.9f, 2.7f, 4.4f, 1.6f};
 
     // ── 二阶 Stokes 谐波（深水，尖峰平谷）──
     // h_i += −½·k_i·A_i²·cos(2θ_i)。真实风浪的非线性最低阶修正：峰更尖、谷更平，
@@ -1026,7 +1029,7 @@ struct WaterWaves {
     // 但**不参与高度/求交**（求交只走 waves[]，否则二分成本 ×N）。
     // 用途：近场 0.3~2 m 的 chop —— 照片里的“棱角/碎光”主要来自这一档。
     // 被像素足迹截断的部分照旧折进斜率方差（WaveFilteredVariance），不会丢能量。
-    static constexpr int kMaxDetailWaves = 12;
+    static constexpr int kMaxDetailWaves = 64;
     int num_detail_waves = 0;
     WaterWave detail_waves[kMaxDetailWaves];
 
