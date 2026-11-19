@@ -32,6 +32,16 @@ uniform sampler2D uWaveFlowMap;    // RG 编码 (flow*0.5+0.5)
 uniform vec2  uWaveFlowUvScale;    // p.xz * scale -> uv
 uniform float uWaveFlowStrength;   // flow 整体增益
 uniform int   uWaveDisplace;       // 0 = 法线 only（debug）；1 = 真位移
+// 域扭曲（domain warp）：低频位移场，θ += k·dot(u, d)。uWaveWarpAmp = 0 ⇒ 关。
+uniform float uWaveWarpAmp;        // 每条载波的位移幅度（米）
+uniform vec4  uWaveWarp0;          // (k, dir_x, dir_z, phase)
+uniform vec4  uWaveWarp1;
+// 二阶 Stokes 谐波（尖峰平谷）。0 ⇒ 关。
+uniform int   uWaveStokes2;
+// 细节短波（只进法线，不进几何）：(k, amplitude, phase, 未用) + 方向。
+uniform int   uWaveDetailCount;
+uniform vec4  uWaveDetailL[12];
+uniform vec2  uWaveDetailDir[12];
 // 法线场过滤（远处亚像素波 → 粗糙度）
 uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各向同性）
 uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
@@ -63,6 +73,28 @@ vec2 WaveFlowAt(vec2 p) {
     return (rg * 2.0 - 1.0) * uWaveFlowStrength;
 }
 
+// 低频位移场 u(p) 与它的空间导数（域扭曲）。
+// u = Σ_j A·dir_j·sin(k_j·dot(dir_j,p) + φ_j)，∂u/∂x = Σ_j A·dir_j·k_j·cos(·)·dir_j.x。
+void WaveWarpAt(vec2 p, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
+    u = vec2(0.0);
+    du_dx = vec2(0.0);
+    du_dz = vec2(0.0);
+    if (uWaveWarpAmp <= 0.0) {
+        return;
+    }
+    vec4 W[2] = vec4[2](uWaveWarp0, uWaveWarp1);
+    for (int j = 0; j < 2; ++j) {
+        float k = W[j].x;
+        vec2 d = W[j].yz;
+        float ph = k * dot(d, p) + W[j].w;
+        float s = sin(ph);
+        float c = cos(ph);
+        u += uWaveWarpAmp * d * s;
+        du_dx += uWaveWarpAmp * d * (k * c) * d.x;
+        du_dz += uWaveWarpAmp * d * (k * c) * d.y;
+    }
+}
+
 // ── 法线场过滤：远处亚像素波 → BRDF 粗糙度（斜率方差张量）─────────────
 // 与 CPU 的 WaveFilteredVariance 同源。输出 xz 平面的 2x2 张量：
 //   xx = E[(∂h/∂x)²]、xz = E[∂h/∂x·∂h/∂z]、zz = E[(∂h/∂z)²]
@@ -89,6 +121,30 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
             float a = amp * k;
             float w = 0.5 * a * a * (1.0 - lod_amp * lod_amp);
             vec2 d = uWaveDir[i];
+            sxx += w * d.x * d.x;
+            sxz += w * d.x * d.y;
+            szz += w * d.y * d.y;
+        }
+        // 细节短波：被足迹截断的部分同样折进方差（否则远处会“白丢”能量）。
+        for (int i = 0; i < 12; ++i) {
+            if (i >= uWaveDetailCount) {
+                break;
+            }
+            float k = uWaveDetailL[i].x;
+            float amp = uWaveDetailL[i].y * fade;
+            float lod_amp = 1.0;
+            if (footprint > 1.0e-6) {
+                float wavelength_px = (6.283185307179586 / k) / footprint;
+                if (wavelength_px <= kWaveLodPxMin) {
+                    lod_amp = 0.0;
+                } else if (wavelength_px < kWaveLodPxMax) {
+                    float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                    lod_amp = uu * uu * (3.0 - 2.0 * uu);
+                }
+            }
+            float a = amp * k;
+            float w = 0.5 * a * a * (1.0 - lod_amp * lod_amp);
+            vec2 d = uWaveDetailDir[i];
             sxx += w * d.x * d.x;
             sxz += w * d.x * d.y;
             szz += w * d.y * d.y;
@@ -126,6 +182,10 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
     float blend = (flen > 1.0e-6) ? clamp(uWaveFlowAlign * flen, 0.0, 1.0) : 0.0;
     float amp_gain = 1.0 + uWaveFlowWindGain * clamp(flen, 0.0, 1.0);
 
+    // 域扭曲：整片场沿低频位移 u(p) 平移，θ += k·dot(u, d)。
+    vec2 wu, wdux, wduz;
+    WaveWarpAt(p, wu, wdux, wduz);
+
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
             break;
@@ -158,9 +218,54 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
             }
         }
         float amp = L.z * amp_gain * fade * lod_amp;
-        float phase = k * dot(d, p) - omega * t + L.w;
-        h += amp * sin(phase);
-        grad += amp * k * d * cos(phase);
+        float wx = k * dot(wdux, d);
+        float wz = k * dot(wduz, d);
+        float phase = k * dot(d, p) - omega * t + L.w + k * dot(wu, d);
+        float sin_p = sin(phase);
+        float cos_p = cos(phase);
+        vec2 g = vec2(k * d.x + wx, k * d.y + wz);
+        h += amp * sin_p;
+        grad += amp * g * cos_p;
+        if (uWaveStokes2 != 0) {
+            // −½kA²cos2θ：尖峰平谷。cos2θ = 1−2sin²θ，sin2θ = 2sinθcosθ。
+            float sin2 = 2.0 * sin_p * cos_p;
+            h += -0.5 * k * amp * amp * (1.0 - 2.0 * sin_p * sin_p);
+            grad += k * amp * amp * sin2 * g;
+        }
+    }
+}
+
+// 细节短波：**只改法线梯度，不改高度**（不参与求交）。
+void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
+                    vec2 wu, vec2 wdux, vec2 wduz, out vec2 grad) {
+    grad = vec2(0.0);
+    if (uWaveDetailCount <= 0 || fade <= 0.0) {
+        return;
+    }
+    for (int i = 0; i < 12; ++i) {
+        if (i >= uWaveDetailCount) {
+            break;
+        }
+        vec4 L = uWaveDetailL[i];
+        vec2 d = uWaveDetailDir[i];
+        float dl = length(d);
+        d = (dl > 1.0e-6) ? d / dl : vec2(1.0, 0.0);
+        float k = L.x;
+        float lod_amp = 1.0;
+        if (footprint > 1.0e-6) {
+            float wavelength_px = (6.283185307179586 / k) / footprint;
+            if (wavelength_px <= kWaveLodPxMin) {
+                lod_amp = 0.0;
+            } else if (wavelength_px < kWaveLodPxMax) {
+                float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                lod_amp = uu * uu * (3.0 - 2.0 * uu);
+            }
+        }
+        float amp = L.y * fade * lod_amp;
+        float omega = sqrt(9.81 * k);
+        float phase = k * dot(d, p) - omega * t + L.z + k * dot(wu, d);
+        vec2 g = vec2(k * d.x, k * d.y) + vec2(k * dot(wdux, d), k * dot(wduz, d));
+        grad += amp * g * cos(phase);
     }
 }
 
@@ -200,6 +305,10 @@ float WaveAmplitudeSum(float fade, float footprint) {
             }
         }
         s += uWaveL[i].z * lod_amp;
+        if (uWaveStokes2 != 0) {
+            float aa = uWaveL[i].z * lod_amp;
+            s += 0.5 * uWaveL[i].x * aa * aa;
+        }
     }
     float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
     return s * fade * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
@@ -218,10 +327,15 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     if (uWaveDisplace == 0) {
         pos = cam + ray_dir * t;
         float dist = length(pos.xz - cam.xz);
+        float fade = WaveFadeFactor(dist);
         float h;
         vec2 grad;
-        WaveSampleAt(pos.xz, uWaveTime, WaveFadeFactor(dist), footprint, h, grad);
-        normal = WaveNormalFromGrad(grad);
+        WaveSampleAt(pos.xz, uWaveTime, fade, footprint, h, grad);
+        vec2 wu, wdux, wduz;
+        WaveWarpAt(pos.xz, wu, wdux, wduz);
+        vec2 dgrad;
+        WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
+        normal = WaveNormalFromGrad(grad + dgrad);
         return true;
     }
 
@@ -260,10 +374,15 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     }
     pos = cam + ray_dir * t;
     float dist = length(pos.xz - cam.xz);
+    float fade = WaveFadeFactor(dist);
     float h;
     vec2 grad;
-    WaveSampleAt(pos.xz, uWaveTime, WaveFadeFactor(dist), footprint, h, grad);
-    normal = WaveNormalFromGrad(grad);
+    WaveSampleAt(pos.xz, uWaveTime, fade, footprint, h, grad);
+    vec2 wu, wdux, wduz;
+    WaveWarpAt(pos.xz, wu, wdux, wduz);
+    vec2 dgrad;
+    WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
+    normal = WaveNormalFromGrad(grad + dgrad);
     return true;
 }
 )glsl";

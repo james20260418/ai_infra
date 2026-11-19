@@ -31,9 +31,12 @@
 //   ./tools/jpov/build_jpov_skylight_viewer.sh
 //   → output/jpov_skylight_viewer/jpov_skylight_viewer
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include <glog/logging.h>
@@ -972,6 +975,197 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
     return 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 海面报告（4 合 1）：同一套配置拍 4 个固定机位，用于「像不像大海」的横向比较。
+//
+// 用法：jpov_skylight_viewer --capture-ocean-report <out_dir> [--ocean-config <file>]
+//
+// 配置是纯文本、每行一条（# 后面是注释，缺省项用内置默认）：
+//   sun     <elev_deg> <azim_deg>          # 太阳方向
+//   sigma_a <r> <g> <b>                     # 水体吸收 1/m
+//   sigma_s <r> <g> <b>                     # 水体散射 1/m
+//   wind    <m/s>                           # 短波 MSS（Cox–Munk）
+//   fade    <start_m> <end_m>               # 远处淡出
+//   speed   <倍率>                          # 色散时间倍率
+//   stokes  <0|1>                           # 二阶 Stokes 谐波
+//   warp    <amp_m> <lam0> <dx0> <dz0> <lam1> <dx1> <dz1>   # 域扭曲
+//   wave    <dx> <dz> <lambda_m> <amp_m> <phase_rad>
+//   detail  <dx> <dz> <lambda_m> <amp_m> <phase_rad>         # 只进法线
+//
+// 四个机位（固定，不可配）：
+//   1) 45° 俯角 + 5 m 高（近场波纹/碎光）
+//   2) 45° 俯角 + 40 m 高（中景图案/周期性）
+//   3) 10° 掠射、朝向太阳（glitter 路径）
+//   4) 10° 掠射、背向太阳（逆光碎光）
+namespace {
+
+struct OceanConfig {
+    float sun_elev_deg = 25.0f;
+    float sun_azim_deg = 214.0f;
+    float sigma_a[3] = {0.35f, 0.054f, 0.014f};
+    float sigma_s[3] = {0.02f, 0.02f, 0.02f};
+    float wind_ms = 8.0f;
+    float turbidity = 2.0f;
+    float exposure = 1.0f;
+    int debug = 0;   // 1 = 法线颜色可视化（诊断用）
+    jpov::WaterWaves waves;
+};
+
+bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
+    CHECK(out != nullptr);
+    std::ifstream in(path);
+    if (!in) {
+        LOG(ERROR) << "打不开海面配置: " << path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos) {
+            line.resize(hash);
+        }
+        std::istringstream ss(line);
+        std::string tag;
+        if (!(ss >> tag)) {
+            continue;
+        }
+        if (tag == "sun") {
+            ss >> out->sun_elev_deg >> out->sun_azim_deg;
+        } else if (tag == "sigma_a") {
+            ss >> out->sigma_a[0] >> out->sigma_a[1] >> out->sigma_a[2];
+        } else if (tag == "sigma_s") {
+            ss >> out->sigma_s[0] >> out->sigma_s[1] >> out->sigma_s[2];
+        } else if (tag == "wind") {
+            ss >> out->wind_ms;
+        } else if (tag == "exposure") {
+            ss >> out->exposure;
+        } else if (tag == "turbidity") {
+            ss >> out->turbidity;
+        } else if (tag == "debug") {
+            ss >> out->debug;
+        } else if (tag == "fade") {
+            ss >> out->waves.fade_start_m >> out->waves.fade_end_m;
+        } else if (tag == "speed") {
+            ss >> out->waves.speed_scale;
+        } else if (tag == "stokes") {
+            int v = 0;
+            ss >> v;
+            out->waves.stokes_second_order = (v != 0);
+        } else if (tag == "warp") {
+            ss >> out->waves.warp_amplitude_m >> out->waves.warp_wavelength_m[0] >>
+                out->waves.warp_dir_x[0] >> out->waves.warp_dir_z[0] >>
+                out->waves.warp_wavelength_m[1] >> out->waves.warp_dir_x[1] >>
+                out->waves.warp_dir_z[1];
+        } else if (tag == "wave" || tag == "detail") {
+            jpov::WaterWave w;
+            if (!(ss >> w.dir_x >> w.dir_z >> w.wavelength_m >> w.amplitude_m >>
+                  w.phase_rad)) {
+                LOG(FATAL) << tag << " 行格式错: " << line;
+            }
+            if (tag == "wave") {
+                CHECK_LT(out->waves.num_waves, jpov::WaterWaves::kMaxWaves)
+                    << "wave 行超过 kMaxWaves";
+                out->waves.waves[out->waves.num_waves++] = w;
+            } else {
+                CHECK_LT(out->waves.num_detail_waves, jpov::WaterWaves::kMaxDetailWaves)
+                    << "detail 行超过 kMaxDetailWaves";
+                out->waves.detail_waves[out->waves.num_detail_waves++] = w;
+            }
+        } else {
+            LOG(WARNING) << "未知海面配置项: " << tag;
+        }
+    }
+    out->waves.enabled = true;
+    return true;
+}
+
+}  // namespace
+
+int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_path) {
+    const float kPi = 3.14159265358979323846f;
+    OceanConfig oc;
+    if (!config_path.empty()) {
+        if (!LoadOceanConfig(config_path, &oc)) {
+            return 1;
+        }
+    }
+    LOG(INFO) << "ocean report: " << oc.waves.num_waves << " waves, "
+              << oc.waves.num_detail_waves << " detail, warp="
+              << oc.waves.warp_amplitude_m << " m, stokes="
+              << (oc.waves.stokes_second_order ? 1 : 0);
+
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 海面报告（4 合 1，headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(false);   // 纯海面：不画岩板/方块/人（只留天空 + 水）
+    app.SetWaterScene(true);
+    app.Init();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = oc.sun_elev_deg;
+    app.deg_.sun_azim_deg    = oc.sun_azim_deg;
+    app.deg_.turbidity       = oc.turbidity;
+
+    app.SetWaterLevel(0.0f);
+    app.SetWaterSkin(true);
+    app.SetWaterMedium(true);
+    app.water_sigma_a_r_ = oc.sigma_a[0];
+    app.water_sigma_a_g_ = oc.sigma_a[1];
+    app.water_sigma_a_b_ = oc.sigma_a[2];
+    app.water_sigma_s_   = oc.sigma_s[0];   // demo 侧 σs 是标量（逐通道同值）
+    app.water_wind_ms_   = oc.wind_ms;
+    app.SetWaterWavesConfig(oc.waves);
+    app.SetWaterWaves(true);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterWaveTime(7.0f);   // 冻结时间：4 张图的波场相位一致，可直接对比
+    app.SetWaterWaveDebug(oc.debug);
+    app.exposure_ = oc.exposure;
+
+    // 朝向太阳 = 相机在太阳方位的对面（theta = azim − 180°）。
+    const float theta_toward = (oc.sun_azim_deg - 180.0f) * kPi / 180.0f;
+    const float kGrazing = 10.0f * kPi / 180.0f;
+    struct OceanShot {
+        const char* name;
+        float phi;
+        float radius;
+        float theta;
+    };
+    const OceanShot kShots[4] = {
+        {"ocean_1_45deg_5m.png",       45.0f * kPi / 180.0f,
+         5.0f / std::sin(45.0f * kPi / 180.0f), theta_toward},
+        {"ocean_2_down_40m.png",       45.0f * kPi / 180.0f,
+         40.0f / std::sin(45.0f * kPi / 180.0f), theta_toward},
+        {"ocean_3_grazing_sun.png",    kGrazing, 18.0f, theta_toward},
+        {"ocean_4_grazing_away.png",   kGrazing, 18.0f, theta_toward + kPi},
+    };
+    for (const OceanShot& shot : kShots) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = shot.phi;
+        app.view_.theta = shot.theta;
+        app.view_.R     = shot.radius;
+        app.RunOnce(input, winfo, (out_dir + "/" + shot.name).c_str());
+    }
+
+    LOG(INFO) << "ocean report captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 // 三色环境光 → 水体照明的 A/B：证明「三色 ambient 塌成纯色后确实进了水体」。
 // 用法：jpov_skylight_viewer --capture-water-tricolor <out_dir>
 //
@@ -1862,6 +2056,8 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string ocean_report_out_dir;
+    std::string ocean_config_path;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -1904,12 +2100,19 @@ int main(int argc, char** argv) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
             sky_refract_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ocean-report") == 0 && i + 1 < argc) {
+            ocean_report_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
+            ocean_config_path = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!ocean_report_out_dir.empty()) {
+        return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
     }
     if (!box_cut_out_dir.empty()) {
         return RunCaptureBoxCut(box_cut_out_dir);

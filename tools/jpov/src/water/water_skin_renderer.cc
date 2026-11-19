@@ -208,6 +208,51 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
     }
 
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveTime"), on ? w->time_s : 0.0f);
+
+    // ── 域扭曲（domain warp）：两条低频载波 → (k, dir_x, dir_z, phase) ──
+    const float warp_amp = on ? w->warp_amplitude_m : 0.0f;
+    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveWarpAmp"), warp_amp > 0.0f ? warp_amp : 0.0f);
+    for (int j = 0; j < 2; ++j) {
+        const char* nm = (j == 0) ? "uWaveWarp0" : "uWaveWarp1";
+        if (warp_amp <= 0.0f) {
+            glUniform4f(shader_mgr_->GetUniform(prog, nm), 1.0f, 1.0f, 0.0f, 0.0f);
+            continue;
+        }
+        CHECK_GT(w->warp_wavelength_m[j], 0.0f)
+            << "WaterWaves.warp_wavelength_m 必须 > 0（关掉请用 warp_amplitude_m = 0）";
+        const float k = k_two_pi / w->warp_wavelength_m[j];
+        float dx = w->warp_dir_x[j];
+        float dz = w->warp_dir_z[j];
+        const float dl = std::sqrt(dx * dx + dz * dz);
+        if (dl > 1.0e-6f) {
+            dx /= dl;
+            dz /= dl;
+        } else {
+            dx = 1.0f;
+            dz = 0.0f;
+        }
+        glUniform4f(shader_mgr_->GetUniform(prog, nm), k, dx, dz, w->warp_phase_rad[j]);
+    }
+    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveStokes2"),
+                (on && w->stokes_second_order) ? 1 : 0);
+
+    // ── 细节短波：只进法线（不进几何/求交）──
+    const int detail_count =
+        on ? std::clamp(w->num_detail_waves, 0, WaterWaves::kMaxDetailWaves) : 0;
+    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveDetailCount"), detail_count);
+    const int detail_l_loc = shader_mgr_->GetUniform(prog, "uWaveDetailL[0]");
+    const int detail_dir_loc = shader_mgr_->GetUniform(prog, "uWaveDetailDir[0]");
+    for (int i = 0; i < detail_count; ++i) {
+        const WaterWave& dv = w->detail_waves[i];
+        CHECK_GT(dv.wavelength_m, 0.0f) << "detail_waves.wavelength_m 必须 > 0";
+        CHECK_GE(dv.amplitude_m, 0.0f) << "detail_waves.amplitude_m 必须 >= 0";
+        const float k = k_two_pi / dv.wavelength_m;
+        glUniform4f(detail_l_loc + i, k, dv.amplitude_m, dv.phase_rad, 0.0f);
+        const float dl = std::sqrt(dv.dir_x * dv.dir_x + dv.dir_z * dv.dir_z);
+        const bool has_dir = dl > 1.0e-6f;
+        glUniform2f(detail_dir_loc + i, has_dir ? (dv.dir_x / dl) : 1.0f,
+                    has_dir ? (dv.dir_z / dl) : 0.0f);
+    }
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFadeStart"), on ? w->fade_start_m : 0.0f);
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFadeEnd"), on ? w->fade_end_m : 0.0f);
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFlowAlign"), on ? w->flow_align : 0.0f);
