@@ -540,8 +540,10 @@ footprint = t · (2·tanHalfFov / viewport_h) / max(|rd.y|, 0.15)
 - 要做对必须先：补探针下半球（或改成只采上半球）→ 放开 LOD 上限 → 再谈各向异性滤波。
   这一串属于「探针基建」，与颜色补偿不是一个量级的工作。
 
-**保留的实现位置**（将来复活时直接取）：`water_wave_shader.h::WaveSlopeTensor`（张量仍在算，F_eff 在用）、
-`water_skin_shader.h` 里被注释掉的 `env_lod` 分支与 `GgxSingleScatterAlbedo`。
+**复活时从哪里接**：方差张量已经在算（`water_wave_shader.h::WaveSlopeTensor`，F_eff 在用），
+两个消费者只需要在 `water_skin_shader.h` 里把它接到 `a2`（太阳）和 `env_lod`（探针）上；
+多散射补偿按 Turquin 2019：`C *= 1 + F·(1−E_ss)/E_ss`，`E_ss` 用 32×32 LUT（Kulla–Conty 表）
+而不是现在的近似（本 PR 已把那条近似实现删掉，避免留下两套口径）。
 
 ### 10.17 本 PR 没做的事（按优先级）
 
