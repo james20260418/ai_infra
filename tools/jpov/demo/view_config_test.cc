@@ -208,6 +208,64 @@ void TestMakeNoonLighting() {
     LOG(INFO) << "OK TestMakeNoonLighting";
 }
 
+// 方向键调视角（2026-11-20）：符号与右键拖拽一致、每次 step、按住按 6 帧节奏重复、
+// 松开清零、phi 仍受 ±90° 钳制。
+void TestArrowKeys() {
+    const double kStep = 5.0 * 3.14159265358979323846 / 180.0;
+    jpov::InputSnapshot in{};
+    jpov_viewer::ViewConfig v;
+    v.phi = 0.3;
+    v.theta = 0.5;
+    jpov_viewer::ArrowKeyState st;
+
+    // ① 按一次右：theta += step（首帧立即响应）
+    in.keys[static_cast<int>(jpov::KeyCode::Right)].raw = -2;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.theta, 0.5 + kStep, 1e-12, "右方向键应 theta+5°");
+    ExpectNear(v.phi, 0.3, 1e-12, "右方向键不应改 phi");
+
+    // ② 继续按住：第 2..5 帧不动（重复间隔内），第 6 帧再走一步（kArrowRepeatFrames=6）
+    const double after_first = v.theta;
+    for (int f = 2; f <= 5; ++f) {
+        jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    }
+    ExpectNear(v.theta, after_first, 1e-12, "重复间隔内不应移动");
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);   // 第 6 帧
+    ExpectNear(v.theta, after_first + kStep, 1e-12, "第 6 帧应再走一步");
+
+    // ③ 松开后计数清零：再按一次只走一步
+    in.keys[static_cast<int>(jpov::KeyCode::Right)].raw = 0;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    const double after_release = v.theta;
+    in.keys[static_cast<int>(jpov::KeyCode::Right)].raw = -2;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.theta, after_release + kStep, 1e-12, "松开再按应只走一步");
+
+    // ④ 左键反向、上下键改 phi
+    in.keys[static_cast<int>(jpov::KeyCode::Right)].raw = 0;
+    in.keys[static_cast<int>(jpov::KeyCode::Left)].raw = -2;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.theta, after_release, 1e-12, "左方向键应 theta−5°");
+    in.keys[static_cast<int>(jpov::KeyCode::Left)].raw = 0;
+    const double phi0 = v.phi;
+    in.keys[static_cast<int>(jpov::KeyCode::Up)].raw = -2;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.phi, phi0 + kStep, 1e-12, "上方向键应 phi+5°");
+    in.keys[static_cast<int>(jpov::KeyCode::Up)].raw = 0;
+    in.keys[static_cast<int>(jpov::KeyCode::Down)].raw = -2;
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.phi, phi0, 1e-12, "下方向键应 phi−5°");
+
+    // ⑤ phi 仍受 ±90° 钳制
+    v.phi = 3.14159265358979323846 / 2.0 - 0.01;
+    in.keys[static_cast<int>(jpov::KeyCode::Down)].raw = 0;
+    in.keys[static_cast<int>(jpov::KeyCode::Up)].raw = -2;
+    st.Reset();
+    jpov_viewer::ApplyArrowKeys(in, kStep, &st, &v);
+    ExpectNear(v.phi, 3.14159265358979323846 / 2.0, 1e-12, "phi 应被钳到 +90°");
+    LOG(INFO) << "OK TestArrowKeys";
+}
+
 void TestGroundQuad() {
     const jpov::MeshData mesh = jpov_viewer::MakeGroundQuad();
     CHECK_EQ(mesh.positions.size(), 4u);
@@ -232,6 +290,7 @@ int main() {
     TestVerticalPanDeltaY();
     TestMakePannedCamera();
     TestMakeNoonLighting();
+    TestArrowKeys();
     TestGroundQuad();
     LOG(INFO) << "全部 ViewConfig 单测通过";
     return 0;
