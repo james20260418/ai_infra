@@ -1150,7 +1150,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
     };
     const float theta_toward = (app.deg_.sun_azim_deg - 180.0f) * kPi / 180.0f;
     struct Shot { const char* suffix; float phi; float R; float theta; };
-    const Shot kShots[4] = {
+    const Shot kShots[5] = {
         {"45deg_5m",      45.0f * kPi / 180.0f, 5.0f / std::sin(45.0f * kPi / 180.0f),
          theta_toward},
         {"45deg_40m",     45.0f * kPi / 180.0f, 40.0f / std::sin(45.0f * kPi / 180.0f),
@@ -1158,6 +1158,8 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
         {"10deg_grazing", 10.0f * kPi / 180.0f, 18.0f, theta_toward},
         // 远景：涌（λ≈140 m）在这种尺度上才读得出"两套方向交叉"
         {"wide_250m",     25.0f * kPi / 180.0f, 250.0f, theta_toward},
+        // Danis 报障机位：pos(4.68, 53.50, 1.99) ⇒ R≈53.74、phi≈84.6°（近俯视）
+        {"topdown_53m",   84.6f * kPi / 180.0f, 53.74f, theta_toward},
     };
 
     for (const Preset& p : kPresets) {
