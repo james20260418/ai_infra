@@ -192,10 +192,19 @@ cc_library(
 )
 
 cc_library(
+    name = "ocean_spectra",
+    hdrs = ["demo/ocean_spectra.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//tools/jpov/interface:render_command"],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
     name = "skylight_viewer_app",
     hdrs = ["demo/skylight_viewer_app.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tools/jpov:ocean_spectra",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",

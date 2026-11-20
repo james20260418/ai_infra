@@ -28,12 +28,14 @@
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/ocean_spectra.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
@@ -194,6 +196,83 @@ public:
     // 散射取 0.05（清澈偏浊）：既能看出介质注入，又不把水下东西糊掉。
     static constexpr int kSceneWater = 3;
     bool IsWaterScene() const { return scene_index_ == kSceneWater; }
+
+    // ── 场景 4：海谱选型（Ocean Lab，2026-11-20 Danis：「合到一个 viewer 里选型」）──
+    // 场景里**只换谱**，光/机位/水色/海底都是同一套 ⇒ A/B/C 的差别只可能来自谱。
+    // 三份谱的数据在 ocean_spectra.h（由预实验的 cfg 生成）。
+    static constexpr int kSceneOceanLab = 4;
+    bool IsOceanLab() const { return scene_index_ == kSceneOceanLab; }
+
+    // 选型场的自由度（默认值 = 预实验的拍摄参数：太阳 35°/214°、σa 0.50/0.054/0.014、
+    // σs 0.04、风速 8 m/s、曝光 0.6、45° 俯视 5 m、时间速度 1）。
+    int ocean_preset_ = 1;              // 0=A 1=B 2=C（默认 B）
+    float ocean_amp_scale_ = 1.0f;      // 主波振幅倍率
+    float ocean_detail_scale_ = 1.0f;   // 细节短波振幅倍率
+    float ocean_warp_amp_m_ = 6.0f;     // 域扭曲幅度（<0 用谱自带值）
+    float ocean_speed_ = 1.0f;          // 波浪时间速度（0 = 冻结）
+    float ocean_seabed_depth_m_ = 3.0f; // 海底深度（相对水位）
+    float ocean_seabed_albedo_ = 1.0f;  // 海底反照率乘子
+    bool  ocean_seabed_on_ = true;      // 海底底板开关
+
+    // 切谱时把「拥有该谱默认值」的滑条复位（颜色/曝光/warp）。
+    // **不动** 主波/细节倍率 与 海底/机位 —— 那些是用户正在比的东西。
+    void ApplyOceanPreset(int idx) {
+        const jpov_skylight::OceanSpectrumPreset& p = jpov_skylight::OceanPreset(idx);
+        ocean_preset_ = idx;
+        exposure_ = p.exposure;
+        water_sigma_a_r_ = p.sigma_a_r;
+        water_sigma_a_g_ = p.sigma_a_g;
+        water_sigma_a_b_ = p.sigma_a_b;
+        water_sigma_s_ = p.sigma_s;
+        water_wind_ms_ = p.wind_ms;
+        ocean_warp_amp_m_ = p.warp_amp_m;
+    }
+
+    // 选型场的动画时钟：**真实时间**（frame_count/60 在掉帧时会变慢）。
+    // 首次调用时启动；冻结时间时不会被用到。
+    float OceanLabTime() {
+        if (!ocean_clock_started_) {
+            ocean_clock_start_ = std::chrono::steady_clock::now();
+            ocean_clock_started_ = true;
+        }
+        const auto dt = std::chrono::steady_clock::now() - ocean_clock_start_;
+        return std::chrono::duration<float>(dt).count();
+    }
+    void ResetOceanLabClock() {
+        ocean_clock_start_ = std::chrono::steady_clock::now();
+        ocean_clock_started_ = true;
+    }
+    std::chrono::steady_clock::time_point ocean_clock_start_{};
+    bool ocean_clock_started_ = false;
+
+    // 选型场默认机位：45° 俯视、相机高 5 m、朝太阳（= 预实验的 ① 机位）。
+    void SetOceanLabView() {
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        view_ = jpov_viewer::DefaultView();
+        view_.phi = 45.0 * kDegToRad;
+        view_.theta = (static_cast<double>(deg_.sun_azim_deg) - 180.0) * kDegToRad;
+        view_.R = 5.0 / std::sin(view_.phi);
+    }
+
+    // 进/出选型场：一次性把水面相关的开关摆到「能看的海」的状态。
+    void SetOceanLab(bool on) {
+        if (!on) {
+            scene_index_ = 0;
+            return;
+        }
+        scene_index_ = kSceneOceanLab;
+        water_waves_on_ = true;
+        water_skin_on_ = true;
+        water_medium_on_ = true;
+        water_waves_.displacement = true;
+        deg_.sun_elev_deg = 35.0f;
+        deg_.sun_azim_deg = 214.0f;
+        deg_.turbidity = 2.0f;
+        deg_.daylight_season = 0.0f;
+        water_level_y_ = 0.0f;
+        ApplyOceanPreset(ocean_preset_);
+        SetOceanLabView();
+    }
     // 两个正交开关（2026-11-19 Danis 要的「拆开看对齐」）：
     //   · water_skin_on_   = 界面层（水皮 WBO）：反射 / 透射 / 水面高光 / Snell 窗；
     //   · water_medium_on_ = 水体介质（体积）：水下吸收 + 单次散射注入。
@@ -485,6 +564,7 @@ public:
         // moon_season 与夜空蓝覆盖默认值。
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         const bool water_scene = IsWaterScene();
+        const bool ocean_lab = IsOceanLab();
         jpov::SkyCommand sky = nl.sky;
         // 地平线以下的填充色与探针下半球**不在这里配**：Renderer 在有水面时统一按
         // 「深海渐近色 + 水面 Fresnel」自动填（单一出处，见 renderer.cc 的天空段）。
@@ -518,10 +598,11 @@ public:
         //    「有水面却没 env_specular / sky_scale=0 / 探针没建」直接 CHECK（宁可崩也不静默
         //    退化成黑水面）。所以这里在水场景强制打开并把消费量抬到 (0,1]，避免用户在面板上
         //    一勾就把进程打挂。
-        if (env_specular_on_ || water_scene) {
+        const bool has_water_skin = water_scene || ocean_lab;
+        if (env_specular_on_ || has_water_skin) {
             jpov::EnvSpecular es;
-            es.sky_scale = water_scene ? std::max(env_specular_scale_, 0.05f)
-                                       : env_specular_scale_;
+            es.sky_scale = has_water_skin ? std::max(env_specular_scale_, 0.05f)
+                                          : env_specular_scale_;
             cmds->env_specular = es;
         }
 
@@ -555,7 +636,35 @@ public:
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
-        if (draw_scene && water_scene) {
+        // ── 场景 4：海谱选型场 ──
+        // 只画一件事：海底底板（+ 几块散石当尺度参照）。天空/水/光全由公共链路给，
+        // 场景里**不放任何物体** —— 否则 A/B/C 的观感差异会被物体倒影干扰。
+        if (draw_scene && ocean_lab) {
+            const float bed_y = water_level_y_ - ocean_seabed_depth_m_;
+            if (ocean_seabed_on_) {
+                // 海底 = 8×8 块 25 m 的棋盘格（两档反照率），不是一整块纯色平面。
+                // 为什么：3 m 深、45° 视线时沙底穿过的水体约 8.5 m ⇒ 红通道只剩 ~1.5%，
+                // 单一沙色被水染成和水体几乎一样的青色 —— 单色底"看不见"。
+                // 棋盘格是唯一低成本、能一眼读出"底"的结构（越深越淡，正好是浅海的读法）。
+                const int kTiles = 12;
+                const float kTileM = 16.6667f;   // 12×12 × 16.67 = 200×200 m
+                const float kTileScale = kTileM / jpov_skylight::kSlabGroundMeshSizeM;
+                const float origin = -0.5f * static_cast<float>(kTiles - 1) * kTileM;
+                for (int iz = 0; iz < kTiles; ++iz) {
+                    for (int ix = 0; ix < kTiles; ++ix) {
+                        const float alb =
+                            ocean_seabed_albedo_ * ((((ix + iz) & 1) != 0) ? 0.74f : 1.0f);
+                        cmds->DrawObject3D(ground_mesh_,
+                                           jpov_skylight::SeabedMaterial(alb),
+                                           {origin + static_cast<float>(ix) * kTileM, bed_y,
+                                            origin + static_cast<float>(iz) * kTileM},
+                                           /*up*/ {0.0f, 1.0f, 0.0f},
+                                           /*front*/ {0.0f, 0.0f, 1.0f},
+                                           /*scale*/ kTileScale);
+                    }
+                }
+            }
+        } else if (draw_scene && water_scene) {
             // 水下岩板（30×30 m）：顶面在「水位 − 深度」，随两条滑条升降。
             // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
             const float top = water_level_y_ - slab_top_depth_m_;
@@ -676,7 +785,7 @@ public:
         //   · **界面层**（水皮）只要在水场景就有（它是世界的一部分）；
         //   · **介质**才受 `水体介质` 开关控制。
         // 两者分开 ⇒ A/B 的语义是「界面不变、只切介质」，不会把界面一起关掉。
-        if (water_scene) {
+        if (water_scene || ocean_lab) {
             jpov::WaterCommand w;
             w.level_y = water_level_y_;
             w.ior = water_ior_;
@@ -691,7 +800,26 @@ public:
             w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
             w.medium.phase_g = water_phase_g_;
             // 波浪：只改界面几何（求交/法线）；介质仍按 level_y 半空间。
-            if (water_waves_on_) {
+            if (ocean_lab) {
+                // 选型场：谱整份来自 ocean_spectra.h，三个倍率走面板滑条。
+                jpov::WaterWaves wv = jpov_skylight::MakeOceanWaves(
+                    ocean_preset_, ocean_amp_scale_, ocean_detail_scale_, ocean_warp_amp_m_);
+                wv.speed_scale = ocean_speed_;
+                // 时间：冻结 ⇒ 用滑条秒数（可复现）；否则走真实时钟（动态的海）。
+                wv.time_s = water_wave_time_freeze_ ? water_wave_time_s_ : OceanLabTime();
+                // 短波方向 = 主波方向的矢量和（风向），MSS 由风速滑条给。
+                float sx = 0.0f;
+                float sz = 0.0f;
+                for (int i = 0; i < wv.num_waves; ++i) {
+                    sx += wv.waves[i].dir_x;
+                    sz += wv.waves[i].dir_z;
+                }
+                const float sl = std::sqrt(sx * sx + sz * sz);
+                wv.short_wave.dir_x = (sl > 1.0e-6f) ? sx / sl : 1.0f;
+                wv.short_wave.dir_z = (sl > 1.0e-6f) ? sz / sl : 0.0f;
+                wv.short_wave.wind_speed_ms = water_wind_ms_;
+                w.waves = wv;
+            } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
                 wv.enabled = true;
                 int n = water_use_config_count_
@@ -791,7 +919,9 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 17;
+        // 选型场用满 14 行（左列 0..13）；其余场景保持原 17 行布局。
+        // ⚠️ 行数必须等于「最大行号 + 1」：面板是底对齐的，多给的行会变成底部一条空白。
+        const int   kRows    = IsOceanLab() ? 14 : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -809,7 +939,8 @@ private:
             const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
                                                      "场景1 镜面地板+随机模型",
                                                      "场景2 只天空",
-                                                     "场景3 水凝胶（水体介质）"};
+                                                     "场景3 水凝胶（水体介质）",
+                                                     "场景4 海谱选型（ABC）"};
             int sel = scene_index_;
             if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
@@ -823,9 +954,62 @@ private:
                     view_.phi = 0.62;   // ≈35° 仰角
                     view_.theta = 0.6;
                     view_.R = 26.0;
+                } else if (sel == kSceneOceanLab) {
+                    // 海谱选型场：45° / 5 m / 朝太阳 + 谱/颜色复位到默认。
+                    SetOceanLab(true);
                 }
             }
 
+            // ── 场景 4：海谱选型（A/B/C）──
+            // 面板只放「谱 + 颜色 + 海底」：光源/机位/水皮/介质全是同一套，
+            // 这样 A/B/C 的差异只可能来自谱本身。
+            if (IsOceanLab()) {
+                const std::vector<const char*> spectra = {
+                    "A 谱合成 Phillips（48 细节·55° 散布）",
+                    "B 各向同性细节 ×64（无 warp）",
+                    "C B + 限带 warp 6 m（载波 120–610 m）"};
+                int cur = ocean_preset_;
+                if (ui_.Combo("海谱 A/B/C", &cur, spectra, row(0, 1))) {
+                    ApplyOceanPreset(cur);
+                }
+                ui_.SliderFloat("主波波幅倍率", &ocean_amp_scale_, row(0, 2), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("细节短波倍率", &ocean_detail_scale_, row(0, 3),
+                                0.0f, 3.0f, 2);
+                // warp 幅度是**绝对米数**（切到 C 时自动变 6），A/B 拖起来也能加扭曲。
+                ui_.SliderFloat("域扭曲 warp 幅度 m", &ocean_warp_amp_m_, row(0, 4),
+                                0.0f, 12.0f, 1);
+                ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_speed_, row(0, 5),
+                                0.0f, 3.0f, 2);
+                ui_.SliderFloat("风速 m/s (短波方差)", &water_wind_ms_, row(0, 6),
+                                0.0f, 20.0f, 1);
+                // 水色：逐通道吸收才是物理上的"颜色"（红吸收越强越蓝）。
+                ui_.SliderFloat("吸收 R 1/m (水色 蓝↔绿)", &water_sigma_a_r_,
+                                row(0, 7), 0.0f, 1.5f, 3);
+                ui_.SliderFloat("吸收 G 1/m", &water_sigma_a_g_, row(0, 8), 0.0f, 0.3f, 3);
+                ui_.SliderFloat("吸收 B 1/m", &water_sigma_a_b_, row(0, 9), 0.0f, 0.1f, 3);
+                ui_.SliderFloat("散射 1/m (浑浊)", &water_sigma_s_, row(0, 10),
+                                0.0f, 0.5f, 3);
+                ui_.SliderFloat("曝光", &exposure_, row(0, 11), 0.2f, 2.0f, 2);
+                ui_.SliderFloat("海底深度 m (浅海)", &ocean_seabed_depth_m_,
+                                row(0, 12), 0.3f, 20.0f, 2);
+                ui_.SliderFloat("海底反照率", &ocean_seabed_albedo_, row(0, 13),
+                                0.1f, 1.5f, 2);
+
+                ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                                row(1, 0), -90.0f, 90.0f, 0);
+                ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(1, 1),
+                                0.0f, 360.0f, 0);
+                ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 2),
+                                kTurbidityMin, kTurbidityMax, 1);
+                ui_.Checkbox("水皮界面层 (WBO)", &water_skin_on_, row(1, 3));
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 4));
+                ui_.Checkbox("波浪 真位移", &water_waves_.displacement, row(1, 5));
+                ui_.Checkbox("海底底板", &ocean_seabed_on_, row(1, 6));
+                ui_.Checkbox("波浪 冻结时间", &water_wave_time_freeze_, row(1, 7));
+                ui_.SliderFloat("波浪 时间 s", &water_wave_time_s_, row(1, 8),
+                                0.0f, 120.0f, 2);
+                return;
+            }
             // 水场景：面板只留「水体介质 + 天体光照」（验收物理口径，不是调参手感）。
             if (IsWaterScene()) {
                 ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 1));

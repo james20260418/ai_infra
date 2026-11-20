@@ -1092,6 +1092,74 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 
 }  // namespace
 
+// 海谱选型场的验证拍摄：A/B/C × 3 机位（45°/5m、45°/40m、10° 掠射朝太阳）。
+// 交互版就是同一条渲染路径 + 面板；这里只是把三分类各自拍下来，方便肉眼/存档对比。
+int RunCaptureOceanLab(const std::string& out_dir, bool show_ui = false) {
+    const float kPi = 3.14159265358979323846f;
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 海谱选型（A/B/C，headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(show_ui);   // true = 把交互面板一起拍进来（验收 UI 布局）
+    app.SetShowScene(true);
+    app.Init();
+    InstallScene(app);
+    if (show_ui) {
+        InstallModels(app);   // 面板里没有模型滑条，但交互版会装；保持一致
+    }
+    app.InstallTextMeasure();
+    app.SetOceanLab(true);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterWaveTime(7.0f);   // 冻结：三份谱同一时刻，差异只来自谱
+
+    const char* kCodes[3] = {"A", "B", "C"};
+    const float theta_toward = (app.deg_.sun_azim_deg - 180.0f) * kPi / 180.0f;
+    struct Shot { const char* suffix; float phi; float R; float theta; };
+    const Shot kShots[3] = {
+        {"45deg_5m",       45.0f * kPi / 180.0f, 5.0f / std::sin(45.0f * kPi / 180.0f),
+         theta_toward},
+        {"45deg_40m",      45.0f * kPi / 180.0f, 40.0f / std::sin(45.0f * kPi / 180.0f),
+         theta_toward},
+        {"10deg_grazing",  10.0f * kPi / 180.0f, 18.0f, theta_toward},
+    };
+
+    if (show_ui) {
+        app.ApplyOceanPreset(app.ocean_preset_);
+        app.SetOceanLabView();
+        app.RunOnce(input, winfo, (out_dir + "/oceanlab_ui.png").c_str());
+        LOG(INFO) << "ocean lab UI captured to " << out_dir;
+        app.Finalize();
+        return 0;
+    }
+
+    for (int p = 0; p < 3; ++p) {
+        app.ApplyOceanPreset(p);
+        for (const Shot& s : kShots) {
+            app.view_ = jpov_viewer::DefaultView();
+            app.view_.phi = s.phi;
+            app.view_.theta = s.theta;
+            app.view_.R = s.R;
+            const std::string path = out_dir + "/oceanlab_" + kCodes[p] + "_" + s.suffix + ".png";
+            app.RunOnce(input, winfo, path.c_str());
+        }
+    }
+    LOG(INFO) << "ocean lab captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_path) {
     const float kPi = 3.14159265358979323846f;
     OceanConfig oc;
@@ -2079,6 +2147,9 @@ int main(int argc, char** argv) {
     std::string sky_refract_out_dir;
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
+    std::string ocean_lab_out_dir;
+    std::string ocean_lab_ui_out_dir;
+    bool start_ocean_lab = false;   // --ocean-lab：直接进海谱选型场（交互）
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2125,12 +2196,24 @@ int main(int argc, char** argv) {
             ocean_report_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
             ocean_config_path = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--ocean-lab") == 0) {
+            start_ocean_lab = true;
+        } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
+            ocean_lab_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
+            ocean_lab_ui_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!ocean_lab_ui_out_dir.empty()) {
+        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true);
+    }
+    if (!ocean_lab_out_dir.empty()) {
+        return RunCaptureOceanLab(ocean_lab_out_dir);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2231,6 +2314,10 @@ int main(int argc, char** argv) {
         app.SetWaterScene(true);
         app.BuildWaterPeople();
         app.SetWaterWaves(true);
+    }
+    // --ocean-lab：直接进「海谱选型」场（场景 4）+ ABC 预设 + 动态的海。
+    if (start_ocean_lab) {
+        app.SetOceanLab(true);
     }
     if (wave_time_s >= 0.0f) {
         app.SetWaterWaveTime(wave_time_s);

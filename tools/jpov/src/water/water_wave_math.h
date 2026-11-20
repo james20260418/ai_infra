@@ -93,6 +93,34 @@ inline WaveWarpSample SampleWaveWarp(const WaterWaves& waves, float x, float z) 
     return out;
 }
 
+// 域扭曲的「带宽上限」：|∂u/∂p| ≤ U = A·Σ_j k_j（A 为每条载波的位移幅度）。
+//
+// 一条波长 λ（k = 2π/λ）的波被 warp 之后，沿自身方向的相位梯度是
+//     ∂θ/∂s = k·(1 + d·(∂u/∂p)·d)，
+// 相对变化 |d·∂u·d| ≤ U。所以：
+//   · k·U ≪ 1 ⇒ 只是把波峰推来推去（想要的「掰弯」）；
+//   · k·U ≳ 1 ⇒ 波峰被压扁、间距忽长忽短；k·U > 1 处相位反转 ⇒ 折叠成漩涡。
+// 实测：A=16 m + 载波 37/64/112/197 m ⇒ U≈4.05，34 m 主波的 λ_eff 在 [−75, +147] m
+// 之间扫；1 m 级短波的相位被 k·u 打散成拉丝。
+// 结论：warp 必须**按波限带** —— 长波照旧掰弯，短波几乎不动。
+// 实现：每条波把 warp 相位/梯度乘 min(1, kWarpSlopeLimit / (k·U))。
+inline constexpr float kWarpSlopeLimit = 0.25f;
+
+inline float WaveWarpSlopeBound(const WaterWaves& waves) {
+    if (!(waves.warp_amplitude_m > 0.0f)) {
+        return 0.0f;
+    }
+    const float kTwoPi = 6.28318530717958647692f;
+    float sum_k = 0.0f;
+    for (int j = 0; j < WaterWaves::kWarpCarriers; ++j) {
+        const float lam = waves.warp_wavelength_m[j];
+        if (lam > 0.0f) {
+            sum_k += kTwoPi / lam;
+        }
+    }
+    return waves.warp_amplitude_m * sum_k;
+}
+
 // 标准 smoothstep（u 先 clamp 到 [0,1]）。
 inline float SmoothStep01(float u) {
     const float c = std::clamp(u, 0.0f, 1.0f);
@@ -188,7 +216,9 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
         const float amp = wv.amplitude_m * fade;
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
-            const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
+            // ⚠️ 必须用 wv（主波或细节波自己）；旧版写死 waves.waves[i]，
+            //    i ≥ num_waves 时既用错波长又越过 waves[8] 读 detail_waves 的内存。
+            const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
             if (wavelength_px <= 2.0f) {
                 lod_amp = 0.0f;
             } else if (wavelength_px < 8.0f) {
@@ -225,6 +255,7 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
     }
     const int nd = std::clamp(waves.num_detail_waves, 0, WaterWaves::kMaxDetailWaves);
     const float kTwoPi = 6.28318530717958647692f;
+    const float warp_u_slope = WaveWarpSlopeBound(waves);
     for (int i = 0; i < nd; ++i) {
         const WaterWave& wv = waves.detail_waves[i];
         float dx = wv.dir_x;
@@ -249,10 +280,14 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
             }
         }
         const float amp = wv.amplitude_m * fade * lod_amp;
-        const float wx = k * (warp.dux_dx * dx + warp.duz_dx * dz);
-        const float wz = k * (warp.dux_dz * dx + warp.duz_dz * dz);
+        const float warp_scale =
+            (warp_u_slope > 0.0f) ? std::min(1.0f, kWarpSlopeLimit / (k * warp_u_slope))
+                                  : 1.0f;
+        const float wk = k * warp_scale;
+        const float wx = wk * (warp.dux_dx * dx + warp.duz_dx * dz);
+        const float wz = wk * (warp.dux_dz * dx + warp.duz_dz * dz);
         const float phase = k * (dx * x + dz * z) - omega * time_s + wv.phase_rad +
-                            k * (warp.ux * dx + warp.uz * dz);
+                            wk * (warp.ux * dx + warp.uz * dz);
         const float cos_p = std::cos(phase);
         out->dh_dx += amp * (k * dx + wx) * cos_p;
         out->dh_dz += amp * (k * dz + wz) * cos_p;
@@ -292,6 +327,8 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
 
     const float kTwoPi = 6.28318530717958647692f;
     const WaveWarpSample warp = SampleWaveWarp(waves, x, z);
+    // warp 限带（见 WaveWarpSlopeBound）：k·U 大的短波几乎不吃位移。
+    const float warp_u_slope = WaveWarpSlopeBound(waves);
     const int count = std::clamp(waves.num_waves, 0, WaterWaves::kMaxWaves);
     for (int i = 0; i < count; ++i) {
         const WaterWave& w = waves.waves[i];
@@ -326,10 +363,15 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
         }
         const float amp = w.amplitude_m * amp_gain * fade * lod_amp;
         // 域扭曲：θ += k·dot(u, d)，梯度多一项 k·(∂u/∂x, ∂u/∂z)·d。
-        const float wx = k * (warp.dux_dx * dx + warp.duz_dx * dz);
-        const float wz = k * (warp.dux_dz * dx + warp.duz_dz * dz);
+        // 限带：乘 warp_scale（k·U 大的短波几乎不动，见 WaveWarpSlopeBound）。
+        const float warp_scale =
+            (warp_u_slope > 0.0f) ? std::min(1.0f, kWarpSlopeLimit / (k * warp_u_slope))
+                                  : 1.0f;
+        const float wk = k * warp_scale;
+        const float wx = wk * (warp.dux_dx * dx + warp.duz_dx * dz);
+        const float wz = wk * (warp.dux_dz * dx + warp.duz_dz * dz);
         const float phase = k * (dx * x + dz * z) - omega * time_s + w.phase_rad +
-                            k * (warp.ux * dx + warp.uz * dz);
+                            wk * (warp.ux * dx + warp.uz * dz);
         const float sin_p = std::sin(phase);
         const float cos_p = std::cos(phase);
         const float gx = k * dx + wx;
