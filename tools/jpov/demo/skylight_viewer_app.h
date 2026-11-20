@@ -617,32 +617,16 @@ public:
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
-        // ── 场景 4：海面选型场 —— 只画海底底板（12×12 棋盘格，方便看浅海）。──
-        // 单色底在水下看不见（3 m 深、45° 视线时沙底的红通道只剩 ~1.5%，被染成水色），
-        // 棋盘格是唯一低成本能读出"底"的结构；越深越淡，正好是浅海的读法。
+        // ── 场景 4：海面选型场 —— 只画**一整块**海底底板（120×120 m）。──
+        // 不叠任何礁斑/棋盘格：共面薄垫在 70 m 外必 z-fight，硬边深色块在水下又被读成"黑洞"
+        // （2026-11-20 Danis 实拍确认，见 known_issue.md §10.18）。
         if (draw_scene && ocean_lab) {
             const float bed_y = water_cfg_.level_y - water_cfg_.depth_m;
-            // 海底 = 一整块沙底 + 24 片深浅不一的"礁斑"。
-            // 为什么不是纯棋盘格：5 m 机位下视场只有 ~10 m 宽，16 m 的格子只剩一个角，
-            // 读起来像"黑贴片"；2~6 m 的斑块才在该尺度上读得出"底"。
-            // 为什么不是纯色：3 m 深时沙底的红通道只剩 ~1.5%，单一沙色被水染成和水体一样青。
+            // 海底只画这一块。浅海靠"水深滑条 + 沙底本身的明暗"表达，不再加装饰几何。
             cmds->DrawObject3D(ground_mesh_, jpov_skylight::SeabedMaterial(1.0f),
                                {0.0f, bed_y, 0.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f},
                                /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ 5.0f);
-            for (int i = 0; i < 24; ++i) {
-                const float rx = jpov::water::OceanRand01(water_cfg_.seed, 5000u + i);
-                const float rz = jpov::water::OceanRand01(water_cfg_.seed, 6000u + i);
-                const float rs = jpov::water::OceanRand01(water_cfg_.seed, 7000u + i);
-                const float size = 2.0f + 4.0f * rs;
-                const float alb = 0.55f + 0.25f * jpov::water::OceanRand01(
-                                              water_cfg_.seed, 8000u + i);
-                cmds->DrawObject3D(ground_mesh_, jpov_skylight::SeabedMaterial(alb),
-                                   {(rx - 0.5f) * 90.0f, bed_y + 0.01f, (rz - 0.5f) * 90.0f},
-                                   /*up*/ {0.0f, 1.0f, 0.0f},
-                                   /*front*/ {0.0f, 0.0f, 1.0f},
-                                   /*scale*/ size / jpov_skylight::kSlabGroundMeshSizeM);
-            }
         } else if (draw_scene && water_scene) {
             // 水下岩板（30×30 m）：顶面在「水位 − 深度」，随两条滑条升降。
             // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
