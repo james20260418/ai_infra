@@ -2351,10 +2351,15 @@ int main(int argc, char** argv) {
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
-    app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.25;                       // 略俯视（~14°）
-    app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位
-    app.view_.R     = 9.5;
+    // 海面选型场自己已经摆好机位（SetOceanLab→SetOceanLabView）：不要被这里的
+    // 通用默认机位覆盖（否则 --ocean-lab 进去看到的是 phi=0.25/theta=45°/R=9.5，
+    // 与场景 4 下拉里的那台机位不一致）。
+    if (!start_ocean_lab) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.25;                       // 略俯视（~14°）
+        app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位
+        app.view_.R     = 9.5;
+    }
     if (start_water_waves) {
         // 贴近水面、低空掠过：能同时看近处的波纹明暗与远处的碎光。
         app.view_.phi   = 0.22;

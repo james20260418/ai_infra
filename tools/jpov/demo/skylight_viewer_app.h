@@ -266,6 +266,9 @@ public:
         const auto dt = std::chrono::steady_clock::now() - ocean_clock_start_;
         return std::chrono::duration<float>(dt).count();
     }
+    // 方向键的按住计数（纯状态，语义见 view_config.h::ApplyArrowKeys）。
+    jpov_viewer::ArrowKeyState key_turn_;
+
     std::chrono::steady_clock::time_point ocean_clock_start_{};
     bool ocean_clock_started_ = false;
     float ocean_time_speed_ = 1.0f;   // 时间倍率（0 = 冻结）
@@ -548,6 +551,11 @@ public:
             jpov_viewer::ApplyInput(&view_, dx, dy, scroll,
                                     static_cast<int>(winfo.width),
                                     static_cast<int>(winfo.height));
+
+            // ── 方向键调视角（2026-11-20）：与右键拖拽同一套符号，每次 5° ──
+            // 纯函数在 view_config.h::ApplyArrowKeys（可单测），这里只提供步长。
+            constexpr double kKeyStep = 5.0 * 3.14159265358979323846 / 180.0;
+            jpov_viewer::ApplyArrowKeys(input, kKeyStep, &key_turn_, &view_);
         }
 
         // 相机由 view_ 推导（同 model viewer；target=原点）。
