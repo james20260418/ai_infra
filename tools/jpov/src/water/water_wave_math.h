@@ -221,9 +221,12 @@ inline SlopeVariance ShortWaveVariance(const WaterWaves& waves) {
 inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_footprint_m,
                                           float fade) {
     SlopeVariance v;
-    if (!waves.enabled || fade <= 0.0f) {
+    if (!waves.enabled) {
         return v;   // 波浪整个关掉 = 镜面水：短波也不参与（与 GLSL 同口径）
     }
+    // ⚠️ 不要把 fade 当"整体缩放"用：fade=0 只说明**几何里没有这条波了**，
+    //    它的方差必须整份留在 BRDF 里（否则远场 = 镜面）。见 GLSL WaveSlopeTensor 的注释。
+    fade = std::clamp(fade, 0.0f, 1.0f);
     v = ShortWaveVariance(waves);
     const int n = std::min(waves.num_waves, WaterWaves::kMaxWaves);
     const int nd = std::min(waves.num_detail_waves, WaterWaves::kMaxDetailWaves);
@@ -231,7 +234,7 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
         // 0..n-1：主波；n..n+nd-1：只进法线的细节短波（被足迹截断的部分也必须折进方差）。
         const WaterWave& wv = (i < n) ? waves.waves[i] : waves.detail_waves[i - n];
         const float k = 6.283185307179586f / wv.wavelength_m;
-        const float amp = wv.amplitude_m * fade;
+        const float amp = wv.amplitude_m;   // 完整振幅（不乘 fade）
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             // ⚠️ 必须用 wv（主波或细节波自己）；旧版写死 waves.waves[i]，
@@ -243,8 +246,9 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
                 lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
             }
         }
+        const float geom = fade * lod_amp;   // 仍在几何里的比例
         const float a = amp * k;
-        const float w = 0.5f * a * a * (1.0f - lod_amp * lod_amp);
+        const float w = 0.5f * a * a * (1.0f - geom * geom);
         float dx = wv.dir_x;
         float dz = wv.dir_z;
         const float dl = std::sqrt(dx * dx + dz * dz);

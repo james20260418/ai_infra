@@ -114,15 +114,20 @@ void WaveWarpAt(vec2 p, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
 // 与 CPU 的 WaveFilteredVariance 同源。输出 xz 平面的 2x2 张量：
 //   xx = E[(∂h/∂x)²]、xz = E[∂h/∂x·∂h/∂z]、zz = E[(∂h/∂z)²]
 // 来源 = 被足迹截断的 4 波（不再贡献几何的那部分）+ 短波（2.7:1 各向异性）。
+// ⚠️ 能量守恒（2026-11-20）：fade / 足迹截断只决定「这条波还剩多少在几何里」，
+//    它**没进几何的那部分必须整份进 BRDF**，否则远处会退化成镜面（映灰色天空）。
+//    旧写法 `amp = A·fade; w = ½(kA·fade)²(1−lod²)` 把方差也乘了 fade ⇒ 远场归零。
+//    正确式：w = ½(kA)²·(1 − (fade·lod)²)。
 void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, out float szz) {
     sxx = 0.0; sxz = 0.0; szz = 0.0;
-    if (uWaveCount > 0 && fade > 0.0) {
+    fade = clamp(fade, 0.0, 1.0);
+    if (uWaveCount > 0) {
         for (int i = 0; i < 8; ++i) {
             if (i >= uWaveCount) {
                 break;
             }
             float k = uWaveL[i].x;
-            float amp = uWaveL[i].z * fade;
+            float amp = uWaveL[i].z;          // 完整振幅（不乘 fade）
             float lod_amp = 1.0;
             if (footprint > 1.0e-6) {
                 float wavelength_px = (6.283185307179586 / k) / footprint;
@@ -133,8 +138,9 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                     lod_amp = u * u * (3.0 - 2.0 * u);
                 }
             }
+            float geom = fade * lod_amp;      // 仍在几何里的比例
             float a = amp * k;
-            float w = 0.5 * a * a * (1.0 - lod_amp * lod_amp);
+            float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDir[i];
             sxx += w * d.x * d.x;
             sxz += w * d.x * d.y;
@@ -146,7 +152,7 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                 break;
             }
             float k = uWaveDetailL[i].x;
-            float amp = uWaveDetailL[i].y * fade;
+            float amp = uWaveDetailL[i].y;    // 完整振幅
             float lod_amp = 1.0;
             if (footprint > 1.0e-6) {
                 float wavelength_px = (6.283185307179586 / k) / footprint;
@@ -157,8 +163,9 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                     lod_amp = uu * uu * (3.0 - 2.0 * uu);
                 }
             }
+            float geom = fade * lod_amp;
             float a = amp * k;
-            float w = 0.5 * a * a * (1.0 - lod_amp * lod_amp);
+            float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDetailDir[i];
             sxx += w * d.x * d.x;
             sxz += w * d.x * d.y;
