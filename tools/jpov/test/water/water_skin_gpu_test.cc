@@ -234,7 +234,8 @@ LayerExpect ExpectLayer(const Camera& cam, const Reference& ref,
                         float level_y, float ior,
                         const jpov::water::WaterMediumSample& medium,
                         const jpov::WaterWaves* waves = nullptr,
-                        float flow_x = 0.0f, float flow_z = 0.0f) {
+                        float flow_x = 0.0f, float flow_z = 0.0f,
+                        float time_s = 0.0f, float depth_m = 300.0f) {
     // 与着色器同口径：每像素弧度（GPU 侧是 2*uTanHalfFov/uViewport.y）。
     const float pixel_angle_rad = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
     LayerExpect e;
@@ -243,7 +244,7 @@ LayerExpect ExpectLayer(const Camera& cam, const Reference& ref,
     WaterPixel px;
     if (!EvaluateWaterPixel(cam.position, ref.fwd, rd, level_y, ior, depth[i],
                             cam.near, cam.far, &px, waves, flow_x, flow_z,
-                            pixel_angle_rad)) {
+                            pixel_angle_rad, time_s, depth_m)) {
         return e;
     }
     e.hit = true;
@@ -306,7 +307,8 @@ struct Fixture {
                 float sun_angular_radius = jpov::lighting::kSunAngularRadiusRad,
                 float sun_footprint = 0.0f,
                 const jpov::WaterWaves* waves = nullptr,
-                unsigned int wave_flow_tex = 0) {
+                unsigned int wave_flow_tex = 0, float wave_time_s = 0.0f,
+                float wave_depth_m = 300.0f) {
         WaterSkinRenderer::Inputs in;
         in.camera = cam;
         in.full_w = kWidth;
@@ -325,6 +327,8 @@ struct Fixture {
         in.sun_footprint = sun_footprint;
         in.waves = waves;
         in.wave_flow_tex = wave_flow_tex;
+        in.wave_time_s = wave_time_s;
+        in.wave_depth_m = wave_depth_m;
         water.Begin(kWidth, kHeight);
         water.Draw(in);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -647,7 +651,6 @@ jpov::WaterWaves MakeTestWaves() {
     w.waves[0] = jpov::WaterWave{1.0f, 0.0f, 9.0f, 0.35f, 0.2f};
     w.waves[1] = jpov::WaterWave{0.4f, 0.9f, 5.0f, 0.18f, 1.4f};
     w.waves[2] = jpov::WaterWave{-0.7f, 0.7f, 3.0f, 0.08f, 2.2f};
-    w.time_s = 1.3f;
     w.fade_start_m = 0.0f;
     w.fade_end_m = 0.0f;   // 不淡出：整屏都在波里
     return w;
@@ -672,7 +675,8 @@ TEST(WaterSkinGpu, WavesMatchCpuReference) {
     const unsigned int depth_tex = MakeDepthTexture(depth);
     f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
              jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
-             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves);
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, /*wave_time_s=*/1.3f);
 
     const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
     const std::vector<float> reveal = ReadRed(f.water.layer().reveal_tex);
@@ -684,7 +688,8 @@ TEST(WaterSkinGpu, WavesMatchCpuReference) {
     for (int y = 0; y < kHeight; y += 3) {
         for (int x = 0; x < kWidth; x += 3) {
             const LayerExpect e = ExpectLayer(cam, ref, depth, x, y, level, ior,
-                                              jpov::water::WaterMediumSample{}, &waves);
+                                              jpov::water::WaterMediumSample{}, &waves,
+                                              0.0f, 0.0f, /*time_s=*/1.3f);
             if (!e.hit) {
                 continue;
             }

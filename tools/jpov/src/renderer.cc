@@ -1674,8 +1674,16 @@ void Renderer::Render(const RenderCommandList& cmds,
                 (cmds.water.has_value() && cmds.water->waves.enabled)
                     ? &cmds.water->waves
                     : nullptr;
+            // 水面时钟与平底深度：**单一出处**是 WaterCommand（2026-11-20 从
+            // WaterWaves 迁出）。天球折射与水皮必须用同一份，否则窗缘会错位。
+            const float water_time_s = cmds.water.has_value()
+                                           ? static_cast<float>(cmds.water->time_s)
+                                           : 0.0f;
+            const float water_depth_m = cmds.water.has_value() ? cmds.water->depth_m
+                                                               : 300.0f;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves,
+                                 water_time_s, water_depth_m);
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
             // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
@@ -1684,7 +1692,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly, sky_waves);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly, sky_waves,
+                                 water_time_s, water_depth_m);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
             // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
@@ -2097,6 +2106,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.medium = water_medium_ptr;
                 // 波浪（法线扰动/高度置换）：enabled=false 或 num_waves=0 ⇒ 纯平面（零回归）。
                 wsi.waves = cmds.water->waves.enabled ? &cmds.water->waves : nullptr;
+                wsi.wave_time_s = static_cast<float>(cmds.water->time_s);
+                wsi.wave_depth_m = cmds.water->depth_m;
                 wsi.wave_debug = cmds.water->waves.debug;
                 if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
                     const unsigned int flow_gl =

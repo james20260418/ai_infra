@@ -199,6 +199,7 @@ cc_library(
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
+        "//tools/jpov/interface:water_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",

@@ -49,6 +49,9 @@ const int kWaveBisectIters = 12;
 // 抗锯齿：一个波长占的像素数 ≤ 2 就消失、≥ 8 就全幅。
 const float kWaveLodPxMin = 2.0;
 const float kWaveLodPxMax = 8.0;
+// warp 限带：每条波的 warp 相位/梯度乘 min(1, kWarpSlopeLimit/(k·U))。
+// 与 CPU 的 water::kWarpSlopeLimit 同值（有测试锁一致性）。
+const float kWarpSlopeLimit = 0.25;
 
 float WaveFadeFactor(float dist) {
     if (uWaveFadeEnd <= uWaveFadeStart) {
@@ -70,6 +73,20 @@ vec2 WaveFlowAt(vec2 p) {
     }
     vec2 rg = texture(uWaveFlowMap, p * uWaveFlowUvScale).rg;
     return (rg * 2.0 - 1.0) * uWaveFlowStrength;
+}
+
+// warp 位移场的梯度上界 U = A·Σ k_j（无量纲）。与 CPU 的 WaveWarpSlopeBound 同源。
+// 每条波的 warp 相位/梯度乘 min(1, kWarpSlopeLimit/(k·U))：长波照旧掰弯，
+// 短波（k·U 大）几乎不动，避免相位被 k·u 打散成拉丝/漩涡。
+float WaveWarpSlopeBound() {
+    if (uWaveWarpAmp <= 0.0) {
+        return 0.0;
+    }
+    float sum_k = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        sum_k += uWaveWarp[j].x;
+    }
+    return uWaveWarpAmp * sum_k;
 }
 
 // 低频位移场 u(p) 与它的空间导数（域扭曲）。
@@ -183,6 +200,7 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
     // 域扭曲：整片场沿低频位移 u(p) 平移，θ += k·dot(u, d)。
     vec2 wu, wdux, wduz;
     WaveWarpAt(p, wu, wdux, wduz);
+    float warp_u_slope = WaveWarpSlopeBound();
 
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
@@ -216,9 +234,13 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
             }
         }
         float amp = L.z * amp_gain * fade * lod_amp;
-        float wx = k * dot(wdux, d);
-        float wz = k * dot(wduz, d);
-        float phase = k * dot(d, p) - omega * t + L.w + k * dot(wu, d);
+        float warp_scale = (warp_u_slope > 0.0)
+                               ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope))
+                               : 1.0;
+        float wk = k * warp_scale;
+        float wx = wk * dot(wdux, d);
+        float wz = wk * dot(wduz, d);
+        float phase = k * dot(d, p) - omega * t + L.w + wk * dot(wu, d);
         float sin_p = sin(phase);
         float cos_p = cos(phase);
         vec2 g = vec2(k * d.x + wx, k * d.y + wz);
@@ -240,6 +262,7 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
     if (uWaveDetailCount <= 0 || fade <= 0.0) {
         return;
     }
+    float warp_u_slope_d = WaveWarpSlopeBound();
     for (int i = 0; i < 64; ++i) {
         if (i >= uWaveDetailCount) {
             break;
@@ -261,8 +284,12 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
         }
         float amp = L.y * fade * lod_amp;
         float omega = sqrt(9.81 * k);
-        float phase = k * dot(d, p) - omega * t + L.z + k * dot(wu, d);
-        vec2 g = vec2(k * d.x, k * d.y) + vec2(k * dot(wdux, d), k * dot(wduz, d));
+        float warp_scale = (warp_u_slope_d > 0.0)
+                               ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope_d))
+                               : 1.0;
+        float wk = k * warp_scale;
+        float phase = k * dot(d, p) - omega * t + L.z + wk * dot(wu, d);
+        vec2 g = vec2(k * d.x, k * d.y) + vec2(wk * dot(wdux, d), wk * dot(wduz, d));
         grad += amp * g * cos(phase);
     }
 }

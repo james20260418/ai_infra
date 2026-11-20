@@ -596,7 +596,9 @@ void main() {
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr,
                         SkyOutput output = SkyOutput::kFull,
-                        const WaterWaves* waves = nullptr);
+                        const WaterWaves* waves = nullptr,
+                        float wave_time_s = 0.0f,
+                        float wave_depth_m = 300.0f);
 
     // ---- DrawSkyEnvCube ----
     // 把程序化天光渲进一张**立方体贴图**（环境镜面 IBL 的反射源）。
