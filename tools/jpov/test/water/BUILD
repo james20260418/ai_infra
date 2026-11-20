@@ -74,3 +74,17 @@ cc_test(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# WaterConfig → 谱的展开（纯 CPU）：SMB 的 Hs/Tp、方差精确、seed 确定性、
+# 无风镜面、涌按能量叠加、质量档、与渲染侧同源常数的一致性、浅水色散。
+cc_test(
+    name = "ocean_state_test",
+    srcs = ["ocean_state_test.cc"],
+    deps = [
+        "//tools/jpov/interface:water_config",
+        "//tools/jpov/src/water:water_wave_math",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

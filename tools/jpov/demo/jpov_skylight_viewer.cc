@@ -1008,6 +1008,7 @@ struct OceanConfig {
     float turbidity = 2.0f;
     float exposure = 1.0f;
     int debug = 0;   // 1 = 法线颜色可视化（诊断用）
+    float time_speed = 1.0f;   // 时间倍率（WaterWaves 里已经没有 speed_scale）
     jpov::WaterWaves waves;
 };
 
@@ -1046,7 +1047,7 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
         } else if (tag == "fade") {
             ss >> out->waves.fade_start_m >> out->waves.fade_end_m;
         } else if (tag == "speed") {
-            ss >> out->waves.speed_scale;
+            ss >> out->time_speed;
         } else if (tag == "stokes") {
             int v = 0;
             ss >> v;
@@ -1091,6 +1092,98 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 }
 
 }  // namespace
+
+// 海面选型场的验证拍摄：只换 WaterConfig 里的风/涌，机位固定 3 个。
+// 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
+int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
+    const float kPi = 3.14159265358979323846f;
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(show_ui);   // true = 连面板一起拍（验收 UI 布局）
+    app.SetShowScene(true);
+    app.Init();
+    InstallScene(app);
+    if (show_ui) {
+        InstallModels(app);
+    }
+    app.InstallTextMeasure();
+    app.SetOceanLab(true);
+    app.SetWaterWaveTime(7.0f);   // 冻结：同一时刻，差异只来自配置
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    if (show_ui) {
+        app.SetOceanLabView();
+        app.RunOnce(input, winfo, (out_dir + "/oceanlab_ui.png").c_str());
+        LOG(INFO) << "ocean lab UI captured to " << out_dir;
+        app.Finalize();
+        return 0;
+    }
+
+    // 四个配置：① 默认（风海）② 涌 ③ 大风 + 小风区（年轻海）④ 平静
+    struct Preset {
+        const char* name;
+        float wind_ms;
+        float wind_dir_deg;
+        float fetch_km;
+        float swell_hs;
+        float swell_tp;
+        float swell_dir_deg;
+    };
+    const Preset kPresets[4] = {
+        {"a_windsea",   8.0f,  34.0f, 250.0f, 0.0f, 9.5f,  0.0f},
+        {"b_wind_swell", 8.0f,  34.0f, 250.0f, 1.3f, 9.5f, 104.0f},
+        {"c_young_sea", 12.0f,  34.0f,  40.0f, 0.0f, 9.5f,  0.0f},
+        {"d_calm",      4.0f,  34.0f, 250.0f, 0.0f, 9.5f,  0.0f},
+    };
+    const float theta_toward = (app.deg_.sun_azim_deg - 180.0f) * kPi / 180.0f;
+    struct Shot { const char* suffix; float phi; float R; float theta; };
+    const Shot kShots[4] = {
+        {"45deg_5m",      45.0f * kPi / 180.0f, 5.0f / std::sin(45.0f * kPi / 180.0f),
+         theta_toward},
+        {"45deg_40m",     45.0f * kPi / 180.0f, 40.0f / std::sin(45.0f * kPi / 180.0f),
+         theta_toward},
+        {"10deg_grazing", 10.0f * kPi / 180.0f, 18.0f, theta_toward},
+        // 远景：涌（λ≈140 m）在这种尺度上才读得出"两套方向交叉"
+        {"wide_250m",     25.0f * kPi / 180.0f, 250.0f, theta_toward},
+    };
+
+    for (const Preset& p : kPresets) {
+        app.water_cfg_.SetWind(p.wind_ms, p.wind_dir_deg * kPi / 180.0f);
+        app.water_cfg_.fetch_km = (p.fetch_km <= 0.0f)
+                                      ? std::numeric_limits<float>::infinity()
+                                      : p.fetch_km;
+        app.water_cfg_.SetSwell(p.swell_hs, p.swell_tp, p.swell_dir_deg * kPi / 180.0f);
+        app.InvalidateLabWater();
+        for (const Shot& s : kShots) {
+            app.view_ = jpov_viewer::DefaultView();
+            app.view_.phi = s.phi;
+            app.view_.theta = s.theta;
+            app.view_.R = s.R;
+            const std::string path = out_dir + "/oceanlab_" + p.name + "_" + s.suffix + ".png";
+            app.RunOnce(input, winfo, path.c_str());
+        }
+        const jpov::water::WaterReadout& r = app.lab_readout_;
+        LOG(INFO) << p.name << ": Hs_wind=" << r.hs_wind_m << " Hs_swell=" << r.hs_swell_m
+                  << " Tp=" << r.period_s << " lam_p=" << r.lambda_peak_m
+                  << " rms_slope=" << r.rms_slope;
+    }
+    LOG(INFO) << "ocean lab captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
 
 int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_path) {
     const float kPi = 3.14159265358979323846f;
@@ -1141,6 +1234,7 @@ int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_
     app.water_sigma_s_   = oc.sigma_s[0];   // demo 侧 σs 是标量（逐通道同值）
     app.water_wind_ms_   = oc.wind_ms;
     app.SetWaterWavesConfig(oc.waves);
+    app.SetWaterTimeSpeed(oc.time_speed);
     app.SetWaterWaves(true);
     app.SetWaterWaveAmplitudeScale(1.0f);
     app.SetWaterWaveTime(7.0f);   // 冻结时间：4 张图的波场相位一致，可直接对比
@@ -2067,6 +2161,9 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string ocean_lab_out_dir;
+    std::string ocean_lab_ui_out_dir;
+    bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float smaa_threshold = 0.1f;
@@ -2113,6 +2210,12 @@ int main(int argc, char** argv) {
             sky_refract_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-report") == 0 && i + 1 < argc) {
             ocean_report_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--ocean-lab") == 0) {
+            start_ocean_lab = true;
+        } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
+            ocean_lab_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
+            ocean_lab_ui_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
             ocean_config_path = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
@@ -2121,6 +2224,12 @@ int main(int argc, char** argv) {
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!ocean_lab_ui_out_dir.empty()) {
+        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true);
+    }
+    if (!ocean_lab_out_dir.empty()) {
+        return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2217,6 +2326,9 @@ int main(int argc, char** argv) {
     LOG(INFO) << "[stage] InstallPerson 完成";
 
     // --water-waves：直接进水体场景 + 打开波浪（省掉下拉/勾选两步，验收用）。
+    if (start_ocean_lab) {
+        app.SetOceanLab(true);
+    }
     if (start_water_waves) {
         app.SetWaterScene(true);
         app.BuildWaterPeople();

@@ -198,7 +198,7 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
         CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
         CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
         const float k = k_two_pi / wv.wavelength_m;
-        const float omega = std::sqrt(water::kWaveGravity * k) * w->speed_scale;
+        const float omega = water::DispersionOmega(k, in.wave_depth_m);
         glUniform4f(wave_l_loc + i, k, omega, wv.amplitude_m, wv.phase_rad);
         const float dl = std::sqrt(wv.dir_x * wv.dir_x + wv.dir_z * wv.dir_z);
         const bool has_dir = dl > 1.0e-6f;
@@ -207,7 +207,7 @@ void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) 
                     has_dir ? (wv.dir_z / dl) : 0.0f);
     }
 
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveTime"), on ? w->time_s : 0.0f);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveTime"), on ? in.wave_time_s : 0.0f);
 
     // ── 域扭曲（domain warp）：4 条低频载波 → (k, dir_x, dir_z, phase) ──
     const float warp_amp = on ? w->warp_amplitude_m : 0.0f;

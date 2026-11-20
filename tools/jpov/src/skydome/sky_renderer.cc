@@ -119,7 +119,8 @@ namespace {
 // ⚠️ 逐个 glUniform4f/2f：MinGW 的 gl_loader 没有数组版（*fv）。
 // ⚠️ 天光 pass **不绑 flow map**（part 1 里 flow 未启用）；接 flow 时要同步，
 //    否则大尺度流向上窗缘会有偏差（known_issue §10.12b）。
-void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves& w) {
+void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves& w,
+                        float time_s, float depth_m) {
     const int count = std::min(w.num_waves, WaterWaves::kMaxWaves);
     glUniform1i(mgr.GetUniform(prog, "uWaveCount"), count);
     const int l_loc = mgr.GetUniform(prog, "uWaveL[0]");
@@ -132,14 +133,14 @@ void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves&
         CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
         CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
         const float k = k_two_pi / wv.wavelength_m;
-        const float omega = std::sqrt(water::kWaveGravity * k) * w.speed_scale;
+        const float omega = water::DispersionOmega(k, depth_m);
         glUniform4f(l_loc + i, k, omega, wv.amplitude_m, wv.phase_rad);
         const float dl = std::sqrt(wv.dir_x * wv.dir_x + wv.dir_z * wv.dir_z);
         const bool has_dir = dl > 1.0e-6f;
         glUniform2f(d_loc + i, has_dir ? (wv.dir_x / dl) : 1.0f,
                     has_dir ? (wv.dir_z / dl) : 0.0f);
     }
-    glUniform1f(mgr.GetUniform(prog, "uWaveTime"), w.time_s);
+    glUniform1f(mgr.GetUniform(prog, "uWaveTime"), time_s);
     glUniform1f(mgr.GetUniform(prog, "uWaveFadeStart"), w.fade_start_m);
     glUniform1f(mgr.GetUniform(prog, "uWaveFadeEnd"), w.fade_end_m);
     glUniform1f(mgr.GetUniform(prog, "uWaveFlowAlign"), w.flow_align);
@@ -156,7 +157,8 @@ void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves&
 void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
                           ShaderManager& shader_mgr, SkyOutput output,
-                          const WaterWaves* waves) {
+                          const WaterWaves* waves, float wave_time_s,
+                          float wave_depth_m) {
     // ---- 构建 相机 逆(Proj*View) ----
     const float aspect = static_cast<float>(fbo_w) / static_cast<float>(std::max(fbo_h,1));
     const float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
@@ -254,7 +256,7 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 2.0f * std::tan(0.5f * fov_rad) /
                     static_cast<float>(std::max(fbo_h, 1)));
     if (wave_on) {
-        UploadWaveSpectrum(shader_mgr, prog, *waves);
+        UploadWaveSpectrum(shader_mgr, prog, *waves, wave_time_s, wave_depth_m);
     }
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
