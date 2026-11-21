@@ -3,7 +3,7 @@
 // 提供：
 //   WaveFadeFactor(dist)          远处淡出
 //   WaveFlowAt(p_xz)              采样 flow map（无纹理时恒 0）
-//   WaveSampleAt(p_xz, t, fade, out h, out grad_xz)
+//   WaveSampleAt(p_xz, t, fade, footprint, need_grad, out h, out grad_xz)
 //   WaveNormalFromGrad(grad_xz)
 //   WaveSurfaceHit(cam, rd, level, inout t, out pos, out normal)
 //
@@ -93,7 +93,8 @@ float WaveWarpSlopeBound() {
 
 // 低频位移场 u(p) 与它的空间导数（域扭曲）。
 // u = Σ_j A·dir_j·sin(k_j·dot(dir_j,p) + φ_j)，∂u/∂x = Σ_j A·dir_j·k_j·cos(·)·dir_j.x。
-void WaveWarpAt(vec2 p, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
+// need_grad=false ⇒ 只算 u（不求导、不调 cos）：二分只查高度，导数白算。
+void WaveWarpAt(vec2 p, bool need_grad, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
     u = vec2(0.0);
     du_dx = vec2(0.0);
     du_dz = vec2(0.0);
@@ -105,7 +106,7 @@ void WaveWarpAt(vec2 p, out vec2 u, out vec2 du_dx, out vec2 du_dz) {
         vec2 d = uWaveWarp[j].yz;
         float ph = k * dot(d, p) + uWaveWarp[j].w;
         float s = sin(ph);
-        float c = cos(ph);
+        float c = need_grad ? cos(ph) : 0.0;
         u += uWaveWarpAmp * d * s;
         du_dx += uWaveWarpAmp * d * (k * c) * d.x;
         du_dz += uWaveWarpAmp * d * (k * c) * d.y;
@@ -193,7 +194,10 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
 }
 
 // 高度 + 梯度。grad 的 x/y 分别对应 ∂h/∂x、∂h/∂z。
-void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out vec2 grad) {
+// need_grad=false ⇒ 不调 cos（grad 输出恒 0）。二分求根只需要 h：
+// 每次 WaveSurfaceHit 要评估 14 次，其中一半的三角函数（cos）本来是白算的。
+void WaveSampleAt(vec2 p, float t, float fade, float footprint, bool need_grad,
+                  out float h, out vec2 grad) {
     h = 0.0;
     grad = vec2(0.0);
     if (uWaveCount <= 0 || fade <= 0.0) {
@@ -208,7 +212,7 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
 
     // 域扭曲：整片场沿低频位移 u(p) 平移，θ += k·dot(u, d)。
     vec2 wu, wdux, wduz;
-    WaveWarpAt(p, wu, wdux, wduz);
+    WaveWarpAt(p, need_grad, wu, wdux, wduz);
     float warp_u_slope = WaveWarpSlopeBound();
 
     for (int i = 0; i < 8; ++i) {
@@ -254,7 +258,7 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
         float wz = wk * dot(wduz, d);
         float phase = k * dot(d, p) - omega * t + L.w + wk * dot(wu, d);
         float sin_p = sin(phase);
-        float cos_p = cos(phase);
+        float cos_p = need_grad ? cos(phase) : 0.0;
         vec2 g = vec2(k * d.x + wx, k * d.y + wz);
         h += amp * sin_p;
         grad += amp * g * cos_p;
@@ -319,7 +323,8 @@ float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
     float dist = length(p.xz - cam.xz);
     float h;
     vec2 grad;
-    WaveSampleAt(p.xz, uWaveTime, WaveFadeFactor(dist), footprint, h, grad);
+    // 只查高度（grad 丢掉）：省掉每条波一次 cos。
+    WaveSampleAt(p.xz, uWaveTime, WaveFadeFactor(dist), footprint, /*need_grad=*/false, h, grad);
     return (p.y - level) - h;
 }
 
@@ -370,9 +375,9 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
         float fade = WaveFadeFactor(dist);
         float h;
         vec2 grad;
-        WaveSampleAt(pos.xz, uWaveTime, fade, footprint, h, grad);
+        WaveSampleAt(pos.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
         vec2 wu, wdux, wduz;
-        WaveWarpAt(pos.xz, wu, wdux, wduz);
+        WaveWarpAt(pos.xz, /*need_grad=*/true, wu, wdux, wduz);
         vec2 dgrad;
         WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
         normal = WaveNormalFromGrad(grad + dgrad);
@@ -417,9 +422,9 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     float fade = WaveFadeFactor(dist);
     float h;
     vec2 grad;
-    WaveSampleAt(pos.xz, uWaveTime, fade, footprint, h, grad);
+    WaveSampleAt(pos.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
     vec2 wu, wdux, wduz;
-    WaveWarpAt(pos.xz, wu, wdux, wduz);
+    WaveWarpAt(pos.xz, /*need_grad=*/true, wu, wdux, wduz);
     vec2 dgrad;
     WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
     normal = WaveNormalFromGrad(grad + dgrad);

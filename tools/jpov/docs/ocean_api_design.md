@@ -233,6 +233,18 @@ struct CurrentField {
 
 ## 8. `WaterConfig`（uniform 版，先做这个）
 
+> ⚠️ **这一节是设计稿（v2 提案），不是落地接口**。落地版以 `interface/water_config.h`
+> 为准，两者有已知差异，别照着这里写代码：
+>
+> | 设计稿 | 落地版 |
+> |---|---|
+> | `Vec2f wind_velocity` | `Vec3f`（y 恒 0，与 `SetWind(speed, dir_rad)` 配套） |
+> | `Vec4f swell` | 具名 `Swell{dir_x, dir_z, period_s, height_m}` |
+> | `current_velocity` / `current_memory_s`（U·τ） | **未实现**（v1 uniform 下均匀流不可见） |
+> | `main_waves` / `detail_waves` 在 config 里 | 挪到 `WaterQuality`（设备属性，不进资产） |
+> | `seed = 20261120`、`depth_m = 30` | `seed = 0`、`depth_m = 3.5`（浅海要看得见底） |
+> | SMB 常数（Hs≈1.37@U=8） | 落地版 Hs∞=0.283U²/g（U=8 充分成长 ≈1.85 m） |
+
 地域无差异时的**全部**水面输入，一个 POD、可序列化、可整体上传：
 
 ```cpp

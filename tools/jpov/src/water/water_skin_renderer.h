@@ -42,7 +42,8 @@ public:
         const water::WaterMediumSample* medium = nullptr;
 
         // ── 每帧时钟与平底深度（2026-11-20 从 WaterWaves 迁出）──
-        // 时间由 WaterCommand::time_s 来（double，单调，允许负值 = 回溯）。
+        // 时间由 WaterCommand::time_s（double）来，这里已经是**上传给 GLSL 的 float**
+        //（uniform 就是 float）；单调，允许负值 = 回溯。非有限值会被上传侧 CHECK 拦住。
         float wave_time_s = 0.0f;
         // 平底深度（米）：只改色散 ω=√(gk·tanh(kd))；介质积分仍是半空间。
         float wave_depth_m = 300.0f;

@@ -23,6 +23,14 @@ namespace {
 
 constexpr float kTwoPi = 6.28318530717958647692f;
 
+// 非法数值直接 crash：NaN/Inf 会经 sin/cos 污染整片法线（画面变黑/花屏但不报错），
+// 比"静默画错"更难查，所以在这里一次性拦住。
+void CheckWaveFinite(const WaterWave& wv, const char* what) {
+    CHECK(std::isfinite(wv.wavelength_m)) << what << ".wavelength_m 必须是有限值";
+    CHECK(std::isfinite(wv.amplitude_m)) << what << ".amplitude_m 必须是有限值";
+    CHECK(std::isfinite(wv.phase_rad)) << what << ".phase_rad 必须是有限值";
+}
+
 // 方向归一化：零向量（配置忘填）回落到 +x，而不是产生 0/0。
 void NormalizedDir(float dx, float dz, float* out_x, float* out_z) {
     const float len = std::sqrt(dx * dx + dz * dz);
@@ -40,6 +48,13 @@ void NormalizedDir(float dx, float dz, float* out_x, float* out_z) {
 void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
                              const WaterWaves* w, const WaveUniformParams& p) {
     const bool on = (w != nullptr) && w->enabled && w->num_waves > 0;
+    if (on) {
+        // 时间/深度是**每帧输入**，不校验的话 NaN 时间会一路变成 sin(NaN)=NaN：
+        // 画面退化成平面（二分判不出变号）而不报错 —— 和 plate2d 的 time_seconds 同一条规矩。
+        CHECK(std::isfinite(p.time_s)) << "WaveUniformParams.time_s 必须是有限值";
+        CHECK_GT(p.depth_m, 0.0f)
+            << "WaveUniformParams.depth_m 必须 > 0（<=0 会静默按深水算，掩盖调用方错误）";
+    }
     const int count = on ? std::min(w->num_waves, WaterWaves::kMaxWaves) : 0;
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveCount"), count);
 
@@ -53,6 +68,7 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         const WaterWave& wv = w->waves[i];
         CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
         CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
+        CheckWaveFinite(wv, "WaterWave");
         const float k = kTwoPi / wv.wavelength_m;
         glUniform4f(wave_l_loc + i, k, DispersionOmega(k, p.depth_m), wv.amplitude_m,
                     wv.phase_rad);
@@ -96,6 +112,7 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         const WaterWave& dv = w->detail_waves[i];
         CHECK_GT(dv.wavelength_m, 0.0f) << "detail_waves.wavelength_m 必须 > 0";
         CHECK_GE(dv.amplitude_m, 0.0f) << "detail_waves.amplitude_m 必须 >= 0";
+        CheckWaveFinite(dv, "detail_waves");
         const float k = kTwoPi / dv.wavelength_m;
         glUniform4f(detail_l_loc + i, k, dv.amplitude_m, dv.phase_rad,
                     DispersionOmega(k, p.depth_m));
