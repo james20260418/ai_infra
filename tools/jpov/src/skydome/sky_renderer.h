@@ -312,10 +312,6 @@ float discGlow(float ang, float disc_radius, float strength, float glow_width_sc
 
 const float kPadSin = 0.0523359562;   // sin(3°)：环边气侧仰角下限（契约 §3.4）
 
-// 和水皮 `kHorizonEps` **必须一致**（≈1 px @720p/60°）。水面与天空的"有没有水面"
-// 判定卡在同一条线上时，边界那一行会露地色/漏反射 —— 两趟必须用同一个钳位。
-const float kHorizonEps = 0.0016;
-
 // 天球方向的水面折射：**只在方向入口做一次**，其余天空逻辑（Preetham / 盘 / 光晕 /
 // 地色）一行不改。输出的 gain 是能量因子（水内观察到的天球要 ×n²）。
 //   · 射线没穿过水面（t ≤ 0）或与水面平行 ⇒ 原样返回；
@@ -325,16 +321,6 @@ vec3 SkyBendDir(vec3 raw, out float gain) {
     gain = 1.0;
     if (!(uSkyBendIor > 0.0)) {
         return raw;
-    }
-    // 地平线钳位（与水皮同一条规则）：±1px 内的射线都拉到水面一侧，
-    // 否则两趟对「这一像素有没有水面」的判定会差一行。
-    if (abs(raw.y) < kHorizonEps) {
-        float sgn = (uCamPos.y < uSkyBendLevelY) ? 1.0 : -1.0;
-        float xz = length(raw.xz);
-        if (xz > 1.0e-6) {
-            float s = sqrt(max(0.0, 1.0 - kHorizonEps * kHorizonEps)) / xz;
-            raw = vec3(raw.x * s, sgn * kHorizonEps, raw.z * s);
-        }
     }
     if (abs(raw.y) < 1.0e-6) {
         return raw;
@@ -596,7 +582,9 @@ void main() {
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr,
                         SkyOutput output = SkyOutput::kFull,
-                        const WaterWaves* waves = nullptr);
+                        const WaterWaves* waves = nullptr,
+                        float wave_time_s = 0.0f,
+                        float wave_depth_m = 300.0f);
 
     // ---- DrawSkyEnvCube ----
     // 把程序化天光渲进一张**立方体贴图**（环境镜面 IBL 的反射源）。
