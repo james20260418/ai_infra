@@ -274,8 +274,9 @@ cc_library(
         ":shader_manager",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
-        # 天球折射消费水面波浪法线（part 1）
+        # 天球折射消费水面波浪法线（part 1），并与水皮共用同一份 uniform 上传
         "//tools/jpov/src/water:water_wave_math",
+        "//tools/jpov/src/water:water_wave_uniforms",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

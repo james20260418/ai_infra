@@ -90,16 +90,20 @@ struct WaterConfig {
         return std::sqrt(wind_velocity.x() * wind_velocity.x() +
                          wind_velocity.z() * wind_velocity.z());
     }
-    // 吹向的方位角（度，[0,360)；xz 平面，+z 为 0°，+x 为 90°）。
-    float WindDirDeg() const {
+    // 吹向的方位角（**弧度**，[0, 2π)；xz 平面，+z 为 0°，+x 为 π/2）。
+    // 名字必须带单位：面板要度数就自己乘 180/π（单位混用是这类接口最常见的错）。
+    float WindDirRad() const {
         const float a = std::atan2(wind_velocity.x(), wind_velocity.z());
         return a < 0.0f ? a + 6.28318530717958647692f : a;
     }
+    // Pre-condition: speed_ms >= 0（风速是大小，方向靠 dir_rad；负数会静默反向）。
     void SetWind(float speed_ms, float dir_rad) {
+        CHECK_GE(speed_ms, 0.0f) << "WaterConfig::SetWind: speed_ms 必须 >= 0";
         wind_velocity = {speed_ms * std::sin(dir_rad), 0.0f, speed_ms * std::cos(dir_rad)};
     }
     bool HasSwell() const { return swell.height_m > 0.0f && swell.period_s > 0.0f; }
-    float SwellDirDeg() const {
+    // 传向的方位角（**弧度**，同 WindDirRad 的口径）。
+    float SwellDirRad() const {
         const float a = std::atan2(swell.dir_x, swell.dir_z);
         return a < 0.0f ? a + 6.28318530717958647692f : a;
     }
@@ -113,7 +117,9 @@ struct WaterConfig {
 
 // 设备/性能档位：**不进资产**（同一份 WaterConfig 在不同机器上应出同一张图）。
 struct WaterQuality {
-    int detail_waves = 64;      // 32 / 64 / 128
+    // 上限受 WaterWaves::kMaxWaves / kMaxDetailWaves 约束（超出直接 CHECK，不静默截断 ——
+    // 静默截断会让"我设了 128 条"和"实际 64 条"看不出区别）。
+    int detail_waves = 64;      // 32 / 64
     int main_waves = 8;         // 4 / 8（有涌时会被涌占用 3 条）
 };
 
@@ -193,6 +199,13 @@ inline void WindSeaHsTp(float u_ms, float fetch_km, float duration_h, float* hs,
 inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
                        WaterWaves* out_waves, WaterReadout* out_readout) {
     CHECK(out_waves != nullptr);
+    CHECK_GE(quality.main_waves, 1) << "WaterQuality.main_waves 必须 >= 1";
+    CHECK_LE(quality.main_waves, WaterWaves::kMaxWaves)
+        << "WaterQuality.main_waves 超过 WaterWaves::kMaxWaves（" << WaterWaves::kMaxWaves << "）";
+    CHECK_GE(quality.detail_waves, 0) << "WaterQuality.detail_waves 必须 >= 0";
+    CHECK_LE(quality.detail_waves, WaterWaves::kMaxDetailWaves)
+        << "WaterQuality.detail_waves 超过 WaterWaves::kMaxDetailWaves（"
+        << WaterWaves::kMaxDetailWaves << "）";
     WaterWaves w;
     w.enabled = true;
     w.displacement = true;
@@ -215,7 +228,7 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
     const int swell_n = cfg.HasSwell() ? std::min(3, main_cap - 1) : 0;
     const int wind_n = std::max(1, main_cap - swell_n);
 
-    const float wind_dir_rad = cfg.WindDirDeg();
+    const float wind_dir_rad = cfg.WindDirRad();
     // λ 倍数表（相对峰位）：长波定形，短波靠近细节档。
     static constexpr float kLamMul[8] = {1.60f, 1.25f, 1.00f, 0.80f,
                                          0.63f, 0.50f, 0.40f, 0.32f};
@@ -251,7 +264,7 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
         const float hs_s = cfg.swell.height_m;
         const float tp_s = cfg.swell.period_s;
         const float lam_s = 1.56f * tp_s * tp_s;
-        const float dir_s = cfg.SwellDirDeg();
+        const float dir_s = cfg.SwellDirRad();
         static constexpr float kSwellMul[3] = {1.15f, 1.00f, 0.87f};
         float sum_a2 = 0.0f;
         for (int i = 0; i < swell_n; ++i) {
@@ -273,7 +286,7 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
 
     // 细节短波：λ 0.3–8 m，等陡度 kA=0.07，方向均匀（各向同性）。
     // 只进法线、不进求交 ⇒ 便宜的"碎光/粗糙度"。
-    const int nd = std::clamp(quality.detail_waves, 0, WaterWaves::kMaxDetailWaves);
+    const int nd = quality.detail_waves;
     // 细节短波的陡度 = 0.07 × sqrt(mss(U)/mss(8))：无风 ⇒ 没有碎波（镜面），
     // 大风 ⇒ 更糙。把它写成固定常数会让"平静"预设也长满碎浪（实测 rms 坡度不变）。
     const float kRefMss = OceanCoxMunkMss(8.0f);

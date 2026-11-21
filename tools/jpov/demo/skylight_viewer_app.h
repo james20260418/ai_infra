@@ -241,6 +241,7 @@ public:
         water_cfg_.duration_h = std::numeric_limits<float>::infinity();
         water_cfg_.swell.height_m = 0.0f;   // 默认无涌：与胜出者 B 对齐
         water_cfg_.swell.period_s = 9.5f;
+        ocean_swell_on_ = false;            // 面板开关必须与 height_m=0 一致（否则勾着却没涌）
         water_cfg_.depth_m = 3.5f;
         water_cfg_.level_y = 0.0f;
         exposure_ = 0.6f;
@@ -960,7 +961,7 @@ private:
                 // 风速 / 风向（面板用度数，写回 WaterConfig 的向量；方向 = 吹向）
                 constexpr float kDeg = 3.14159265358979323846f / 180.0f;
                 float wind_speed = water_cfg_.WindSpeedMs();
-                float wind_dir_deg = water_cfg_.WindDirDeg() / kDeg;
+                float wind_dir_deg = water_cfg_.WindDirRad() / kDeg;
                 if (ui_.SliderFloat("风 风速 m/s", &wind_speed, row(0, 1), 0.0f, 25.0f, 1)) {
                     water_cfg_.SetWind(wind_speed, wind_dir_deg * kDeg);
                     InvalidateLabWater();
@@ -984,7 +985,7 @@ private:
                     // 打开涌时给一组能肉眼看出"交叉"的默认值：1.5 m / 11 s，与风偏 70°。
                     constexpr float kDeg = 3.14159265358979323846f / 180.0f;
                     water_cfg_.SetSwell(1.5f, 11.0f,
-                                        water_cfg_.WindDirDeg() * kDeg + 70.0f * kDeg);
+                                        water_cfg_.WindDirRad() * kDeg + 70.0f * kDeg);
                     InvalidateLabWater();
                 }
                 float swell_hs = water_cfg_.swell.height_m;
@@ -997,7 +998,7 @@ private:
                     water_cfg_.swell.period_s = swell_tp;
                     InvalidateLabWater();
                 }
-                float swell_dir = water_cfg_.SwellDirDeg() / kDeg;
+                float swell_dir = water_cfg_.SwellDirRad() / kDeg;
                 if (ui_.SliderFloat("涌 传向 °", &swell_dir, row(0, 7), 0.0f, 360.0f, 0)) {
                     water_cfg_.SetSwell(water_cfg_.swell.height_m, water_cfg_.swell.period_s,
                                         swell_dir * kDeg);

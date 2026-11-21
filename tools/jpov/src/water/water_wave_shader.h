@@ -37,9 +37,11 @@ uniform float uWaveWarpAmp;        // 每条载波的位移幅度（米）
 uniform vec4  uWaveWarp[4];        // 每条载波 (k, dir_x, dir_z, phase)
 // 二阶 Stokes 谐波（尖峰平谷）。0 ⇒ 关。
 uniform int   uWaveStokes2;
-// 细节短波（只进法线，不进几何）：(k, amplitude, phase, 未用) + 方向。
+// 细节短波（只进法线，不进几何）：(k, amplitude, phase, omega) + 方向。
+// omega 由 CPU 按有限水深算好传上来（与主波同一个 DispersionOmega）：GPU 不重算 ⇒
+// 每像素省 64 次 sqrt，且 CPU 参考与 GPU 逐位同源（"同源"不能只写在注释里）。
 uniform int   uWaveDetailCount;
-uniform vec4  uWaveDetailL[64];    // (k, amplitude, phase, 未用)
+uniform vec4  uWaveDetailL[64];    // (k, amplitude, phase, omega)
 uniform vec2  uWaveDetailDir[64];
 // 法线场过滤（远处亚像素波 → 粗糙度）
 uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各向同性）
@@ -241,6 +243,9 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, out float h, out
             }
         }
         float amp = L.z * amp_gain * fade * lod_amp;
+        if (amp == 0.0) {
+            continue;   // 远处（fade/足迹）整条消失：省掉下面的 sin/cos
+        }
         float warp_scale = (warp_u_slope > 0.0)
                                ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope))
                                : 1.0;
@@ -290,7 +295,10 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
             }
         }
         float amp = L.y * fade * lod_amp;
-        float omega = sqrt(9.81 * k);
+        if (amp == 0.0) {
+            continue;   // 亚像素（lod_amp=0）或已淡出：省掉下面的 cos
+        }
+        float omega = L.w;
         float warp_scale = (warp_u_slope_d > 0.0)
                                ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope_d))
                                : 1.0;
