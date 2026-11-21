@@ -101,14 +101,6 @@ uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU �
 
 const float kBackgroundDepth = 0.999999;
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
-// 地平线钳位角（≈ 1 px @ 720p/60°）。
-// ⚠️ 必须与 skydome/sky_renderer.h 的 kHorizonEps **完全一致**（两趟同一个判据，
-//    否则地平线那一行会差一条缝 —— 见 known_issue 的记录）。
-// 作用见 main 里「地平线钳位」那段：
-// 水面与天空的 ground 色起点都在 rd.y=0，卡在同一条线上 ⇒ 边界行露出地色（暗线）。
-// 把 ±1px 内的射线都拉到水面一侧，让水面多盖一像素，缝就没了。
-const float kHorizonEps = 0.0016; // 地平线钳位（|rd.y| 下限）⇒ 层多盖几像素，堵住地缝
-
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
     float eta = n1 / n2;
@@ -163,21 +155,6 @@ void main() {
     // 像素足迹并入斜率方差（specular AA 口径，docs/jpov_specular_bandwidth.md §1.3③）：
     // 平面法线恒定，H 的变化全来自视线 ⇒ 掠射时这一项自动变大，正好抵消投影压缩。
     float footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
-
-    // ── ② 地平线附近的视线钳位（只影响求交，不改 H）──
-    // 地平线附近（|rd.y| ≈ 0）**不 discard**：把方向钳到极小的 |dy|，让这一层照样覆盖上去。
-    // 否则地平线那 1~2 像素的层缺失 ⇒ 露出天空在地平线以下填的 ground_color（“地缝”）。
-    // 地平线钳位：|rd.y| 极小时交点 t → ∞，钳到 kHorizonEps 让这一层照样覆盖上去。
-    // horizon_clamped 会在下面用来**跳过深度拒绝** —— 见那段的注释。
-    // 水面上方：把「贴近地平线、甚至略高于地平线」的射线都拉到地平线以下，
-    // 让水面**多盖一像素**。否则水面与天空的地色起点卡在同一条线上，边界行会
-    // 露出发暗的地色（ground），形成一条 1px 的"裂隙"。
-    bool horizon_clamped = false;
-    float horizon_sign = (uCamPos.y < uWaterLevelY) ? 1.0 : -1.0;
-    if (abs(rd.y) < kHorizonEps) {
-        rd = normalize(vec3(rd.x, horizon_sign * kHorizonEps, rd.z));
-        horizon_clamped = true;
-    }
 
     // ── ③ 视线 ∩ 水面（无波浪 ⇒ 平面解析解；有波浪 ⇒ Newton 修正）──
     float t = (uWaterLevelY - uCamPos.y) / rd.y;
@@ -241,24 +218,9 @@ void main() {
     //    view_z 抖动 ⇒ 与场景深度比较会在单像素上翻转（偶发单像素"z 不对"）。
     float view_z = t_plane * dot(rd, uCamFwd);
     float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
-    // 深度拒绝。
-    //
-    // ⚠️ `horizon_clamped` 的像素**不能直接用 view_z**：钳位后 t ≈ 数十 km，`view_z` 远超 far，
-    //    只要 scene_ndc 不是严格 1.0（浮点残差/远处的背面/后端编码差）就会**整行被剔** ⇒
-    //    露出天球地色（"深色裂隙"）。但也不能像旧版那样整条跳过 —— 那会把地平线那 1~2 行
-    //    的近处物体一起盖掉。判据改成「这一像素有没有几何」：钳位射线打到的是无穷远水面，
-    //    所以任何不透明几何都在它前面。
-    //    debug=3 仍然保留成"全局跳过"，用于对比。
+    // 深度拒绝。debug=3 = 全局跳过（对比用）。
     if (uWaveDebug == 3) {
         // 全局跳过（debug）
-    } else if (horizon_clamped) {
-        // 地平线钳位像素：水面交点在"无穷远" ⇒ **任何不透明几何都挡在它前面**。
-        // ⚠️ 旧版这里整条跳过深度测试，结果地平线那 1~2 行会把近处物体一起盖掉
-        //    （2026-11-19 报的「box 被水皮锯」：箱子上沿被水面切掉 3 行）。
-        //    正确做法：不能用 view_z（钳位后是数十 km），只看"这一像素有没有几何"。
-        if (scene_ndc < kBackgroundDepth) {
-            discard;
-        }
     } else if (scene_ndc < kBackgroundDepth) {
         float scene_z = LinearizeDepthNdc(scene_ndc, uNear, uFar);
         if (view_z > scene_z + uDepthBiasM) {
