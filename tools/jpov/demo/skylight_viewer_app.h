@@ -763,14 +763,16 @@ public:
             // 水面时钟：**唯一出处**（WaterWaves 里已经没有 time_s）。
             // 选型场走真实时钟（"动态的海"）；冻结时用滑条秒数（可复现对帧）。
             {
-                const float t = ocean_lab
-                                    ? (water_wave_time_freeze_ ? water_wave_time_s_
-                                                               : OceanLabTime() * ocean_time_speed_)
-                                    : (water_wave_time_freeze_
-                                           ? water_wave_time_s_
-                                           : static_cast<float>(frame_count) / 60.0f *
-                                                 ocean_time_speed_);
-                w.time_s = static_cast<double>(t);
+                // 时间倍率对「冻结 / 实时」**都生效**：冻结时它只是把同一个时刻按倍率缩放
+                //（= 慢动作/快进到同一相位），否则 --capture-ocean-report 的 speed 配置
+                // 会变成空操作（曾经就是这样：冻结时直接走 water_wave_time_s_）。
+                const float base_t = ocean_lab
+                                         ? (water_wave_time_freeze_ ? water_wave_time_s_
+                                                                    : OceanLabTime())
+                                         : (water_wave_time_freeze_
+                                                ? water_wave_time_s_
+                                                : static_cast<float>(frame_count) / 60.0f);
+                w.time_s = static_cast<double>(base_t * ocean_time_speed_);
             }
             w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
             w.ior = ocean_lab ? water_cfg_.ior : water_ior_;
@@ -808,12 +810,12 @@ public:
                 int n = water_use_config_count_
                             ? water_waves_.num_waves
                             : static_cast<int>(water_wave_count_f_ + 0.5f);
-                if (n < 1) {
+                // 只有滑条路径才抬到 1（滑条最小 1 条）。配置给 0 条 = 只要细节波/平面：
+                // 强行抬成 1 会凭空多一条 waves[0] 的默认波（10 m / 0.1 m），静默改画面。
+                if (!water_use_config_count_ && n < 1) {
                     n = 1;
                 }
-                if (n > jpov::WaterWaves::kMaxWaves) {
-                    n = jpov::WaterWaves::kMaxWaves;
-                }
+                n = std::clamp(n, 0, jpov::WaterWaves::kMaxWaves);
                 wv.num_waves = n;
                 for (int i = 0; i < n; ++i) {
                     wv.waves[i].amplitude_m *= water_wave_amp_scale_;

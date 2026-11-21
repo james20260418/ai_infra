@@ -1060,6 +1060,9 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
             out->waves.stokes_second_order = (v != 0);
         } else if (tag == "warp") {
             ss >> out->waves.warp_amplitude_m;
+            // 没写满 4 条载波时，剩下的保持默认值（37/112/197 m 等）——**会继续参与位移**。
+            // 这不是"补零"，所以显式警告，别让调用方以为"只写了 1 条就只掰一层"。
+            int carriers_read = 0;
             for (int j = 0; j < jpov::WaterWaves::kWarpCarriers; ++j) {
                 float lam = 0.0f;
                 float dx = 0.0f;
@@ -1073,6 +1076,12 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
                 out->waves.warp_wavelength_m[j] = lam;
                 out->waves.warp_dir_x[j] = dx;
                 out->waves.warp_dir_z[j] = dz;
+                ++carriers_read;
+            }
+            if (carriers_read > 0 && carriers_read < jpov::WaterWaves::kWarpCarriers) {
+                LOG(WARNING) << "warp 只给了 " << carriers_read << "/"
+                             << jpov::WaterWaves::kWarpCarriers
+                             << " 条载波：其余沿用默认值（不是补零）";
             }
         } else if (tag == "wave" || tag == "detail") {
             jpov::WaterWave w;

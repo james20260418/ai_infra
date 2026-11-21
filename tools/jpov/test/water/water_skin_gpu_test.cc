@@ -798,7 +798,7 @@ TEST(WaterSkinGpu, DetailWavesAndShallowDepthMatchCpu) {
         }
     }
     EXPECT_GT(compared, 20) << "覆盖像素太少";
-    EXPECT_LT(worst_shallow, 8.0e-3f)
+    EXPECT_LT(worst_shallow, 1.0e-3f)
         << "GPU 与浅水 CPU 参考不一致：细节波/求交的 ω 口径分叉了";
     EXPECT_GT(worst_deep, 4.0f * std::max(worst_shallow, 1.0e-3f))
         << "深水 CPU 参考和 GPU 一样：本用例测不出深度口径（阈值失效）";
