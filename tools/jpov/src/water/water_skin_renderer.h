@@ -97,8 +97,6 @@ public:
 private:
     void EnsureTarget(int w, int h);
     void UploadCommonUniforms(unsigned int prog, const Inputs& inputs);
-    // 波浪谱 / flow map / 淡出等 uniform（uWave*）。
-    void UploadWaveUniforms(unsigned int prog, const Inputs& inputs);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;

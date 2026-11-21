@@ -303,6 +303,9 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
             }
         }
         const float amp = wv.amplitude_m * fade * lod_amp;
+        if (amp <= 0.0f) {
+            continue;   // 淡出/亚像素：这条波对梯度零贡献（与 GLSL 同口径，省一次 cos）
+        }
         const float warp_scale =
             (warp_u_slope > 0.0f) ? std::min(1.0f, kWarpSlopeLimit / (k * warp_u_slope))
                                   : 1.0f;
@@ -386,6 +389,9 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
             }
         }
         const float amp = w.amplitude_m * amp_gain * fade * lod_amp;
+        if (amp == 0.0f) {
+            continue;   // 淡出/亚像素：与 GLSL 同口径，省掉 sin/cos
+        }
         // 域扭曲：θ += k·dot(u, d)，梯度多一项 k·(∂u/∂x, ∂u/∂z)·d。
         // 限带：乘 warp_scale（k·U 大的短波几乎不动，见 WaveWarpSlopeBound）。
         const float warp_scale =
@@ -527,7 +533,7 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
         const float dz = p.z() - cam_pos.z();
         const float dist = std::sqrt(dx * dx + dz * dz);
         return SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z,
-                               WaveFadeFactor(waves, dist), pixel_footprint_m)
+                               WaveFadeFactor(waves, dist), pixel_footprint_m, depth_m)
             .height_m;
     };
 

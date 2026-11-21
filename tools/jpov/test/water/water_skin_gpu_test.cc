@@ -717,6 +717,96 @@ TEST(WaterSkinGpu, WavesMatchCpuReference) {
     f.TearDown();
 }
 
+// 细节短波 + 有限水深：GPU 与 CPU 参考必须用**同一个 ω**。
+// 锁两件事（都是 2026-11-21 P8 抓到的）：
+//   ① 细节波的色散必须走 DispersionOmega(k, depth)（GPU 曾写死深水 sqrt(9.81k)）；
+//   ② 求交/二分与最终采样必须同一个 depth（CPU 二分曾漏传 depth）。
+// 敏感性自我证明：同一份 GPU 结果与「深水 CPU 参考」必须明显不一致（负向对照），
+// 否则这条用例只证明了"两遍都用深水"。
+TEST(WaterSkinGpu, DetailWavesAndShallowDepthMatchCpu) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {2.0f, 8.0f, -1.0f};
+    cam.target = {2.0f, 0.0f, 4.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.5f;
+    const float ior = 1.333f;
+    const float depth_m = 1.0f;    // 浅水：λ=9 m 主波的 ω 只有深水的 0.78 倍
+    const float time_s = 2.5f;
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    const float kTwoPi = 6.28318530717958647692f;
+    const float kDetailLam[4] = {8.0f, 6.0f, 4.0f, 2.5f};
+    waves.num_detail_waves = 4;
+    for (int i = 0; i < 4; ++i) {
+        jpov::WaterWave d;
+        const float ang = 0.7f * static_cast<float>(i);
+        d.dir_x = std::sin(ang);
+        d.dir_z = std::cos(ang);
+        d.wavelength_m = kDetailLam[i];
+        d.amplitude_m = 0.07f * kDetailLam[i] / kTwoPi;   // 与 BuildWater 同口径的陡度
+        d.phase_rad = 1.1f * static_cast<float>(i);
+        waves.detail_waves[i] = d;
+    }
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, /*wave_time_s=*/time_s, /*wave_depth_m=*/depth_m);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const std::vector<float> zsum = ReadRed(f.water.layer().depth_tex);
+    const Reference ref = BuildReference(cam);
+
+    int compared = 0;
+    float worst_shallow = 0.0f;    // GPU vs 浅水 CPU（必须很小）
+    float worst_deep = 0.0f;       // GPU vs 深水 CPU（必须明显，证明用例有感）
+    for (int y = 0; y < kHeight; y += 3) {
+        for (int x = 0; x < kWidth; x += 3) {
+            const LayerExpect shallow =
+                ExpectLayer(cam, ref, depth, x, y, level, ior,
+                            jpov::water::WaterMediumSample{}, &waves, 0.0f, 0.0f,
+                            time_s, depth_m);
+            if (!shallow.hit) {
+                continue;
+            }
+            const LayerExpect deep =
+                ExpectLayer(cam, ref, depth, x, y, level, ior,
+                            jpov::water::WaterMediumSample{}, &waves, 0.0f, 0.0f,
+                            time_s, 300.0f);
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            const float gpu_c[3] = {accum[base * 4 + 0], accum[base * 4 + 1],
+                                    accum[base * 4 + 2]};
+            const float shallow_c[3] = {shallow.color.x(), shallow.color.y(),
+                                        shallow.color.z()};
+            const float deep_c[3] = {deep.color.x(), deep.color.y(), deep.color.z()};
+            for (int c = 0; c < 3; ++c) {
+                worst_shallow = std::max(worst_shallow, std::fabs(gpu_c[c] - shallow_c[c]));
+                if (deep.hit) {
+                    worst_deep = std::max(worst_deep, std::fabs(gpu_c[c] - deep_c[c]));
+                }
+            }
+            EXPECT_NEAR(accum[base * 4 + 3], shallow.alpha, 3.0e-3f) << "x=" << x << " y=" << y;
+            EXPECT_NEAR(zsum[base], shallow.ray_t * shallow.alpha,
+                        0.02f + 0.01f * std::fabs(shallow.ray_t)) << "x=" << x << " y=" << y;
+            ++compared;
+        }
+    }
+    EXPECT_GT(compared, 20) << "覆盖像素太少";
+    EXPECT_LT(worst_shallow, 8.0e-3f)
+        << "GPU 与浅水 CPU 参考不一致：细节波/求交的 ω 口径分叉了";
+    EXPECT_GT(worst_deep, 4.0f * std::max(worst_shallow, 1.0e-3f))
+        << "深水 CPU 参考和 GPU 一样：本用例测不出深度口径（阈值失效）";
+
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
 // flow map：1×1 常量纹理 (1, 0) ⇒ flow = +x（强度 1）。
 // 与 CPU 参考（flow_x=1, flow_z=0）对拍：证明 GPU 采样/解码与 CPU 口径一致。
 TEST(WaterSkinGpu, WavesWithFlowMapMatchReference) {

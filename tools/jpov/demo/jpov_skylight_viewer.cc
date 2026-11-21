@@ -983,8 +983,11 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 // 配置是纯文本、每行一条（# 后面是注释，缺省项用内置默认）：
 //   sun     <elev_deg> <azim_deg>          # 太阳方向
 //   sigma_a <r> <g> <b>                     # 水体吸收 1/m
-//   sigma_s <r> <g> <b>                     # 水体散射 1/m
+//   sigma_s <s>                             # 水体散射 1/m（demo 侧 σs 是标量）
 //   wind    <m/s>                           # 短波 MSS（Cox–Munk）
+//   exposure <倍率>                         # tone map 之前的线性增益
+//   turbidity <值>                          # 大气浊度（2 清澈…8 霾）
+//   debug   <0|1|...>                       # 水皮 debug 档（0 = 正常）
 //   fade    <start_m> <end_m>               # 远处淡出
 //   speed   <倍率>                          # 色散时间倍率
 //   stokes  <0|1>                           # 二阶 Stokes 谐波
@@ -1035,7 +1038,10 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
         } else if (tag == "sigma_a") {
             ss >> out->sigma_a[0] >> out->sigma_a[1] >> out->sigma_a[2];
         } else if (tag == "sigma_s") {
-            ss >> out->sigma_s[0] >> out->sigma_s[1] >> out->sigma_s[2];
+            // demo 侧 σs 是标量（逐通道同值）：多写的 g/b 会被忽略，所以只读第一个。
+            ss >> out->sigma_s[0];
+            out->sigma_s[1] = out->sigma_s[0];
+            out->sigma_s[2] = out->sigma_s[0];
         } else if (tag == "wind") {
             ss >> out->wind_ms;
         } else if (tag == "exposure") {
@@ -1221,7 +1227,6 @@ int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_
     winfo.height = jpov_skylight::kViewerHeight;
     jpov::InputSnapshot input{};
 
-    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
     app.deg_.daylight_season = 0.0f;
     app.deg_.sun_elev_deg    = oc.sun_elev_deg;
     app.deg_.sun_azim_deg    = oc.sun_azim_deg;

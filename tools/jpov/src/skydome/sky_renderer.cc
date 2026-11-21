@@ -9,6 +9,7 @@
 
 #include "tools/jpov/src/water/water_wave_math.h"     // kWaveGravity / 谱参数
 #include "tools/jpov/src/water/water_wave_shader.h"   // kWaterWaveGlsl（折射用其法线）
+#include "tools/jpov/src/water/water_wave_uniforms.h"  // 与水皮共用的波浪 uniform 上传
 
 #include <cmath>
 
@@ -116,40 +117,19 @@ namespace jpov {
 namespace {
 
 // 把波浪谱传给天空 program（天球折射要用它的法线）。
-// ⚠️ 逐个 glUniform4f/2f：MinGW 的 gl_loader 没有数组版（*fv）。
+// **与水皮共用同一份上传实现**（water_wave_uniforms.h）：少传任何一个字段
+// （warp / Stokes / 细节短波 / 深度）都会让 Snell 窗缘用另一套几何 ⇒ 窗缘错位。
 // ⚠️ 天光 pass **不绑 flow map**（part 1 里 flow 未启用）；接 flow 时要同步，
 //    否则大尺度流向上窗缘会有偏差（known_issue §10.12b）。
 void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves& w,
                         float time_s, float depth_m) {
-    const int count = std::min(w.num_waves, WaterWaves::kMaxWaves);
-    glUniform1i(mgr.GetUniform(prog, "uWaveCount"), count);
-    const int l_loc = mgr.GetUniform(prog, "uWaveL[0]");
-    const int d_loc = mgr.GetUniform(prog, "uWaveDir[0]");
-    const float k_two_pi = 6.28318530717958647692f;
-    for (int i = 0; i < count; ++i) {
-        const WaterWave& wv = w.waves[i];
-        // 与 water_skin_renderer 同一口径：非法波长直接 crash，不静默跳过
-        //（静默跳过会让天光/水皮用两套谱，窗缘必然错位）。
-        CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
-        CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
-        const float k = k_two_pi / wv.wavelength_m;
-        const float omega = water::DispersionOmega(k, depth_m);
-        glUniform4f(l_loc + i, k, omega, wv.amplitude_m, wv.phase_rad);
-        const float dl = std::sqrt(wv.dir_x * wv.dir_x + wv.dir_z * wv.dir_z);
-        const bool has_dir = dl > 1.0e-6f;
-        glUniform2f(d_loc + i, has_dir ? (wv.dir_x / dl) : 1.0f,
-                    has_dir ? (wv.dir_z / dl) : 0.0f);
-    }
-    glUniform1f(mgr.GetUniform(prog, "uWaveTime"), time_s);
-    glUniform1f(mgr.GetUniform(prog, "uWaveFadeStart"), w.fade_start_m);
-    glUniform1f(mgr.GetUniform(prog, "uWaveFadeEnd"), w.fade_end_m);
-    glUniform1f(mgr.GetUniform(prog, "uWaveFlowAlign"), w.flow_align);
-    glUniform1f(mgr.GetUniform(prog, "uWaveFlowWindGain"), w.flow_wind_gain);
-    glUniform1f(mgr.GetUniform(prog, "uWaveFlowStrength"), 0.0f);
-    glUniform2f(mgr.GetUniform(prog, "uWaveFlowUvScale"), 0.0f, 0.0f);
-    glUniform1i(mgr.GetUniform(prog, "uWaveHasFlow"), 0);
-    glUniform1i(mgr.GetUniform(prog, "uWaveDisplace"), 1);
-    glUniform1i(mgr.GetUniform(prog, "uWaveDebug"), 0);
+    water::WaveUniformParams p;
+    p.time_s = time_s;
+    p.depth_m = depth_m;
+    p.debug = 0;
+    p.displacement = true;     // 只用到法线，但求交必须与水皮同口径（含 Stokes）
+    p.has_flow_tex = false;
+    water::UploadWaterWaveUniforms(mgr, prog, &w, p);
 }
 
 }  // namespace

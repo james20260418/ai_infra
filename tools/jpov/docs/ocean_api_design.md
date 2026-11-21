@@ -330,12 +330,14 @@ v2 再用 map 打开。
 
 ### 9.2 「质量」不能塞进 WaterConfig
 
-`detail_waves`（64/128）、半分辨率细节、几何波数上限 —— 这些**不是水的属性，是设备的属性**。
+`detail_waves`（当前 **32/64**，上限 = `WaterWaves::kMaxDetailWaves` = 着色器 uniform 数组长度；
+128 档要扩数组 + 涨 uniform 预算，暂不支持）、半分辨率细节、几何波数上限 ——
+这些**不是水的属性，是设备的属性**。
 塞进 WaterConfig 会导致：美术的场景配置在别人机器上出不同的图，且没法缓存。
 
 ```cpp
 struct WaterQuality {          // 每台设备/每次构建一份，不进资产
-    int  detail_waves   = 64;  // 32 / 64 / 128
+    int  detail_waves   = 64;  // 32 / 64（上限见 WaterWaves::kMaxDetailWaves）
     bool half_res_detail = false;
 };
 ```

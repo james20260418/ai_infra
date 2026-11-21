@@ -185,7 +185,7 @@ inline void ApplyArrowKeys(const jpov::InputSnapshot& input, double step_rad,
     v->phi = std::clamp(v->phi + dph, -kPiHalf, kPiHalf);
 }
 
-// 中键纵向 pan：把「本帧鼠标纵向位移」（像素）映射为相机**注视点**的世界 Y 位移（米）。// 中键纵向 pan：把「本帧鼠标纵向位移」（像素）映射为相机**注视点**的世界 Y 位移（米）。
+// 中键纵向 pan：把「本帧鼠标纵向位移」（像素）映射为相机**注视点**的世界 Y 位移（米）。
 //
 // 约定（需求定稿）：鼠标纵向 pan **半个窗口高** ⇒ 注视点升降 **1m**。
 // 方向 =「抓取世界」：鼠标下拖（dy>0）⇒ 世界随手下移 ⇒ 注视点上升（+Y）。
