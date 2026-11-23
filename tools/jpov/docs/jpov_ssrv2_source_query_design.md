@@ -145,7 +145,7 @@ Cavg = accum.rgb / accum.a      cov = 1 − reveal        z̄ = depth / accum.a
 |---|---|---|
 | a | **没有任何生产者写正态**。透明生产者的 FS 输出只有 `FragAccum / FragReveal / FragAdd`（`particles:170-172`、`volume_fire:108-109`） | 「没法线」是结论，不是猜测 |
 | b | **只有玻璃申请了代表深度**（particles:85 / strip:386 / volume_fire:166 全传 `with_depth=false`） | 面纱的「穿层判定」对粒子/条带/火**没有 `z̄` 可用** |
-| c | **统一层合成装置主线未接**：`renderer.cc:1988` 传的是 `TransparentLayerSet{}`（空集），各生产者自己 resolve 进 HDR | 「复用 `TransparentLayer`」不是现成的：要么把统一装置接上，要么直读各家的 `accum/reveal` |
+| c | ~~统一层装置未接~~ **（2026-11-23 更正）**：`main` 上的统一层合成**已经接了，且只接了水皮** —— `renderer.cc:2129 layers.Add(water_skin_renderer_.layer())`，触发条件 `run_medium_composite = run_fog \|\| water_skin_on \|\| water_medium_on`。粒子/条带/火仍是各自 resolve（在层集合构造之前就合成掉了） | 水皮这条路**是现成的**；另外三个源没接。之前那句「空集」是在旧分支（`feature/20261106-jpov-lux-glass-design`）上读到的，**不适用于 main** |
 
 > **关键区分：补一个 normal 通道并不能让它变成靶子。**
 > WBO 的法线只能是「按 `α·w` 加权平均」—— 多片交叠时它是**无关表面的平均**，归一化后没有几何意义；
@@ -223,12 +223,33 @@ struct SsrV2Query {
 
 #### 3.5.1 射线-水皮求交
 
-复用 PR #261 的 `water_wave_math.h`（平面初值 + Newton 4 次），但 PQ 射线与相机射线有两点不同：
+复用 PR #261 的 `water_wave_shader.h::WaveSurfaceHit(cam, ray_dir, level, footprint, inout t, out pos, out normal)`
+—— 它**已经是参数化的**（不依赖 `uCamPos`），把 `cam=P, ray_dir=R` 塞进去即可，**不需要写新的求交代码**。
+
+求交本身是**二分 12 次**（`kWaveBisectIterations`），不是 Newton —— 理由是 `f'` 在波谷/陡坡处
+→ 0 会跳根（表现为法线噪点），二分区间两端必变号所以全局收敛。分前先定平面解 `t_plane`，
+区间取 `[t_plane − ΣA/|R.y|, t_plane + ΣA/|R.y|]`。
+
+但 PQ 射线与相机射线有 **三** 个必须处理的差异：
 
 | 差异 | 后果 | 处理 |
 |---|---|---|
-| **起点不在相机** | `P` 可能在水面上方很高 ⇒ 平面初值的 `t` 极大、Newton 难收敛 | 初值按 `|R.y|` 分档（#261 的 `t_plane` 教训：掠射时 `t` 差几公里） |
-| **可能多次穿面** | 波谷处掠射射线能与高度场相交多次 | 取**最小正根**；迭代上界 + 失败即「无命中」，**不要贪心取最后一个根** |
+| **① `WaveFAt` 用 `length(p.xz − cam.xz)` 算 fade** | 把 `cam` 换成 `P`，fade 基准就从相机变成了 P ⇒ **同一个世界点的波幅随"哪条射线来求值"而不同** ⇒ 接缝/闪烁 | **必须解耦**：求交起点与 fade 参考点分开传（加 `fade_ref` 参数）。**本文最易漏的一处** |
+| **② 起点不在相机** | `P` 可能在水面上方很高 ⇒ 平面 `t` 极大、掠射时差几公里 | 沿用 #261 的 `t_plane` 教训；二分天然比 Newton 稳 |
+| **③ 可能多次穿面** | 波谷处掠射射线能与高度场相交多次 | 二分只保证"区间内有一个根"；无变号时**回退平面解**（已有兜底分支），不要贪心取最后一个根 |
+
+**成本与精确早退**：一次求交 ≈（2 端点 + 12 二分）= 14 次高度场求值 × ≤8 波 ≈ 100+ 次 sin/cos。
+可以**零成本干掉绝大多数像素**（精确判据，不是启发式）：
+
+```
+P.y > level_y + ΣA  且  R.y ≥ 0   ⇒ 射线向上、永远碰不到水面 ⇒ 跳过求交
+```
+
+只有「水上的反射体、且反射方向朝下」才需要真求交。
+
+> 补充：**波表不是 64 个波**。`WaterWaves::kMaxWaves = 8`，GLSL 里是 `for (i < 8)`；
+> 且 `(k, ω, amp, phase)` 是 **CPU 每帧算一次**（`uWaveL[]` uniform），shader 只做求和
+> ⇒ **波表不会算两遍**。但**高度场求值**必须重算 —— 相机射线交点与 PQ 交点本来就是不同的点。
 
 #### 3.5.2 顺序规则（必须有，否则会漏）
 
