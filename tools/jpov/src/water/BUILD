@@ -50,7 +50,29 @@ cc_library(
     linkstatic = 1,
 )
 
-# 水皮的 CPU 参考（GL-free）：视线∩平面、菲涅尔（含全内反射）、反射方向夹地平线、
+# 波浪谱 → GLSL uniform 的**唯一一份**上传实现（水皮 + 天球折射共用）。
+# 为什么必须共用：两趟调同一个 WaveSurfaceHit，少传一个字段就会让 Snell 窗缘错位。
+cc_library(
+    name = "water_wave_uniforms",
+    srcs = ["water_wave_uniforms.cc"],
+    hdrs = ["water_wave_uniforms.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":water_wave_math",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 水皮的 CPU 参考（GL-free）：视线∩平面、菲涅尔（含全内反射）、反射方向夾地平线、：视线∩平面、菲涅尔（含全内反射）、反射方向夹地平线、
 # 深度拒绝、层语义（C / α / 射线距离）。单测与 GPU 对拍共用这一份。
 cc_library(
     name = "water_skin_math",
@@ -79,6 +101,7 @@ cc_library(
         ":water_medium_math",
         ":water_skin_math",
         ":water_wave_math",
+        ":water_wave_uniforms",
         "//tools/jpov/interface:camera",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",

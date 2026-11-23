@@ -129,7 +129,9 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
                                WaterPixel* out /*output*/,
                                const WaterWaves* waves = nullptr,
                                float flow_x = 0.0f, float flow_z = 0.0f,
-                               float pixel_angle_rad = 0.0f) {
+                               float pixel_angle_rad = 0.0f,
+                               float time_s = 0.0f,
+                               float depth_m = 300.0f) {
     if (out == nullptr) {
         return false;
     }
@@ -148,7 +150,7 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         }
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
-                                  waves->time_s, footprint, &wh)) {
+                                  time_s, footprint, &wh, depth_m)) {
             return false;
         }
         t = wh.t;

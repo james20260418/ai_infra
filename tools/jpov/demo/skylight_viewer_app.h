@@ -28,13 +28,16 @@
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/skylight_scene.h"
+#include "tools/jpov/interface/water_config.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
@@ -194,6 +197,83 @@ public:
     // 散射取 0.05（清澈偏浊）：既能看出介质注入，又不把水下东西糊掉。
     static constexpr int kSceneWater = 3;
     bool IsWaterScene() const { return scene_index_ == kSceneWater; }
+
+    // ── 场景 4：海面选型场（Ocean Lab，2026-11-20）──
+    // **面板只碰 WaterConfig**：风（速度/方向/风区）、涌（开关/波高/周期/方向）、
+    // 介质（水色/浑浊/水深/曝光）。谱怎么离散、相位怎么随机、64 条细节怎么铺，
+    // 全部由 BuildWater() 自动完成（interface/water_config.h）。
+    static constexpr int kSceneOceanLab = 4;
+    bool IsOceanLab() const { return scene_index_ == kSceneOceanLab; }
+
+    jpov::water::WaterConfig water_cfg_;
+    jpov::water::WaterQuality water_quality_;
+    // 派生缓存：只有 WaterConfig 变化时才重算（每帧重算 80 条波是浪费，也会拖慢 UI）。
+    jpov::WaterWaves lab_waves_;
+    jpov::water::WaterReadout lab_readout_;
+    bool lab_derived_dirty_ = true;
+    void InvalidateLabWater() { lab_derived_dirty_ = true; }
+    void EnsureLabWater() {
+        if (!lab_derived_dirty_) {
+            return;
+        }
+        jpov::water::BuildWater(water_cfg_, water_quality_, &lab_waves_, &lab_readout_);
+        lab_derived_dirty_ = false;
+    }
+
+    // 选型场默认值 = 上轮实验的胜出者（B 谱结构：4~8 主波 + 64 条各向同性细节，无 warp）：
+    // U=8 m/s、吹向 34°（= 方位 214° − 180°，即相机朝太阳那侧）、风区 250 km、
+    // σa 0.50/0.054/0.014、σs 0.04、曝光 0.6、45° 俯视 5 m。
+    void SetOceanLab(bool on) {
+        if (!on) {
+            scene_index_ = 0;
+            return;
+        }
+        scene_index_ = kSceneOceanLab;
+        water_waves_on_ = true;
+        water_skin_on_ = true;
+        water_medium_on_ = true;
+        deg_.sun_elev_deg = 35.0f;
+        deg_.sun_azim_deg = 214.0f;
+        deg_.turbidity = 2.0f;
+        deg_.daylight_season = 0.0f;
+        water_cfg_.SetWind(8.0f, 34.0f * 3.14159265358979323846f / 180.0f);
+        water_cfg_.fetch_km = 250.0f;
+        water_cfg_.duration_h = std::numeric_limits<float>::infinity();
+        water_cfg_.swell.height_m = 0.0f;   // 默认无涌：与胜出者 B 对齐
+        water_cfg_.swell.period_s = 9.5f;
+        ocean_swell_on_ = false;            // 面板开关必须与 height_m=0 一致（否则勾着却没涌）
+        water_cfg_.depth_m = 3.5f;
+        water_cfg_.level_y = 0.0f;
+        exposure_ = 0.6f;
+        InvalidateLabWater();
+        SetOceanLabView();
+    }
+
+    // 选型场默认机位：45° 俯视、相机高 5 m、朝太阳（= 上轮实验的 ① 机位）。
+    void SetOceanLabView() {
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        view_ = jpov_viewer::DefaultView();
+        view_.phi = 45.0 * kDegToRad;
+        view_.theta = (static_cast<double>(deg_.sun_azim_deg) - 180.0) * kDegToRad;
+        view_.R = 5.0 / std::sin(view_.phi);
+    }
+
+    // 选型场的动画时钟：真实时间（frame_count/60 掉帧会变慢）。
+    float OceanLabTime() {
+        if (!ocean_clock_started_) {
+            ocean_clock_start_ = std::chrono::steady_clock::now();
+            ocean_clock_started_ = true;
+        }
+        const auto dt = std::chrono::steady_clock::now() - ocean_clock_start_;
+        return std::chrono::duration<float>(dt).count();
+    }
+    // 方向键的按住计数（纯状态，语义见 view_config.h::ApplyArrowKeys）。
+    jpov_viewer::ArrowKeyState key_turn_;
+
+    std::chrono::steady_clock::time_point ocean_clock_start_{};
+    bool ocean_clock_started_ = false;
+    float ocean_time_speed_ = 1.0f;   // 时间倍率（0 = 冻结）
+    bool  ocean_swell_on_ = false;    // 涌开关（面板）
     // 两个正交开关（2026-11-19 Danis 要的「拆开看对齐」）：
     //   · water_skin_on_   = 界面层（水皮 WBO）：反射 / 透射 / 水面高光 / Snell 窗；
     //   · water_medium_on_ = 水体介质（体积）：水下吸收 + 单次散射注入。
@@ -223,7 +303,15 @@ public:
     jpov::WaterWaves water_waves_ = MakeDefaultWaves();
     bool water_waves_on_ = false;
     float water_wave_amp_scale_ = 1.0f;
+    // true ⇒ 帧内直接用 water_waves_.num_waves（capture 用整份配置覆盖时打开）。
+    bool water_use_config_count_ = false;
     void SetWaterWaves(bool on) { water_waves_on_ = on; }
+    // 用一整份配置替换默认谱（海面报告 / 参数扫描用）。
+    // 位置参数不可读时无法用指定初始化，直接整体赋值最清楚。
+    void SetWaterWavesConfig(const jpov::WaterWaves& waves) {
+        water_waves_ = waves;
+        water_use_config_count_ = true;
+    }
     void SetWaterWaveAmplitudeScale(float scale) { water_wave_amp_scale_ = scale; }
     void SetWaterFlowTexture(uint32_t id) { water_waves_.flow_texture_id = id; }
     void SetWaterWaveDisplacement(bool on) { water_waves_.displacement = on; }
@@ -233,7 +321,11 @@ public:
     bool water_wave_time_freeze_ = false;
     void SetWaterWaveTime(float sec) { water_wave_time_s_ = sec; water_wave_time_freeze_ = true; }
     void SetWaterWaveTimeFrozen(bool on) { water_wave_time_freeze_ = on; }
+    // 时间倍率（0 = 冻结）：调用方对 time 的缩放，不再是波谱里的字段。
+    void SetWaterTimeSpeed(float s) { ocean_time_speed_ = s; }
     int water_wave_debug_ = 0;   // 0 正常 / 1 法线颜色（capture 用）
+    // 曝光（tone map 之前的线性增益）。1.0 = 物理锚点（默认）。
+    float exposure_ = 1.0f;
     void SetWaterWaveDebug(int mode) { water_wave_debug_ = mode; }
     // 面板：法线可视化开关 + 波数（SliderFloat 只能用 float）。
     bool water_wave_normal_view_ = false;
@@ -460,6 +552,11 @@ public:
             jpov_viewer::ApplyInput(&view_, dx, dy, scroll,
                                     static_cast<int>(winfo.width),
                                     static_cast<int>(winfo.height));
+
+            // ── 方向键调视角（2026-11-20）：与右键拖拽同一套符号，每次 5° ──
+            // 纯函数在 view_config.h::ApplyArrowKeys（可单测），这里只提供步长。
+            constexpr double kKeyStep = 5.0 * 3.14159265358979323846 / 180.0;
+            jpov_viewer::ApplyArrowKeys(input, kKeyStep, &key_turn_, &view_);
         }
 
         // 相机由 view_ 推导（同 model viewer；target=原点）。
@@ -475,6 +572,7 @@ public:
         // moon_season 与夜空蓝覆盖默认值。
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         const bool water_scene = IsWaterScene();
+        const bool ocean_lab = IsOceanLab();
         jpov::SkyCommand sky = nl.sky;
         // 地平线以下的填充色与探针下半球**不在这里配**：Renderer 在有水面时统一按
         // 「深海渐近色 + 水面 Fresnel」自动填（单一出处，见 renderer.cc 的天空段）。
@@ -497,6 +595,9 @@ public:
             cmds->point_lights.push_back(*point_lamp_);
         }
         cmds->tone_mapping = true;
+        // 曝光（EV=0 基准）。海面报告用它把「物理锚点」下的亮度对齐到照片观感；
+        // 默认 1.0 ⇒ 旧行为逐字节不变。
+        cmds->exposure = exposure_;
 
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
@@ -505,10 +606,10 @@ public:
         //    「有水面却没 env_specular / sky_scale=0 / 探针没建」直接 CHECK（宁可崩也不静默
         //    退化成黑水面）。所以这里在水场景强制打开并把消费量抬到 (0,1]，避免用户在面板上
         //    一勾就把进程打挂。
-        if (env_specular_on_ || water_scene) {
+        if (env_specular_on_ || water_scene || ocean_lab) {
             jpov::EnvSpecular es;
-            es.sky_scale = water_scene ? std::max(env_specular_scale_, 0.05f)
-                                       : env_specular_scale_;
+            es.sky_scale = (water_scene || ocean_lab) ? std::max(env_specular_scale_, 0.05f)
+                                                      : env_specular_scale_;
             cmds->env_specular = es;
         }
 
@@ -525,7 +626,17 @@ public:
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
         //   2 只天空：不画几何（headless 拍天光）
         const bool draw_scene = show_scene_ && scene_index_ != 2;
-        if (draw_scene && water_scene) {
+        // ── 场景 4：海面选型场 —— 只画**一整块**海底底板（120×120 m）。──
+        // 不叠任何礁斑/棋盘格：共面薄垫在 70 m 外必 z-fight，硬边深色块在水下又被读成"黑洞"
+        // （2026-11-20 Danis 实拍确认，见 known_issue.md §10.18）。
+        if (draw_scene && ocean_lab) {
+            const float bed_y = water_cfg_.level_y - water_cfg_.depth_m;
+            // 海底只画这一块。浅海靠"水深滑条 + 沙底本身的明暗"表达，不再加装饰几何。
+            cmds->DrawObject3D(ground_mesh_, jpov_skylight::SeabedMaterial(1.0f),
+                               {0.0f, bed_y, 0.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f},
+                               /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ 5.0f);
+        } else if (draw_scene && water_scene) {
             // 水下岩板（30×30 m）：顶面在「水位 − 深度」，随两条滑条升降。
             // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
             const float top = water_level_y_ - slab_top_depth_m_;
@@ -646,39 +757,72 @@ public:
         //   · **界面层**（水皮）只要在水场景就有（它是世界的一部分）；
         //   · **介质**才受 `水体介质` 开关控制。
         // 两者分开 ⇒ A/B 的语义是「界面不变、只切介质」，不会把界面一起关掉。
-        if (water_scene) {
+        if (water_scene || ocean_lab) {
             jpov::WaterCommand w;
-            w.level_y = water_level_y_;
-            w.ior = water_ior_;
+            w.level_y = ocean_lab ? water_cfg_.level_y : water_level_y_;
+            // 水面时钟：**唯一出处**（WaterWaves 里已经没有 time_s）。
+            // 选型场走真实时钟（"动态的海"）；冻结时用滑条秒数（可复现对帧）。
+            {
+                // 时间倍率对「冻结 / 实时」**都生效**：冻结时它只是把同一个时刻按倍率缩放
+                //（= 慢动作/快进到同一相位），否则 --capture-ocean-report 的 speed 配置
+                // 会变成空操作（曾经就是这样：冻结时直接走 water_wave_time_s_）。
+                const float base_t = ocean_lab
+                                         ? (water_wave_time_freeze_ ? water_wave_time_s_
+                                                                    : OceanLabTime())
+                                         : (water_wave_time_freeze_
+                                                ? water_wave_time_s_
+                                                : static_cast<float>(frame_count) / 60.0f);
+                w.time_s = static_cast<double>(base_t * ocean_time_speed_);
+            }
+            w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
+            w.ior = ocean_lab ? water_cfg_.ior : water_ior_;
             w.skin = water_skin_on_;
             // 面板允许把 σ 全拖到 0；那等价于「没有介质」，不能让它撞 renderer 的 CHECK
             //（CHECK 是给 API 误用准备的，UI 不该能触发）。全 0 ⇒ 按关闭处理。
+            const jpov::Vec3f sa = ocean_lab ? water_cfg_.sigma_a
+                                             : jpov::Vec3f{water_sigma_a_r_, water_sigma_a_g_,
+                                                           water_sigma_a_b_};
+            const float ss = ocean_lab ? water_cfg_.sigma_s : water_sigma_s_;
             const bool sigma_nonzero =
-                water_sigma_a_r_ > 0.0f || water_sigma_a_g_ > 0.0f ||
-                water_sigma_a_b_ > 0.0f || water_sigma_s_ > 0.0f;
+                sa.x() > 0.0f || sa.y() > 0.0f || sa.z() > 0.0f || ss > 0.0f;
             w.medium.enabled = water_medium_on_ && sigma_nonzero;
-            w.medium.sigma_a = {water_sigma_a_r_, water_sigma_a_g_, water_sigma_a_b_};
-            w.medium.sigma_s = {water_sigma_s_, water_sigma_s_, water_sigma_s_};
-            w.medium.phase_g = water_phase_g_;
+            w.medium.sigma_a = sa;
+            w.medium.sigma_s = {ss, ss, ss};
+            w.medium.phase_g = ocean_lab ? water_cfg_.phase_g : water_phase_g_;
             // 波浪：只改界面几何（求交/法线）；介质仍按 level_y 半空间。
-            if (water_waves_on_) {
+            if (ocean_lab) {
+                // 选型场：谱整份由 WaterConfig 推出来（缓存，不每帧重算）。
+                EnsureLabWater();
+                jpov::WaterWaves wv = lab_waves_;
+                for (int i = 0; i < wv.num_waves; ++i) {
+                    wv.waves[i].amplitude_m *= water_wave_amp_scale_;
+                }
+                for (int i = 0; i < wv.num_detail_waves; ++i) {
+                    wv.detail_waves[i].amplitude_m *= water_wave_amp_scale_;
+                }
+                wv.debug = (water_wave_debug_ != 0)
+                               ? water_wave_debug_
+                               : (water_wave_normal_view_ ? 1 : 0);
+                w.waves = wv;
+            } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
                 wv.enabled = true;
-                int n = static_cast<int>(water_wave_count_f_ + 0.5f);
-                if (n < 1) {
+                int n = water_use_config_count_
+                            ? water_waves_.num_waves
+                            : static_cast<int>(water_wave_count_f_ + 0.5f);
+                // 只有滑条路径才抬到 1（滑条最小 1 条）。配置给 0 条 = 只要细节波/平面：
+                // 强行抬成 1 会凭空多一条 waves[0] 的默认波（10 m / 0.1 m），静默改画面。
+                if (!water_use_config_count_ && n < 1) {
                     n = 1;
                 }
-                if (n > jpov::WaterWaves::kMaxWaves) {
-                    n = jpov::WaterWaves::kMaxWaves;
-                }
+                n = std::clamp(n, 0, jpov::WaterWaves::kMaxWaves);
                 wv.num_waves = n;
                 for (int i = 0; i < n; ++i) {
                     wv.waves[i].amplitude_m *= water_wave_amp_scale_;
                 }
-                // 60 fps 的拍摄时钟（capture 每帧固定一帧，所以时间可复现）。
-                wv.time_s = water_wave_time_freeze_
-                                ? water_wave_time_s_
-                                : static_cast<float>(frame_count) / 60.0f;
+                for (int i = 0; i < wv.num_detail_waves; ++i) {
+                    wv.detail_waves[i].amplitude_m *= water_wave_amp_scale_;
+                }
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
@@ -756,7 +900,9 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 17;
+        // 选型场 14 行（左列 0..13），其余场景保持 17 行。面板是底对齐的，
+        // 行数必须等于「最大行号 + 1」，多给的行会变成底部一条空白。
+        const int   kRows    = IsOceanLab() ? 14 : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -774,7 +920,8 @@ private:
             const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
                                                      "场景1 镜面地板+随机模型",
                                                      "场景2 只天空",
-                                                     "场景3 水凝胶（水体介质）"};
+                                                     "场景3 水凝胶（水体介质）",
+                                                     "场景4 海面选型（WaterConfig）"};
             int sel = scene_index_;
             if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
@@ -792,6 +939,104 @@ private:
             }
 
             // 水场景：面板只留「水体介质 + 天体光照」（验收物理口径，不是调参手感）。
+            // ── 场景 4：海面选型场（只碰 WaterConfig）──
+            // 想告诉美术的一句话：「风多大、吹哪边、风区多大、有没有涌」。
+            // 谱怎么离散、相位怎么随机、细节多少条，全自动。
+            if (IsOceanLab()) {
+                // 风速 / 风向（面板用度数，写回 WaterConfig 的向量；方向 = 吹向）
+                constexpr float kDeg = 3.14159265358979323846f / 180.0f;
+                float wind_speed = water_cfg_.WindSpeedMs();
+                float wind_dir_deg = water_cfg_.WindDirRad() / kDeg;
+                if (ui_.SliderFloat("风 风速 m/s", &wind_speed, row(0, 1), 0.0f, 25.0f, 1)) {
+                    water_cfg_.SetWind(wind_speed, wind_dir_deg * kDeg);
+                    InvalidateLabWater();
+                }
+                if (ui_.SliderFloat("风 吹向 °", &wind_dir_deg, row(0, 2), 0.0f, 360.0f, 0)) {
+                    water_cfg_.SetWind(wind_speed, wind_dir_deg * kDeg);
+                    InvalidateLabWater();
+                }
+                // 风区：0 = 关闭限制（充分成长）。面板上用 0 表示 ∞，写回时转成 infinity。
+                float fetch_km = std::isfinite(water_cfg_.fetch_km) ? water_cfg_.fetch_km : 0.0f;
+                if (ui_.SliderFloat("风 风区 km (0=充分成长)", &fetch_km, row(0, 3),
+                                    0.0f, 1000.0f, 0)) {
+                    water_cfg_.fetch_km = (fetch_km < 0.5f)
+                                              ? std::numeric_limits<float>::infinity()
+                                              : fetch_km;
+                    InvalidateLabWater();
+                }
+                // 涌
+                if (ui_.Checkbox("涌 开启", &ocean_swell_on_, row(0, 4)) && ocean_swell_on_ &&
+                    !(water_cfg_.swell.height_m > 0.0f)) {
+                    // 打开涌时给一组能肉眼看出"交叉"的默认值：1.5 m / 11 s，与风偏 70°。
+                    constexpr float kDeg = 3.14159265358979323846f / 180.0f;
+                    water_cfg_.SetSwell(1.5f, 11.0f,
+                                        water_cfg_.WindDirRad() * kDeg + 70.0f * kDeg);
+                    InvalidateLabWater();
+                }
+                float swell_hs = water_cfg_.swell.height_m;
+                if (ui_.SliderFloat("涌 波高 m", &swell_hs, row(0, 5), 0.0f, 5.0f, 2)) {
+                    water_cfg_.swell.height_m = ocean_swell_on_ ? swell_hs : 0.0f;
+                    InvalidateLabWater();
+                }
+                float swell_tp = water_cfg_.swell.period_s;
+                if (ui_.SliderFloat("涌 周期 s", &swell_tp, row(0, 6), 4.0f, 20.0f, 1)) {
+                    water_cfg_.swell.period_s = swell_tp;
+                    InvalidateLabWater();
+                }
+                float swell_dir = water_cfg_.SwellDirRad() / kDeg;
+                if (ui_.SliderFloat("涌 传向 °", &swell_dir, row(0, 7), 0.0f, 360.0f, 0)) {
+                    water_cfg_.SetSwell(water_cfg_.swell.height_m, water_cfg_.swell.period_s,
+                                        swell_dir * kDeg);
+                    InvalidateLabWater();
+                }
+                // 介质（水色 = 逐通道吸收；浑浊 = 散射）
+                if (ui_.SliderFloat("水 吸收 R 1/m (水色 蓝↔绿)", &water_cfg_.sigma_a.x(),
+                                    row(0, 8), 0.0f, 1.5f, 3)) {
+                    InvalidateLabWater();
+                }
+                ui_.SliderFloat("水 吸收 G 1/m", &water_cfg_.sigma_a.y(), row(0, 9),
+                                0.0f, 0.3f, 3);
+                ui_.SliderFloat("水 吸收 B 1/m", &water_cfg_.sigma_a.z(), row(0, 10),
+                                0.0f, 0.1f, 3);
+                ui_.SliderFloat("水 散射 1/m (浑浊)", &water_cfg_.sigma_s, row(0, 11),
+                                0.0f, 0.5f, 3);
+                ui_.SliderFloat("水 水深 m (浅海)", &water_cfg_.depth_m, row(0, 12),
+                                0.3f, 40.0f, 1);
+                ui_.SliderFloat("曝光", &exposure_, row(0, 13), 0.2f, 2.0f, 2);
+
+                // 右列：环境/时间/开关 + 只读派生量
+                ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg, row(1, 0),
+                                -90.0f, 90.0f, 0);
+                ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(1, 1), 0.0f, 360.0f, 0);
+                ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 2), kTurbidityMin,
+                                kTurbidityMax, 1);
+                ui_.Checkbox("水皮界面层 (WBO)", &water_skin_on_, row(1, 3));
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 4));
+                ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 5),
+                                0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 6), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);
+                if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
+                    // 不额外做事：time_s 的取值在渲染体里按开关分叉
+                }
+                // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
+                EnsureLabWater();
+                {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "Hs %.2f + %.2f = %.2f m",
+                                  static_cast<double>(lab_readout_.hs_wind_m),
+                                  static_cast<double>(lab_readout_.hs_swell_m),
+                                  static_cast<double>(lab_readout_.hs_total_m));
+                    ui_.Text(buf, row(1, 9));
+                    std::snprintf(buf, sizeof(buf), "Tp %.1f s   λp %.0f m  坡度 %.0f°",
+                                  static_cast<double>(lab_readout_.period_s),
+                                  static_cast<double>(lab_readout_.lambda_peak_m),
+                                  static_cast<double>(
+                                      std::atan(lab_readout_.rms_slope) * 57.29577951308232));
+                    ui_.Text(buf, row(1, 10));
+                }
+                return;
+            }
             if (IsWaterScene()) {
                 ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 1));
                 ui_.SliderFloat("吸收 R 1/m", &water_sigma_a_r_, row(0, 2), 0.0f, 1.0f, 3);
@@ -814,7 +1059,8 @@ private:
                 ui_.Checkbox("水面波浪", &water_waves_on_, row(0, 8));
                 ui_.SliderFloat("波浪 波幅倍率", &water_wave_amp_scale_, row(0, 9),
                                 0.0f, 6.0f, 2);
-                ui_.SliderFloat("波浪 时间速度 (0=冻结)", &water_waves_.speed_scale,
+                // 时间倍率改成"调用方对 time 的缩放"，不再是波谱里的字段。
+                ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_time_speed_,
                                 row(0, 10), 0.0f, 3.0f, 2);
                 ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
                                 row(0, 11), 0.0f, 2000.0f, 0);

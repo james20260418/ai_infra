@@ -41,6 +41,13 @@ public:
         // 水体介质（水下支路的「深海积分反射」要用它；nullptr = 无介质 ⇒ S_P(∞) = 0）。
         const water::WaterMediumSample* medium = nullptr;
 
+        // ── 每帧时钟与平底深度（2026-11-20 从 WaterWaves 迁出）──
+        // 时间由 WaterCommand::time_s（double）来，这里已经是**上传给 GLSL 的 float**
+        //（uniform 就是 float）；单调，允许负值 = 回溯。非有限值会被上传侧 CHECK 拦住。
+        float wave_time_s = 0.0f;
+        // 平底深度（米）：只改色散 ω=√(gk·tanh(kd))；介质积分仍是半空间。
+        float wave_depth_m = 300.0f;
+
         // ── 水面波浪（法线扰动 / 高度置换）──
         // nullptr / !enabled / num_waves = 0 ⇒ 纯平面（与旧版逐字节一致）。
         // 波浪只改界面几何（求交与法线）；水体介质仍按 level_y 的半空间积分。
@@ -91,8 +98,6 @@ public:
 private:
     void EnsureTarget(int w, int h);
     void UploadCommonUniforms(unsigned int prog, const Inputs& inputs);
-    // 波浪谱 / flow map / 淡出等 uniform（uWave*）。
-    void UploadWaveUniforms(unsigned int prog, const Inputs& inputs);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;

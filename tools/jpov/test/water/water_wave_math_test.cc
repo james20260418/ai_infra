@@ -305,4 +305,84 @@ TEST(WaterWaveMath, NonUnitWaveDirectionIsNormalized) {
     }
 }
 
+// ── 回归（2026-11-23 报障）：位移主波被足迹截断后，法线必须仍由细节波给 ──
+//
+// 现象：低风速（SMB 峰波长 0.45 m）+ report_cam_75m，某种波的 pattern 在**固定距离**上
+//       生硬消失（不是淡出），且断点随 kWaveLodPxMin 平移（2 px→80 m、3 px→63 m）。
+// 根因：求交的兜底分支 `normal = (0,1,0)` 且跳过细节波梯度 —— 位移波被足迹全部截断
+//       （amp_sum == 0）后整片水面退化成完美镜面，连还解析得出来的细节波一起被丢掉。
+// 判据：
+//   ① amp_sum == 0 时法线仍必须等于「同一处的梯度法线」（不是 (0,1,0)）；
+//   ② 负向对照：连细节波都亚像素时，必须回到平法线（抗锯齿语义不变）。
+TEST(WaterWaveMath, TruncatedMainWavesKeepDetailNormals) {
+    WaterWaves w;
+    w.enabled = true;
+    w.displacement = true;
+    w.fade_start_m = 0.0f;
+    w.fade_end_m = 0.0f;   // 不淡出：差异只来自足迹截断
+    w.num_waves = 1;
+    w.waves[0] = WaterWave{1.0f, 0.0f, 0.5f, 0.02f, 0.0f};   // 唯一的位移波 λ=0.5 m
+    w.num_detail_waves = 3;
+    w.detail_waves[0] = WaterWave{1.0f, 0.0f, 4.0f, 0.02f, 0.0f};
+    w.detail_waves[1] = WaterWave{0.0f, 1.0f, 6.0f, 0.02f, 1.1f};
+    w.detail_waves[2] = WaterWave{0.6f, 0.8f, 5.0f, 0.02f, 2.3f};
+
+    // footprint = 0.25 m ⇒ 主波只剩 2 px（≤3 px ⇒ 截断）；细节波 16~24 px ⇒ 全保留。
+    const float footprint = 0.25f;
+    ASSERT_EQ(jpov::water::WaveAmplitudeSum(w, 0.0f, 0.0f, /*fade=*/1.0f, footprint), 0.0f)
+        << "前提：位移波必须已经被足迹全部截断（否则测的不是这条分支）";
+
+    const Vec3f cam{0.0f, 10.0f, 0.0f};
+    const Vec3f rd_raw{0.0f, -0.35f, -1.0f};
+    const float rl = rd_raw.Norm();
+    const Vec3f rd{rd_raw.x() / rl, rd_raw.y() / rl, rd_raw.z() / rl};
+
+    WaveSurfaceHit hit;
+    ASSERT_TRUE(IntersectWaveSurface(cam, rd, 0.0f, w, 0.0f, 0.0f, 1.7f, footprint, &hit));
+
+    EXPECT_GT(std::fabs(hit.normal.x()) + std::fabs(hit.normal.z()), 1.0e-3f)
+        << "位移波被截断后法线仍是平的 ⇒ 细节波梯度被丢了（远场会变镜面 + 硬分界）";
+
+    // 必须与「同一处的梯度法线」同口径（不是另一套近似）。
+    const Vec3f p{cam.x() + rd.x() * hit.t, cam.y() + rd.y() * hit.t,
+                  cam.z() + rd.z() * hit.t};
+    WaterWaveSample s = SampleWaveField(w, p.x(), p.z(), 1.7f, 0.0f, 0.0f, /*fade=*/1.0f,
+                                        footprint);
+    jpov::water::AddDetailWaveGradients(w, p.x(), p.z(), 1.7f, 1.0f, footprint,
+                                        jpov::water::SampleWaveWarp(w, p.x(), p.z()), &s);
+    const Vec3f ref = WaveNormal(s);
+    EXPECT_NEAR(hit.normal.x(), ref.x(), 1.0e-5f);
+    EXPECT_NEAR(hit.normal.y(), ref.y(), 1.0e-5f);
+    EXPECT_NEAR(hit.normal.z(), ref.z(), 1.0e-5f);
+}
+
+// 负向对照：连细节波都亚像素（footprint 远大于波长）时，水面**必须**是平面。
+// 这条保证「修法」没有把关掉抗锯齿的事情也算进来：该平的还是平。
+TEST(WaterWaveMath, FullyTruncatedWavesAreFlat) {
+    WaterWaves w;
+    w.enabled = true;
+    w.displacement = true;
+    w.fade_start_m = 0.0f;
+    w.fade_end_m = 0.0f;
+    w.num_waves = 1;
+    w.waves[0] = WaterWave{1.0f, 0.0f, 0.5f, 0.02f, 0.0f};
+    w.num_detail_waves = 2;
+    w.detail_waves[0] = WaterWave{1.0f, 0.0f, 4.0f, 0.02f, 0.0f};
+    w.detail_waves[1] = WaterWave{0.0f, 1.0f, 6.0f, 0.02f, 1.1f};
+
+    const float footprint = 10.0f;   // 4 m ⇒ 0.4 px、6 m ⇒ 0.6 px ⇒ 全部截断
+    ASSERT_EQ(jpov::water::WaveAmplitudeSum(w, 0.0f, 0.0f, 1.0f, footprint), 0.0f);
+
+    const Vec3f cam{0.0f, 10.0f, 0.0f};
+    const Vec3f rd_raw{0.0f, -0.35f, -1.0f};
+    const float rl = rd_raw.Norm();
+    const Vec3f rd{rd_raw.x() / rl, rd_raw.y() / rl, rd_raw.z() / rl};
+
+    WaveSurfaceHit hit;
+    ASSERT_TRUE(IntersectWaveSurface(cam, rd, 0.0f, w, 0.0f, 0.0f, 1.7f, footprint, &hit));
+    EXPECT_FLOAT_EQ(hit.normal.x(), 0.0f);
+    EXPECT_FLOAT_EQ(hit.normal.y(), 1.0f);
+    EXPECT_FLOAT_EQ(hit.normal.z(), 0.0f);
+}
+
 }  // namespace

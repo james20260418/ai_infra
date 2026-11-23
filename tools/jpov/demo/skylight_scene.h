@@ -248,6 +248,17 @@ inline jpov::PBRMaterial SlabMaterial() {
                                           /*metallic*/ 0.0f, /*roughness*/ 0.9f);
 }
 
+// ── 海面选型场（场景 4）的海底底板 ──
+// 一张大平面 + 棋盘格：水体是逐通道吸收的半空间，**必须有个底**才看得出
+// 「浅海 / 深海」的差别（没有底时远处只剩介质自身的渐近色，读不出深度）。
+// albedo 是整体亮度乘子；棋盘格的两档亮度在调用侧给（1.0 / 0.74）。
+inline jpov::PBRMaterial SeabedMaterial(float albedo = 1.0f) {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.62f * albedo, 0.56f * albedo, 0.44f * albedo, 1.0f},
+        /*metallic*/ 0.0f,
+        /*roughness*/ 0.9f);
+}
+
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //
 // turbidity：大气浊度 [0, 8]，默认 2（清澈）。

@@ -1625,8 +1625,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 「地平线以下是什么」由场景的水面决定（深海渐近色，单一出处）：
             //   · 背景填充：贴地平线的射线可能落在远平面之外（水面交点不可达）⇒ 必须有个色兜底；
             // 地平线以下的填充色**不改写**：用场景给的 ground_color（陆地色）。
-            // 水场景里那条“地缝”由水皮多盖几像素解决（见 water_skin_shader.h 的地平线钳位），
             // 不用填色兜底 —— 填色会让陆地场景的色调被水污染（Danis 2026-11-17 定）。
+            // 地平线那一行的覆盖由水皮自己的求交保证（2026-11-21 删掉了"多盖 1 px"的钳位：
+            // 实测去掉后过渡连续、没有地缝，而那 1 px 本来就是把水画到了地平线以上）。
 
             // 水下时天球折射要消费水面波浪法线（Snell 窗边缘随波起伏）。
             // 相机在水上 / 没开波浪 ⇒ nullptr ⇒ 平面法线（逐字节零回归）。
@@ -1634,8 +1635,16 @@ void Renderer::Render(const RenderCommandList& cmds,
                 (cmds.water.has_value() && cmds.water->waves.enabled)
                     ? &cmds.water->waves
                     : nullptr;
+            // 水面时钟与平底深度：**单一出处**是 WaterCommand（2026-11-20 从
+            // WaterWaves 迁出）。天球折射与水皮必须用同一份，否则窗缘会错位。
+            const float water_time_s = cmds.water.has_value()
+                                           ? static_cast<float>(cmds.water->time_s)
+                                           : 0.0f;
+            const float water_depth_m = cmds.water.has_value() ? cmds.water->depth_m
+                                                               : 300.0f;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves,
+                                 water_time_s, water_depth_m);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
             // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
@@ -2022,6 +2031,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.medium = water_medium_ptr;
                 // 波浪（法线扰动/高度置换）：enabled=false 或 num_waves=0 ⇒ 纯平面（零回归）。
                 wsi.waves = cmds.water->waves.enabled ? &cmds.water->waves : nullptr;
+                wsi.wave_time_s = static_cast<float>(cmds.water->time_s);
+                wsi.wave_depth_m = cmds.water->depth_m;
                 wsi.wave_debug = cmds.water->waves.debug;
                 if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
                     const unsigned int flow_gl =

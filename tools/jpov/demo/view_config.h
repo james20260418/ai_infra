@@ -130,6 +130,61 @@ inline void ApplyInput(ViewConfig* v /*inout*/, float dx, float dy,
     v->R   = std::clamp(v->R, ViewConfig::kRMin, ViewConfig::kRMax);
 }
 
+// ── 方向键调视角（2026-11-20）──────────────────────────────────────────
+// 语义与右键拖拽完全一致：右/左 = theta ±，上/下 = phi ±（ApplyInput 里右拖 dx>0 ⇒ theta+、
+// 上拖 dy<0 ⇒ phi+）。
+//
+// 每按一次走 step_rad；按住不放每 kArrowRepeatFrames 帧再走一步（首帧立即响应）。
+// 为什么用"帧计数"而不是时钟：不引入跨帧时间状态，headless 捕获也不受影响。
+//
+// 抽成纯函数（而不是写在 viewer 的输入分支里）是为了能单测：
+// 输入是合成 InputSnapshot，输出是 view 的增量。
+inline constexpr int kArrowRepeatFrames = 6;   // ≈100 ms @60fps
+
+struct ArrowKeyState {
+    int frames[4] = {0, 0, 0, 0};   // 右 / 左 / 上 / 下 的连续按住帧数
+    void Reset() {
+        for (int& f : frames) {
+            f = 0;
+        }
+    }
+};
+
+// Pre-condition: step_rad > 0；v/st 非空。
+inline void ApplyArrowKeys(const jpov::InputSnapshot& input, double step_rad,
+                           ArrowKeyState* st, ViewConfig* v) {
+    CHECK_NOTNULL(st);
+    CHECK_NOTNULL(v);
+    const jpov::KeyCode kKeys[4] = {jpov::KeyCode::Right, jpov::KeyCode::Left,
+                                    jpov::KeyCode::Up, jpov::KeyCode::Down};
+    double dth = 0.0;
+    double dph = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const int8_t raw = input.GetKey(kKeys[i]).raw;
+        int& n = st->frames[i];
+        if (raw == 0) {          // 没按住（含刚松开）
+            n = 0;
+            continue;
+        }
+        ++n;
+        if (n != 1 && (n % kArrowRepeatFrames) != 0) {
+            continue;            // 首帧立即响应；之后按重复节奏
+        }
+        const double s = (i == 0 || i == 2) ? step_rad : -step_rad;
+        if (i < 2) {
+            dth += s;
+        } else {
+            dph += s;
+        }
+    }
+    if (dth == 0.0 && dph == 0.0) {
+        return;
+    }
+    constexpr double kPiHalf = 3.14159265358979323846 / 2.0;
+    v->theta += dth;
+    v->phi = std::clamp(v->phi + dph, -kPiHalf, kPiHalf);
+}
+
 // 中键纵向 pan：把「本帧鼠标纵向位移」（像素）映射为相机**注视点**的世界 Y 位移（米）。
 //
 // 约定（需求定稿）：鼠标纵向 pan **半个窗口高** ⇒ 注视点升降 **1m**。

@@ -36,6 +36,7 @@
 #include "tools/jpov/src/water/water_skin_shader.h"
 #include "tools/jpov/src/water/water_wave_math.h"      // WaterWaves / kWaveGravity
 #include "tools/jpov/src/water/water_wave_shader.h"    // kWaterWaveGlsl
+#include "tools/jpov/src/water/water_wave_uniforms.h"  // 波浪 uniform 上传（与天球共用）
 
 namespace jpov {
 namespace {
@@ -177,58 +178,14 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunAngularRadius"), in.sun_angular_radius);
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunFootprint"), in.sun_footprint);
 
-    UploadWaveUniforms(prog, in);
-}
-
-void WaterSkinRenderer::UploadWaveUniforms(unsigned int prog, const Inputs& in) {
-    const WaterWaves* w = in.waves;
-    const bool on = (w != nullptr) && w->enabled && w->num_waves > 0;
-    const int count = on ? std::min(w->num_waves, WaterWaves::kMaxWaves) : 0;
-    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveCount"), count);
-
-    // 波表先算好 k / ω 再上传：GPU 不重算色散（与 CPU 参考同一口径）。
-    // ⚠️ 逐个 glUniform4f/2f 上传，不用 glUniform4fv/2fv —— MinGW 的 gl_loader 只导出了
-    //    标量版本（数组版本 undefined reference，Windows 交叉编译直接链失败）。
-    //    GL 保证数组 uniform 的 location 连续 ⇒ loc+i 就是第 i 个元素。
-    const int wave_l_loc = shader_mgr_->GetUniform(prog, "uWaveL[0]");
-    const int wave_dir_loc = shader_mgr_->GetUniform(prog, "uWaveDir[0]");
-    const float k_two_pi = 6.28318530717958647692f;
-    for (int i = 0; i < count; ++i) {
-        const WaterWave& wv = w->waves[i];
-        CHECK_GT(wv.wavelength_m, 0.0f) << "WaterWave.wavelength_m 必须 > 0";
-        CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
-        const float k = k_two_pi / wv.wavelength_m;
-        const float omega = std::sqrt(water::kWaveGravity * k) * w->speed_scale;
-        glUniform4f(wave_l_loc + i, k, omega, wv.amplitude_m, wv.phase_rad);
-        const float dl = std::sqrt(wv.dir_x * wv.dir_x + wv.dir_z * wv.dir_z);
-        const bool has_dir = dl > 1.0e-6f;
-        glUniform2f(wave_dir_loc + i,
-                    has_dir ? (wv.dir_x / dl) : 1.0f,
-                    has_dir ? (wv.dir_z / dl) : 0.0f);
-    }
-
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveTime"), on ? w->time_s : 0.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFadeStart"), on ? w->fade_start_m : 0.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFadeEnd"), on ? w->fade_end_m : 0.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFlowAlign"), on ? w->flow_align : 0.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFlowWindGain"),
-                on ? w->flow_wind_gain : 0.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uWaveFlowStrength"),
-                on ? w->flow_strength : 0.0f);
-    glUniform2f(shader_mgr_->GetUniform(prog, "uWaveFlowUvScale"),
-                on ? w->flow_uv_scale : 0.0f, on ? w->flow_uv_scale : 0.0f);
-    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveDebug"), in.wave_debug);
-    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveDisplace"),
-                (on && w->displacement) ? 1 : 0);
-    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveHasFlow"),
-                (on && in.wave_flow_tex != 0u) ? 1 : 0);
-    // 短波：只进方差（不进几何）。方向与斜率 RMS 由调用方给。
-    float swx = on ? w->short_wave.dir_x : 0.0f;
-    float swz = on ? w->short_wave.dir_z : 0.0f;
-    float swwind = on ? w->short_wave.wind_speed_ms : 0.0f;
-    glUniform2f(shader_mgr_->GetUniform(prog, "uShortWaveDir"), swx, swz);
-    glUniform1f(shader_mgr_->GetUniform(prog, "uShortWaveMss"),
-                water::CoxMunkMeanSquareSlope(swwind));
+    // 波浪谱（主波 / warp / Stokes / 细节短波 / 短波）：与天球折射共用同一份上传。
+    water::WaveUniformParams wp;
+    wp.time_s = in.wave_time_s;
+    wp.depth_m = in.wave_depth_m;
+    wp.debug = in.wave_debug;
+    wp.displacement = (in.waves != nullptr) && in.waves->displacement;
+    wp.has_flow_tex = in.wave_flow_tex != 0u;
+    water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {

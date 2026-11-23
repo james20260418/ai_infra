@@ -101,14 +101,6 @@ uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU �
 
 const float kBackgroundDepth = 0.999999;
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
-// 地平线钳位角（≈ 1 px @ 720p/60°）。
-// ⚠️ 必须与 skydome/sky_renderer.h 的 kHorizonEps **完全一致**（两趟同一个判据，
-//    否则地平线那一行会差一条缝 —— 见 known_issue 的记录）。
-// 作用见 main 里「地平线钳位」那段：
-// 水面与天空的 ground 色起点都在 rd.y=0，卡在同一条线上 ⇒ 边界行露出地色（暗线）。
-// 把 ±1px 内的射线都拉到水面一侧，让水面多盖一像素，缝就没了。
-const float kHorizonEps = 0.0016; // 地平线钳位（|rd.y| 下限）⇒ 层多盖几像素，堵住地缝
-
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
     float eta = n1 / n2;
@@ -164,21 +156,6 @@ void main() {
     // 平面法线恒定，H 的变化全来自视线 ⇒ 掠射时这一项自动变大，正好抵消投影压缩。
     float footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
 
-    // ── ② 地平线附近的视线钳位（只影响求交，不改 H）──
-    // 地平线附近（|rd.y| ≈ 0）**不 discard**：把方向钳到极小的 |dy|，让这一层照样覆盖上去。
-    // 否则地平线那 1~2 像素的层缺失 ⇒ 露出天空在地平线以下填的 ground_color（“地缝”）。
-    // 地平线钳位：|rd.y| 极小时交点 t → ∞，钳到 kHorizonEps 让这一层照样覆盖上去。
-    // horizon_clamped 会在下面用来**跳过深度拒绝** —— 见那段的注释。
-    // 水面上方：把「贴近地平线、甚至略高于地平线」的射线都拉到地平线以下，
-    // 让水面**多盖一像素**。否则水面与天空的地色起点卡在同一条线上，边界行会
-    // 露出发暗的地色（ground），形成一条 1px 的"裂隙"。
-    bool horizon_clamped = false;
-    float horizon_sign = (uCamPos.y < uWaterLevelY) ? 1.0 : -1.0;
-    if (abs(rd.y) < kHorizonEps) {
-        rd = normalize(vec3(rd.x, horizon_sign * kHorizonEps, rd.z));
-        horizon_clamped = true;
-    }
-
     // ── ③ 视线 ∩ 水面（无波浪 ⇒ 平面解析解；有波浪 ⇒ Newton 修正）──
     float t = (uWaterLevelY - uCamPos.y) / rd.y;
     if (t <= 0.0) {
@@ -230,8 +207,9 @@ void main() {
     float tdl = length(td);
     td = (tdl > 1.0e-6) ? (td / tdl) : vec2(1.0, 0.0);
     float var_p = td.x * td.x * sxx + 2.0 * td.x * td.y * sxz + td.y * td.y * szz;
-    // 本 PR 只做透射率补偿：拉宽 / 拉糊两个消费者按 known_issue §10.16 暂缓，
-    // 所以 a2 与 env LOD 仍走旧的 dFdx 口径（normal_var_px），只有 F_eff 吃 var_p。
+    // 本 PR 里 var_p 的消费者只有两个：F_eff（`:242`）与探针 LOD（`:329`）。
+    // **太阳的像（`:263` 的 a2）还不吃 var_p** ⇒ 远场是「粗糙面的反射率 + 镜面精度的 lobe」，
+    // BRDF 不自洽（远海因此过度变平；修法见 known_issue §10.16 M1/M2）。
     if (!wave_ok) {
         discard;   // 求交失败 / 交点跑到相机后方
     }
@@ -241,24 +219,9 @@ void main() {
     //    view_z 抖动 ⇒ 与场景深度比较会在单像素上翻转（偶发单像素"z 不对"）。
     float view_z = t_plane * dot(rd, uCamFwd);
     float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
-    // 深度拒绝。
-    //
-    // ⚠️ `horizon_clamped` 的像素**不能直接用 view_z**：钳位后 t ≈ 数十 km，`view_z` 远超 far，
-    //    只要 scene_ndc 不是严格 1.0（浮点残差/远处的背面/后端编码差）就会**整行被剔** ⇒
-    //    露出天球地色（"深色裂隙"）。但也不能像旧版那样整条跳过 —— 那会把地平线那 1~2 行
-    //    的近处物体一起盖掉。判据改成「这一像素有没有几何」：钳位射线打到的是无穷远水面，
-    //    所以任何不透明几何都在它前面。
-    //    debug=3 仍然保留成"全局跳过"，用于对比。
+    // 深度拒绝。debug=3 = 全局跳过（对比用）。
     if (uWaveDebug == 3) {
         // 全局跳过（debug）
-    } else if (horizon_clamped) {
-        // 地平线钳位像素：水面交点在"无穷远" ⇒ **任何不透明几何都挡在它前面**。
-        // ⚠️ 旧版这里整条跳过深度测试，结果地平线那 1~2 行会把近处物体一起盖掉
-        //    （2026-11-19 报的「box 被水皮锯」：箱子上沿被水面切掉 3 行）。
-        //    正确做法：不能用 view_z（钳位后是数十 km），只看"这一像素有没有几何"。
-        if (scene_ndc < kBackgroundDepth) {
-            discard;
-        }
     } else if (scene_ndc < kBackgroundDepth) {
         float scene_z = LinearizeDepthNdc(scene_ndc, uNear, uFar);
         if (view_z > scene_z + uDepthBiasM) {
@@ -266,6 +229,9 @@ void main() {
         }
     }
 
+    float env_lod_debug = 0.0;   // 调试用（uWaveDebug=11）
+    vec3  refl_debug = vec3(0.0);   // 调试用（uWaveDebug=12）
+    float FresnelDebug = 0.0;       // 调试用（uWaveDebug=13）
     // ── ⑤ 入射角与菲涅尔（法线可为波浪扰动法线）──
     bool  under = (uCamPos.y < uWaterLevelY);
     float cos_i = abs(dot(rd, N));
@@ -347,22 +313,33 @@ void main() {
         } else {
             rdir = normalize(rdir);
         }
-        // 探针 LOD：像素内法线方差越大 ⇒ 反射越糊（specular AA / Toksvig 同口径）。
-        // 128² cube 的每面 texel 角 ≈ (π/2)/128；无波浪时 sqrt(var)=0 ⇒ LOD 0（零回归）。
-        const float kEnvTexelAngle = 1.5707963268 / 128.0;
-        // ⚠️ 上限只能到 2，不能到 7（= 1×1 mip）：水面最上面那一行的 2×2 quad 里，
-        //    上半部分是天空、fragment 被 discard、N 从未参与求值 ⇒ dFdy(N) 是垃圾值
-        //    ⇒ normal_var_px 爆掉 ⇒ LOD 冲到最大级。而探针下半球是**地色**，
-        //    1×1 mip ≈ (天空+地色)/2 ⇒ 那一行整行发暗，形成地平线"深色裂隙"。
-        //    128² 探针在 LOD2 已经是 32²，足够糊掉逐像素法线噪声。
-        float env_lod = clamp(log2(max(sqrt(normal_var_px), 1.0e-6) / kEnvTexelAngle),
-                              0.0, 1.5);
+        // ── 探针 LOD（拉糊）：把「像素足迹内**未解析**的斜率方差」折成模糊角 ──
+        // 两个来源相加（方差可加）：
+        //   · var_p          谱侧：被足迹/淡出截掉的那部分波 + 短波 MSS。它们不在几何里，
+        //                    但物理上存在 —— 反射必须按它们的斜率分布模糊，否则会走样；
+        //   · normal_var_px  屏幕侧：相邻像素法线的实际跳变（残余/边缘走样）。
+        // 镜面反射把斜率放大 2×（入射角=反射角）⇒ 需要的模糊角 ≈ 2σ；
+        // 128² 探针的 texel 角 = (π/2)/128 · 2^lod。
+        //
+        // ⚠️ 上限随反射方向仰角放开：探针**下半球是地色**，地平线附近糊大了会把地色卷进来
+        //    （整行发暗的"地平线裂隙"）。近地平线仍钳 1.5 级（≈2° 的 texel）；
+        //    仰角 >~20° 时放到 3 级（探针 16²/面 ≈ 5.6°）。
+        //    2026-11-23 报的「低风速海面硬边」就是 2~6 px 的细节波在 27° 仰角的反射里走样：
+        //    旧上限 1.5 级糊不到 3° 以上，这条边就留着（known_issue §10.16 的"拉糊"）。
+        const float kEnvTexelAngle = 1.5707963268 / 128.0;   // 常量表达式（GLSL const 限制）
+        float refl_sigma = sqrt(max(var_p, 0.0) + max(normal_var_px, 0.0));
+        float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
+        float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, rdir.y));
+        float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
+        env_lod_debug = env_lod;
         vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
         // 环境反射 + 太阳的像。
         // ⚠️ 太阳项是**加法**：探针不含日月盘（kEnvProbe），SSR 也不负责它 ——
         //    将来接 SSR 时写成 F*(A*SSR + (1-A)*sky) + sun_spec，
         //    千万别把 sun_spec 也乘上 A（那会让日盘像随 SSR 命中与否闪）。
         C = F * refl + sun_spec;
+        refl_debug = refl;
+        FresnelDebug = F;
 
         // 透射率 = (1−F)/n²（辐射度跨介质守恒）；WBO 的 α 是“背景衰减率”= 1 − T。
         alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
@@ -394,6 +371,28 @@ void main() {
     if (uWaveDebug == 6) {
         // 纯红不透明：只回答「这一像素有没有水面覆盖」。
         oAccum  = vec4(1.0, 0.0, 0.0, 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 12) {
+        // 探针反射色（未乘 F）：判断"硬边"是不是探针本身带的
+        oAccum  = vec4(refl_debug, 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 13) {
+        // 反射率 F（探针支路同口径）
+        oAccum  = vec4(vec3(FresnelDebug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 11) {
+        // 探针 LOD（调试）：0 = 原图，1 = LOD3。看"拉糊"到底有没有生效/生效在哪。
+        float v = env_lod_debug / 3.0;
+        oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;

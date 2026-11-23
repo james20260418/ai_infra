@@ -968,9 +968,6 @@ struct WaterWaves {
     // 波表。只有前 num_waves 项有效。
     WaterWave waves[kMaxWaves];
 
-    // 时间倍率：ω 乘它。1 = 真实深水色散速度；0 = 冻结。
-    float speed_scale = 1.0f;
-
     // true（默认）= 真位移（求交沿高度场）；false = **法线 only**（求交仍用平面，
     // 只把法线换成高度场的梯度）。后者物理上不一致，**只用于 debug 二分**：
     // 用来判断「噪点」是求交引起的还是法线/着色引起的。
@@ -979,9 +976,6 @@ struct WaterWaves {
     // debug：0 = 正常；1 = 把交点法线编码成颜色输出（N*0.5+0.5）。
     // 只用于定位「法线噪点」，不属于产品配置。
     int debug = 0;
-
-    // 时刻（秒）。由场景每帧推进。
-    float time_s = 0.0f;
 
     // ── 大尺度流向（flow map）──
     // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。
@@ -998,6 +992,40 @@ struct WaterWaves {
     // fade_end <= fade_start ⇒ 不淡出（恒 1）。
     float fade_start_m = 150.0f;
     float fade_end_m = 900.0f;
+
+    // ── 大尺度相位扭曲（domain warp）──
+    // 把整片波场按低频位移场 u(p) 平移：θ_i += k_i·dot(u, d_i)，u = Σ_j A_j·dir_j·sin(...)。
+    // 为什么要它：h 是**平面波之和**，每条波峰都是无限长直线，4 个平面波的干涉必然是
+    // 晶格（“周期性花纹”）。纯靠加波数只能把晶格变密，不能消掉。低频位移让波峰弯曲/
+    // 分叉/长度不一，这是**唯一**在不引入 choppy 的前提下打破平面波特性的手段。
+    // 仍然是解析、单值高度场：求交结构一行不用改，|h| ≤ ΣA 也不变。
+    // warp_amplitude_m = 0 ⇒ 关（默认，逐字节旧行为）。
+    float warp_amplitude_m = 0.0f;
+    // 低频载波（最多 4 条）：波长（米，> 0）与方向（xz，单位向量）。
+    // 4 条时波长取不可公比（37/64/112/197 m）⇒ 位移场本身接近噪声，不再是
+    // 「一个大格子掰弯小格子」（2 条载波时仍会看出单一尺度的起伏）。
+    static constexpr int kWarpCarriers = 4;
+    float warp_wavelength_m[kWarpCarriers] = {37.0f, 64.0f, 112.0f, 197.0f};
+    float warp_dir_x[kWarpCarriers] = {0.83f, -0.47f, 0.35f, -0.92f};
+    float warp_dir_z[kWarpCarriers] = {0.56f, 0.88f, 0.94f, -0.39f};
+    // 每条载波的初相（弧度）。不同场景给不同值即可错开图案。
+    float warp_phase_rad[kWarpCarriers] = {0.9f, 2.7f, 4.4f, 1.6f};
+
+    // ── 二阶 Stokes 谐波（深水，尖峰平谷）──
+    // h_i += −½·k_i·A_i²·cos(2θ_i)。真实风浪的非线性最低阶修正：峰更尖、谷更平，
+    // 且峰谷不再对称（线性叠加的偏度恒为 0）。解析、单值 ⇒ 求交结构不变；
+    // 用已有 sinθ/cosθ 的双角恒等式求值 ⇒ **0 次额外三角函数**。
+    // 代价：求交区间上界从 ΣA 变成 Σ(A + ½kA²)（陡度 0.07 时约 +3.5%）。
+    bool stokes_second_order = false;
+
+    // ── 细节短波（只进法线，不进几何）──
+    // 与 `short_wave`（只进 MSS→粗糙度）正交：这里的波**真的改法线**，
+    // 但**不参与高度/求交**（求交只走 waves[]，否则二分成本 ×N）。
+    // 用途：近场 0.3~2 m 的 chop —— 照片里的“棱角/碎光”主要来自这一档。
+    // 被像素足迹截断的部分照旧折进斜率方差（WaveFilteredVariance），不会丢能量。
+    static constexpr int kMaxDetailWaves = 64;
+    int num_detail_waves = 0;
+    WaterWave detail_waves[kMaxDetailWaves];
 
     // ── 短波（毛细波/短重力波）────────────────────────────────────────
     // 它们在任意可见距离上都被像素吞掉 ⇒ **不进几何**（不改 displacement / 法线 / 求交），
@@ -1038,6 +1066,21 @@ struct WaterCommand {
     // 水的折射率。用于菲涅尔、全内反射临界角、太阳折射方向、界面增益。
     // 物理值：1.333（20°C 纯水）。取值必须 >= 1（1.0 = 无界面/调试值：不折弯、不反射）。
     float ior = 1.333f;
+
+    // ── 每帧时钟与水体厚度（2026-11-20 从 WaterWaves 迁出）──
+    // 唯一的水面时间：水皮 / 天球折射 / （将来的）泡沫与粒子都用它。
+    // **不放在 WaterWaves 里**：谱是静态配置，时间是帧状态。混在一起就没法缓存配置，
+    // 也没法让"冻结 / 回放 / 慢动作"变成调用方的一次参数替换。
+    // 用 double：**应用侧**的时间累加/回放不丢精度（几千秒后 float 的累加步长已经接近
+    // 一个帧间隔）。但注意 GLSL 的 uniform 是 float：上传时会被截断，所以真正可见的
+    // 相位误差上限由 float 决定（3600 s 时 ulp ≈ 0.24 ms、10^5 s 时 ≈ 8 ms ⇒ 相位 ~0.02 rad）。
+    // 要在"连续跑几天"的场景里彻底避开，调用方应自己减一个 session 起点（epoch），
+    // 别指望这里给 double 就能一路精确到微秒。
+    double time_s = 0.0;
+
+    // 平底深度（米，> 0）。只影响深水色散 ω = √(g·k·tanh(k·d))（浅水变慢、变短）。
+    // 介质积分仍是 level_y 以下的半空间（known_issue §10.12）；海底几何属于场景。
+    float depth_m = 300.0f;
 
     // 水体介质（吸收/散射）。enabled = true 时合成趟会把介质积分进画面。
     WaterMedium medium;

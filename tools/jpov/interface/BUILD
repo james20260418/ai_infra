@@ -3,6 +3,19 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 # IdAllocator — 可复用/避回绕的 uint32 句柄分配器（freelist / LIFO + live 集）。
 # 作为【新增】skeleton renderer 侧 id 管理；将来修 MeshManager/TextureManager 的裸递增回绕
 # bug 时同款（见 id_allocator.h 文件头）。
+# WaterConfig — 海面「人类可读」配置（艺术层：风/涌/介质）+ BuildWater() 展开成谱。
+# 纯 CPU、GL-free、只在配置变化时算一次（见 docs/ocean_api_design.md §8）。
+cc_library(
+    name = "water_config",
+    hdrs = ["water_config.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "id_allocator",
     srcs = ["id_allocator.cc"],
