@@ -1,0 +1,34 @@
+{
+  "quilting_flagstone_best": {
+    "method": "quilting",
+    "canvas": 560,
+    "border": 96,
+    "params": {
+      "patch": 40,
+      "overlap": 12,
+      "known_weight": 8.0,
+      "hint_weight": 0.0
+    },
+    "metrics": {
+      "seam_ratio": 1.3145,
+      "detail_ratio": 0.8482,
+      "colour_shift": 14.4497
+    }
+  },
+  "criminisi_flagstone_best": {
+    "method": "criminisi",
+    "canvas": 320,
+    "border": 56,
+    "params": {
+      "patch_radius": 5,
+      "isophote_source": "current",
+      "data_epsilon": 1e-06,
+      "isophote_alpha": 1.0
+    },
+    "metrics": {
+      "seam_ratio": 1.1112,
+      "detail_ratio": 1.136,
+      "colour_shift": 9.5159
+    }
+  }
+}

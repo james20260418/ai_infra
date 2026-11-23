@@ -83,8 +83,8 @@ jobs:
             //tools/jpov/tools/vegetation_tool_v2:jpov_vegetation_v2_viewer.exe
 
   genvolume:
-    # 体积资产生成工具的 Python 单测（不参与 bazel；纯 unittest + pyopenvdb）。
-    # 工具与测试：tools/jpov/genVolume/。
+    # Python 工具的单测（不参与 bazel；纯 unittest）。
+    # 工具与测试：tools/jpov/genVolume/ 和 tools/jpov/tools/2d_inpaint/。
     runs-on: ubuntu-24.04
 
     steps:
@@ -95,3 +95,8 @@ jobs:
 
       - name: Unit tests (genVolume)
         run: python3 -m unittest discover -s tools/jpov/genVolume -p 'test_*.py' -v
+
+      # 2D inpaint：numpy + pillow，CPU-only。torch 未安装时后端等价测试自动 skip，
+      # 不会给这条 job 增加额外 runner；gold 是 numpy 后端录的，逐字节可复现。
+      - name: Unit tests (2d inpaint, CPU only)
+        run: python3 -m unittest discover -s tools/jpov/tools/2d_inpaint -p 'test_*.py' -v
