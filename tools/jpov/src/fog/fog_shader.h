@@ -24,7 +24,7 @@
 
 namespace jpov {
 
-// 全屏三角形 VS（gl_VertexID 覆盖 NDC，无 VAO/VBO；与 horizon_fog 同款）。
+// 全屏三角形 VS（gl_VertexID 覆盖 NDC，无 VAO/VBO）。
 inline constexpr const char* kFogVs = R"glsl(
 #version 330 core
 out vec2 vTexCoord;

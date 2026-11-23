@@ -2,7 +2,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 # Fog（雾火）—— 统一体积雾/火子渲染器（froxel 屏幕空间摊销 Z 轴采样）。
 #
-# 与 object3d / horizon_fog 平级、单一自包含。设计见 tools/jpov/docs/jpov_froxel_design.md。
+# 与 object3d 平级、单一自包含（烘场；合成见 fog_composite_renderer）。设计见 tools/jpov/docs/jpov_froxel_design.md。
 cc_library(
     name = "fog_renderer",
     srcs = ["fog_renderer.cc"],

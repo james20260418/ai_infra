@@ -1,10 +1,10 @@
 // JPOV FogRenderer — 雾火（体积雾 + 火）统一子渲染器（froxel 版）
 //
-// 与 object3d / horizon_fog 平级的**单一自包含**渲染器。它消费 RenderCommandList 里的
+// 与 object3d 平级的**单一自包含**渲染器。它消费 RenderCommandList 里的
 // 点状雾体（PointFog），把一切效果降维成**统一的团**（FogBody），用 **froxel 屏幕空间
 // 摊销 Z 轴采样**（设计见 tools/jpov/docs/jpov_froxel_design.md）算出体积内散射，
-// **就地**合成到调用方当前绑定的 3D HDR FBO（与 HorizonFogRenderer 同为「其它 3D 之后、
-// HDR 后处理之前」的一次全屏 pass）。
+// 产出 FogField，交给 FogCompositeRenderer 与透明层一起**就地**合成进调用方当前的
+// 3D HDR FBO（「其它 3D 之后、HDR 后处理之前」）。
 //
 // 趟（inject/reduce/scatter 跑在 froxel 纹理上；composite 跑在主 FBO）：
 //   froxel 网格：每个 Nxy 单元占 froxel 纹理上一块 sblock×sblock texel（sblock=√nz，

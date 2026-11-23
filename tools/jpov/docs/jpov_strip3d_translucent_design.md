@@ -398,7 +398,7 @@ struct TranslucentStripBatch {
 - 新增 `src/strip/strip_renderer.{h,cc}`：`Begin()` / `Draw()` / `Composite()`，
   结构对齐 `ParticleRenderer`。
 - `interface/render_command.h`：加命令结构 + `RenderCommandList::DrawTranslucentStrip3D()`。
-- `src/renderer.cc`：在体积火之后、horizon fog 之前调用。
+- `src/renderer.cc`：在体积火之后、HDR 后处理之前调用（horizon fog 已于 2026-11-23 删除）。
   **合成时必须 `glDrawBuffers(1, {COLOR_ATTACHMENT0})` 再恢复 MRT(2)** ——
   否则 MRT#1 的场景深度附件内容未定义，会出现 PR #176 那个 tile 级逐帧闪烁。
 - 旧 `Strip3DCommand`（纯色调试线）**保留不动**。

@@ -24,7 +24,6 @@
 #include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/water/water_medium_math.h"
 #include "tools/jpov/src/water/water_medium_shader.h"
-#include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
 #include "tools/common/utils.h"
@@ -613,7 +612,6 @@ Renderer::~Renderer() {
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
-    DestroySkyColorFBO();
     DestroySkyEnvCube();
     fog_renderer_.Finalize();
     fog_composite_.Finalize();
@@ -715,41 +713,6 @@ void Renderer::DestroyHDRFBO() {
     }
     fbo_hdr_w_ = 0;
     fbo_hdr_h_ = 0;
-}
-
-void Renderer::EnsureSkyColorFBO(int w, int h) {
-    if (sky_fbo_ != 0 && sky_w_ == w && sky_h_ == h) {
-        return;
-    }
-    DestroySkyColorFBO();
-    glGenTextures(1, &sky_tex_);
-    glBindTexture(GL_TEXTURE_2D, sky_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glGenFramebuffers(1, &sky_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           sky_tex_, 0);
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "Sky color FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    sky_w_ = w;
-    sky_h_ = h;
-}
-
-void Renderer::DestroySkyColorFBO() {
-    if (sky_fbo_) {
-        glDeleteFramebuffers(1, &sky_fbo_);
-        glDeleteTextures(1, &sky_tex_);
-        sky_fbo_ = 0;
-        sky_tex_ = 0;
-    }
-    sky_w_ = 0;
-    sky_h_ = 0;
 }
 
 void Renderer::EnsureSkyEnvCube(int size) {
@@ -1533,9 +1496,6 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
-        CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
-            << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
-               "tone map 之前）；否则会静默失效";
         // SMAA 在 tone map 之后、输出分辨率下工作（见 SmaaConfig），只有 HDR 路径有 tone map。
         const bool use_smaa = cmds.smaa.has_value() && cmds.smaa->enabled;
         CHECK(!use_smaa || use_hdr)
@@ -1651,7 +1611,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             glDisable(GL_CULL_FACE);
 
             // 天球折射（契约 §3）：由 Renderer 自动填 —— 有水面且相机在水面以下。
-            // 两趟（kFull / kAtmoOnly）必须用**同一份**命令，否则窗内远景雾会朝未折射天色收敛。
+            // 探针 cube 用**同一份**命令（它自己不弯，见契约 §3.3）。
             SkyCommand sky_cmd_for_draw = *cmds.sky;
             if (cmds.water.has_value() &&
                 cmds.camera.position.y() < cmds.water->level_y) {
@@ -1676,15 +1636,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                     : nullptr;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves);
-
-            // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
-            // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
-            // 会被之后画的几何 shader 写成垃圾（2026-09-30 实测 NaN）。
-            EnsureSkyColorFBO(fbo_3d_w, fbo_3d_h);
-            glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
-            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-            SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly, sky_waves);
 
             // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
             // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
@@ -1933,11 +1884,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             //      （雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
             // 只此一处判定要不要起雾；下方雾 pass 的先后顺序与它配合。
-            const bool horizon_fog_enabled =
-                cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
-            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
-            // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
-            const unsigned int sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
             // 3D FBO（单采样）本身即浮点纹理，直接作为输入（雾也叠在这张上）。
             unsigned int hdr_input_tex = color_tex_hdr_;
             unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
@@ -2035,29 +1981,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(2, mrt_bufs_s);
             }
 
-            // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
-            //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
-            //    只读 MRT#1 场景深度 + 大气色天空纹理。必须在线性 HDR 域、tone map 之前加。
-            if (horizon_fog_enabled) {
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-                // 只写颜色附件；雾不碰场景深度附件。
-                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, fog_draw_buf);
-                // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
-                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
-                                       GL_TEXTURE_2D, 0, 0);
-                HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
-                                         sky_color_tex, mvp_, cam, shader_mgr_);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
-                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
-                const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                glDrawBuffers(2, mrt_bufs);
-            }
-
             // ── 点状雾火（froxel 体积雾）+ 水体介质 —— 同一次全屏合成趟。──
-            //    与 horizon_fog 同为「其它 3D 渲染之后、HDR 后处理之前」，就地合成到 3D HDR FBO。
+            //    「其它 3D 渲染之后、HDR 后处理之前」，就地合成到 3D HDR FBO。
             //    只读 MRT#1 场景深度做 z 裁剪；不采样场景颜色。见 docs/jpov_froxel_design.md。
             //    水体介质与雾场是同一趟里的两个「场来源」：前缀 (τ, S) 直接相加。
             // ── 水皮（界面层）—— 只画进自持 WBO，**不合成**。──

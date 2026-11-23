@@ -520,23 +520,6 @@ public:
             cmds->smaa = sc;
         }
 
-        // 远景仰角雾（空气透视）：几何属性走滑条；**雾色由天光推导**
-        // （SkyCommand::ElevationFogColor() = 地平线附近天光色），使远景收敛到天边。
-        if (deg_.elev_fog_on) {
-            const jpov::Color fc = nl.sky.ElevationFogColor();
-            jpov::ElevationFogConfig ef;
-            ef.enabled = true;
-            ef.start_distance = deg_.elev_fog_start;
-            ef.full_distance = deg_.elev_fog_full;
-            ef.elev_inner_deg = deg_.elev_fog_inner_deg;
-            ef.elev_outer_deg = deg_.elev_fog_outer_deg;
-            ef.density = deg_.elev_fog_density;
-            ef.use_sky_color = deg_.elev_fog_use_sky;
-            ef.color = {fc.r * deg_.elev_fog_gain, fc.g * deg_.elev_fog_gain,
-                        fc.b * deg_.elev_fog_gain, 1.0f};
-            cmds->elevation_fog = ef;
-        }
-
         // 场景（下拉）：
         //   0 标定场：灰地面 + 三方块（低反/高光/金属）+ 桌子/橡树 + 蓝人
         //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
@@ -893,10 +876,9 @@ private:
         ui_.Checkbox("遮丑① 补洞 (1px 缝)", &ssr_filter_hole_, row(0, 14));
         ui_.Checkbox("遮丑② 离群抑制 (方差)", &ssr_filter_clamp_, row(0, 15));
 
-        // 远景仰角雾的 UI 已按 Danis 要求整段删除（2026-11-13）：
-        // 场景里 elev_fog_on 默认 false，SSR 对比时它只会干扰判断。数据/命令仍在
-        // （skylight_scene.h 的 deg_ 字段 + render_command 的 elevation_fog），需要时
-        // 由代码设置，不再暴露面板。
+        // 远景雾：整条功能已删除（2026-11-23 Danis：不值得为这点收益多一层心智负担，
+        // 尤其是还要牵涉透明物体的各类合成）。需要地平线发白时，摆一个大薄板 PointFog；
+        // 见 render_command.h 的 PointFog 头注释（注意它吃光照、占每 tile 预算）。
 
         // ── 右列 0..2：掠射淡出（2026-11-13）──
         // 放在列首：不受 SSR 总闸影响也能看见（关掉 SSR 时它不生效，但不会"找不到"）。

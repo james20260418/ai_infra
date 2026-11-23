@@ -69,7 +69,6 @@ public:
         deg_.sun_azim_deg    = kSunAzimDeg;
         deg_.moon_red        = 0.0f;
         deg_.night_blue      = 0.0f;
-        deg_.elev_fog_on     = false;
         cmds->shadow_pcf = pcf_;
         jpov_skylight::SkylightApp::OneIteration(frame_count, input, winfo, cmds);
     }
