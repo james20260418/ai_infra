@@ -138,6 +138,24 @@ float RoughFresnelAlbedo(float cos_i, float a2, float ior) {
     return mix(shifted, plain, w);
 }
 
+// ── 亚像素抖动的确定性噪声（glints）──
+// 用途：把「被足迹截断的斜率方差」当成一个**分布**，每个像素从中抽一个面片
+//（Monte-Carlo 版：均值 = 展宽后的 lobe，方差 = 真实的闪烁）。
+// 只喂太阳项；探针反射仍用平滑法线（反射是低频量，抖它只会闪成雪花）。
+float GlintHash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+// 标准正态（Box–Muller，两个独立哈希）。
+vec2 GlintGaussian2(vec2 seed) {
+    float u1 = max(GlintHash12(seed), 1.0e-6);
+    float u2 = GlintHash12(seed + vec2(37.17, 11.31));
+    float r = sqrt(-2.0 * log(u1));
+    float a = 6.283185307179586 * u2;
+    return vec2(r * cos(a), r * sin(a));
+}
+
 void main() {
     vec3 rd = normalize(uCamFwd
                         + uCamRight * (vNdc.x * uTanHalfFov * uAspect)
@@ -274,16 +292,35 @@ void main() {
             //    否则远场是「粗糙面的反射率 + 镜面精度的 lobe」—— BRDF 不自洽：
             //    F 按 6~7.5° 的粗糙面算，lobe 却是 0.13° 的太阳盘 ⇒ 远海「暗 + 平」（倒不了光）。
             //    量化见 known_issue §10.16 M1。
+            // ── M1 + M3（glints，单样本 Monte-Carlo）──
+            // 被截断的斜率方差 var_p 不再并进 a2（那会把整条光路糊成一片奶白），
+            // 而是**当成分布每像素抽一个面片**：均值 = 展宽后的 lobe（能量不变），
+            // 方差 = 真实的闪烁（碎光）。这与 Yan 2017 的 glints 同一个统计口径，
+            // 只是用「单样本 + 像素分辨率」代替位置无关采样。
+            // ⚠️ 抖动法线只用于**太阳项**；探针反射 / Fresnel 仍用平滑 N
+            //    （反射是低频量，抖它只会闪成雪花）。
+            // 控制变量法（降方差）：把总方差分成「解析带宽」与「随机残差」两半。
+            //   · kGlintSmooth = 1 ⇒ 纯解析（糊成奶白）；= 0 ⇒ 纯随机（1 spp 的散点/死像素感）。
+            //   0.75 是两者的折中：大部分能量走稳定的展宽 lobe，剩下的方差负责「闪」。
+            //   估计量仍然无偏（两部分方差之和 = var_p），只是方差不那么爆。
+            const float kGlintSmooth = 0.75;
+            vec2 seed = gl_FragCoord.xy + vec2(uWaveTime * 37.0, uWaveTime * 17.0);
+            vec2 gs = GlintGaussian2(seed) * sqrt(max((1.0 - kGlintSmooth) * var_p, 0.0));
+            vec3 Ng = normalize(N + vec3(gs.x, 0.0, gs.y));
+            float NoHg = max(dot(H, Ng), 0.0);
+            float NoVg = dot(Vw, Ng);
+            float NoLg = dot(uSunToward, Ng);
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
                            + normal_var_px
-                           + var_p,
+                           + kGlintSmooth * var_p,
                            0.25);   // 0.25 = 数值兜底（见上）
-            float D = GgxDistribution(NoH, a2);
-            float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
+            float D = GgxDistribution(NoHg, a2);
+            float G = GgxSmithG1(NoVg, a2) * GgxSmithG1(NoLg, a2);
             // 界面反射率：与探针支路同一个 F 口径（含角度平均修正）。
             float Fw = F;
-            sun_spec = uSunIrradiance * (Fw * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
+            sun_spec = uSunIrradiance *
+                       (Fw * D * G / max(4.0 * NoVg * NoLg, 1.0e-6)) * max(NoLg, 0.0);
         }
     }
     vec3 sun_debug = sun_spec;   // debug=14（M1 回归）
