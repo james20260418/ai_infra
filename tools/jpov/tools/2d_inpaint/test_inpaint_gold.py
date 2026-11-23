@@ -16,6 +16,13 @@ texture with exact ties a 1e-5 difference can pick the other, equally good
 window, so pixel equality across backends is explicitly not promised. The
 torch run is for diagnostics only.
 
+The criminisi case is greedier than that: one flipped paste reorders the rest, so
+its pixel gold is a snapshot of *this* numeric backend. Measured numpy vs torch
+float32 at 320/56: 6 % of pixels differ while all three metrics agree. Within one
+numpy version the run is byte-identical; after a numpy/BLAS upgrade, inspect the
+image and the metrics before re-recording, rather than treating a large pixel
+diff as an algorithm regression.
+
 Usage (from the tool root):
 
     python3 -m unittest test_inpaint_gold -v     # check

@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--border {args.border} must be in (0, {args.canvas // 2})")
     if args.method == "criminisi" and args.backend is not None:
         parser.error("--backend applies to quilting only; criminisi is CPU-only by design")
+    if not os.path.isfile(args.input):
+        parser.error(f"--input {args.input} is not a file")
     backend = args.backend or "numpy"
 
     texture = common.load_texture(args.input, args.canvas)
@@ -73,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
     fill, kwargs = _method_fill(args.method)
     if args.method == "quilting":
-        kwargs = dict(kwargs, backend=backend)
+        kwargs = dict(kwargs, backend=backend, border=args.border)
 
     started = time.perf_counter()
     filled = fill(texture, known, hint, **kwargs)

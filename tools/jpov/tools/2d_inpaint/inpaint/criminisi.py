@@ -1,9 +1,9 @@
 """Criminisi exemplar-based inpainting (Criminisi et al., 2004), numpy only.
 
 Fills the hole by repeatedly pasting the most "urgent" boundary patch with the
-best matching known patch. Urgency is confidence x isophote strength, which is
-what makes linear structures (stone joints, in our photo) run into the hole
-instead of being cut off at the boundary.
+best matching known-or-already-filled patch. Urgency is confidence x isophote
+strength, which is what makes linear structures (stone joints, in our photo) run
+into the hole instead of being cut off at the boundary.
 
 Everything the priority needs is recomputed from the *current* state each step,
 exactly as in the paper:

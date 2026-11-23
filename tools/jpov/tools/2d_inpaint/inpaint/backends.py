@@ -47,13 +47,16 @@ def resolve(name: str) -> str:
     "auto" means "torch only if it can actually use CUDA", because on a CPU torch
     is slower than numpy/FFT. It does not mean "torch if installed".
     """
+    if name not in AVAILABLE + ("auto",):
+        raise ValueError(f"backend {name!r} not in {AVAILABLE + ('auto',)}")
+    if name == "torch" and not torch_available():
+        raise RuntimeError("backend 'torch' was requested but torch is not installed; "
+                           "install torch or use backend 'numpy'")
     if name == "auto":
         if not torch_available():
             return "numpy"
         import torch
         return "torch" if torch.cuda.is_available() else "numpy"
-    if name not in AVAILABLE:
-        raise ValueError(f"backend {name!r} not in {AVAILABLE}")
     return name
 
 
@@ -62,8 +65,8 @@ def score_map(source: np.ndarray, target: np.ndarray, weight: np.ndarray,
     """Masked SSD between one weighted patch and every source window.
 
     Args:
-        source: (H, W, 3) float, the exemplar image.
-        target: (p, p, 3) float, the patch being matched. Values outside the
+        source: (H, W, C) float, the exemplar image.
+        target: (p, p, C) float, the patch being matched. Values outside the
             weight are ignored, so they may be anything.
         weight: (p, p) float, per-pixel weight (0 = ignore, 1 = synthesised,
             >1 = given pixel). Non-binary weights are exactly what makes the
@@ -73,6 +76,19 @@ def score_map(source: np.ndarray, target: np.ndarray, weight: np.ndarray,
     Returns:
         (H-p+1, W-p+1) float64 score per top-left corner.
     """
+    source = np.asarray(source)
+    target = np.asarray(target)
+    weight = np.asarray(weight)
+    if source.ndim != 3 or target.ndim != 3 or weight.ndim != 2:
+        raise ValueError(f"expected source (H,W,C), target (p,p,C), weight (p,p); "
+                         f"got {source.shape}, {target.shape}, {weight.shape}")
+    if target.shape[:2] != weight.shape:
+        raise ValueError(f"target {target.shape[:2]} and weight {weight.shape} disagree")
+    if source.shape[2] != target.shape[2]:
+        raise ValueError(f"channel count {source.shape[2]} != {target.shape[2]}")
+    if target.shape[0] > source.shape[0] or target.shape[1] > source.shape[1]:
+        raise ValueError(f"patch {target.shape[:2]} is larger than source {source.shape[:2]}")
+
     backend = resolve(backend)
     if backend == "numpy":
         return _score_map_numpy(source, target, weight)

@@ -78,9 +78,15 @@ def quilting_fill(texture: np.ndarray, known: np.ndarray, hint: np.ndarray,
         backend: "auto" | "numpy" | "torch", see `backends`.
     """
     height, width = known.shape
+    if height != width:
+        raise ValueError(f"queried canvas must be square, got {height}x{width}")
     stride = patch - overlap
     if stride <= 0:
         raise ValueError(f"overlap {overlap} must be smaller than patch {patch}")
+    if known_weight <= 0:
+        raise ValueError(f"known_weight {known_weight} must be positive")
+    if hint_weight < 0:
+        raise ValueError(f"hint_weight {hint_weight} must not be negative")
     if height % HINT_REDUCTION != 0 or width % HINT_REDUCTION != 0:
         raise ValueError(f"canvas {height}x{width} is not divisible by {HINT_REDUCTION}")
     if patch % HINT_REDUCTION != 0:
@@ -88,6 +94,16 @@ def quilting_fill(texture: np.ndarray, known: np.ndarray, hint: np.ndarray,
     if border < overlap:
         raise ValueError(f"border {border} must be at least overlap {overlap}, otherwise "
                          f"the first patch starts outside the canvas")
+    # `known` defines the actual hole; `border` only seeds the patch grid. If the
+    # two disagree, patches start in the wrong place and the fill silently covers
+    # the wrong region (or leaves part of the hole at its hint value). Reject the
+    # mismatch instead of trusting the caller.
+    if not (known[:border, :].all() and known[-border:, :].all()
+            and known[:, :border].all() and known[:, -border:].all()):
+        raise ValueError(f"border {border} does not match the preserved ring in known")
+    if known[border:height - border, border:width - border].any():
+        raise ValueError("known must be a four-edge ring; found preserved pixels "
+                         "inside the interior")
 
     canvas = texture.copy()
     canvas[~known] = hint[~known]
@@ -123,10 +139,6 @@ def quilting_fill(texture: np.ndarray, known: np.ndarray, hint: np.ndarray,
                 weight = weight * (1.0 + (known_weight - 1.0) * known_patch)
 
             scores = backends.score_map(texture, target, weight, backend)
-            # Same lexicographic rule as the other matcher: a legal (fully known)
-            # source window beats any illegal one, because an SSD is O(100) and
-            # this penalty is 1e6.
-            scores = scores + np.where(legal, 0.0, 1.0e6)
 
             if hint_weight > 0.0:
                 # Compare the candidate's blurred appearance with the prior at the
@@ -140,6 +152,13 @@ def quilting_fill(texture: np.ndarray, known: np.ndarray, hint: np.ndarray,
                     row_pick = _nearest_index(agreement.shape[0], scores.shape[0])
                     col_pick = _nearest_index(agreement.shape[1], scores.shape[1])
                     scores = scores + hint_weight * agreement[np.ix_(row_pick, col_pick)]
+
+            # Legality is lexicographic and must not be tradeable against the
+            # hint term: a legal (fully known) source window beats any illegal
+            # one, because an SSD is O(100) and this penalty is 1e6. Applied
+            # after the hint term, so even a huge hint_weight cannot buy an
+            # illegal window.
+            scores = scores + np.where(legal, 0.0, 1.0e6)
 
             best = int(scores.argmin())
             best_row, best_col = divmod(best, scores.shape[1])
@@ -173,4 +192,8 @@ def quilting_fill(texture: np.ndarray, known: np.ndarray, hint: np.ndarray,
 
     result = texture.copy()
     result[~known] = canvas[~known]
+    unwritten = int((~known & ~written).sum())
+    if unwritten:
+        raise RuntimeError(f"patch grid left {unwritten} hole pixels unwritten; "
+                           f"check border/patch/overlap for this canvas size")
     return result

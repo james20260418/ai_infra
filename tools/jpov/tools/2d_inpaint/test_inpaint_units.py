@@ -15,13 +15,19 @@ or, from anywhere:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
+import tempfile
 import unittest
 
 import numpy as np
+from PIL import Image
 
 from inpaint import backends, common
 from inpaint.criminisi import criminisi_fill
 from inpaint.quilting import _minimum_error_seam, quilting_fill
+from inpaint.run import main
 
 
 def _uniform_problem(canvas: int = 200, border: int = 40):
@@ -103,6 +109,19 @@ class WindowCountsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             backends.window_counts(np.zeros((4, 4), dtype=bool), 5)
 
+    def test_rejects_shape_mismatch(self):
+        source = np.zeros((20, 20, 3))
+        with self.assertRaises(ValueError):
+            backends.score_map(source, np.zeros((5, 5, 3)), np.zeros((4, 4)))
+        with self.assertRaises(ValueError):
+            backends.score_map(source, np.zeros((5, 5, 1)), np.zeros((5, 5)))
+        with self.assertRaises(ValueError):
+            backends.score_map(source, np.zeros((25, 25, 3)), np.zeros((25, 25)))
+
+    def test_rejects_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            backends.resolve("cuda")
+
 
 class QuiltingTest(unittest.TestCase):
     def test_only_known_pixels_are_copied(self):
@@ -160,6 +179,20 @@ class QuiltingTest(unittest.TestCase):
             quilting_fill(texture, known, hint, patch=32, overlap=32, border=40,
                           backend="numpy")
 
+    def test_rejects_border_mismatch(self):
+        texture, known, hint = _uniform_problem()
+        with self.assertRaises(ValueError):
+            quilting_fill(texture, known, hint, patch=32, overlap=10, border=30,
+                          backend="numpy")
+
+    def test_rejects_non_square_canvas(self):
+        texture = np.zeros((80, 120, 3), dtype=np.float32)
+        known = np.ones((80, 120), dtype=bool)
+        hint = np.zeros_like(texture)
+        with self.assertRaises(ValueError):
+            quilting_fill(texture, known, hint, patch=32, overlap=10, border=20,
+                          backend="numpy")
+
 
 class CriminisiTest(unittest.TestCase):
     def test_copies_only_known_colour_and_preserves_ring(self):
@@ -215,6 +248,21 @@ class MaskTest(unittest.TestCase):
         self.assertEqual(int(known.sum()), 64 * 64 - 48 * 48)
         self.assertFalse(bool(known.all()))  # a hole exists
         self.assertFalse(bool(known[8:56, 8:56].any()))
+
+
+class CliTest(unittest.TestCase):
+    def test_custom_canvas_and_border_reach_the_algorithm(self):
+        """The CLI must pass --border through; using the 96 default with a 40 ring
+        used to start the patch grid in the wrong place (and, before the ring
+        validation, silently fill the wrong region)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "q.png")
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["--canvas", "200", "--border", "40", "--output", output])
+            self.assertEqual(code, 0)
+            self.assertTrue(os.path.isfile(output))
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (200, 200))
 
 
 if __name__ == "__main__":
