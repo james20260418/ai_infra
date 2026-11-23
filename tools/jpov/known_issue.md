@@ -632,6 +632,13 @@ Turquin 2019（多散射补偿）、Yan et al. 2017（glints）。
 6. **透射不模糊**：粗糙界面的模糊折射没做（介质仍按平面折射算路径）。
 7. **介质仍是平面半空间**：不认岩板底/海底（§10.5），也不认波浪位移（§10.12）。
 8. **泡沫/白浪**未做（part 2）。
+10. **「只要细节波」这条路是死的**（0 条主波 + 有细节波）：`uWaveCount == 0` 会同时
+    ① 关掉 GPU 的细节波上传（`water_wave_uniforms.cc:50` 的 `on` 里带了 `num_waves > 0`）、
+    ② 跳过 `WaveSlopeTensor` 的细节循环（`water_wave_shader.h:130` 的 `if (uWaveCount > 0)`）、
+    ③ 让 CPU `IntersectWaveSurface` 提前返回平法线（`water_wave_math.h:522`）。
+    而 demo 面板注释写的是「配置给 0 条 = 只要细节波/平面」（`skylight_viewer_app.h:813`）。
+    产品路径不会出现（`BuildWater` 至少 1 条主波；风速 0 时细节幅度也是 0），
+    但这是 CPU/GPU 不同口径的隐患 —— 真要支持得改 5 处（上传 / tensor / 求交 / 水皮入口 / 数学参考）。
 9. **天空亮带厚度未核对**：Preetham + turb 2 + 太阳 2° 渲出亮带 ≈14°，真实日落约 5°。
    它直接决定「远海反射到多暗」，属于天空模型的独立话题。
 
