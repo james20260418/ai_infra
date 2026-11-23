@@ -104,6 +104,11 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
     // .w = ω：色散在 CPU 算一次（与主波同一份 DispersionOmega），GPU 不重算
     //（逐像素 ×64 次 sqrt 是不必要的；更要紧的是与 CPU 参考必须同一个 ω）。
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveCullSubpixel"), p.cull_subpixel ? 1 : 0);
+    // 谱截断窗口：min 必须 < max（否则 smoothstep 分母为 0）。
+    const float lod_min = std::max(p.lod_px_min, 1.0f);
+    const float lod_max = std::max(p.lod_px_max, lod_min + 0.5f);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveLodPxMin"), lod_min);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveLodPxMax"), lod_max);
     const int detail_count =
         on ? std::clamp(w->num_detail_waves, 0, WaterWaves::kMaxDetailWaves) : 0;
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveDetailCount"), detail_count);

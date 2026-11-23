@@ -195,6 +195,8 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     wp.displacement = (in.waves != nullptr) && in.waves->displacement;
     wp.has_flow_tex = in.wave_flow_tex != 0u;
     wp.cull_subpixel = in.cull_subpixel_normals;
+    wp.lod_px_min = in.lod_px_min;
+    wp.lod_px_max = in.lod_px_max;
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
 }
 

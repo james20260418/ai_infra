@@ -1100,6 +1100,12 @@ struct WaterCommand {
         // M1 的强度（0 = 等效关闭，1 = 全部 var_p）。给 A/B 找平衡点用：
         // 全量 var_p 会把低风速的太阳路径抹成「一层黏膜」，0.3~0.5 通常才像海。
         float lobe_var_scale = 1.0f;
+        // 谱截断窗口（像素）。**这是「远处波纹消失得多快」的主旋钮**：
+        //   · lod_px_min：一个波长占几像素就彻底消失。3 px 是逐像素采样的安全线；
+        //     降到 2.5 / 2.0 ⇒ 波能活得更远，但 2~3 px 会出现走样（闪烁/摩尔纹）。
+        //   · lod_px_max：从哪一像素数开始淡出（越大淡出越缓，过渡越不像「切断」）。
+        float lod_px_min = 3.0f;
+        float lod_px_max = 8.0f;
         // 单次散射的多散射能量补偿（Kulla–Conty / Turquin）。
         // false ⇒ 粗糙面整体偏暗（Smith 遮蔽吃掉的那部分不补）。
         bool multiscatter = true;

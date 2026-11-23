@@ -52,9 +52,12 @@ const int kWaveBisectIters = 12;
 // 抗锯齿：一个波长占的像素数 ≤ kMin 就消失、≥ kMax 就全幅（当前 3 / 8）。
 // 2 px 是 Nyquist 的理论极限，但逐像素中心采样 + 双线性插值实际需要 ≥ 4 px 才不走样
 //（2026-11-23「低风速海面硬边」= 2~4 px 的细节波在反射里走样）。
-// ⚠️ 与 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax 同值（GPU 对拍测试兜底）。
-const float kWaveLodPxMin = 3.0;
-const float kWaveLodPxMax = 8.0;
+// ⚠️ 默认值来自 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax（GPU 对拍测试兜底）。
+// 谱截断窗口（**运行时 uniform**，默认 3 / 8 px）。由 CPU 的
+// water::kWaveLodPxMin / kWaveLodPxMax 作为默认值上传（A/B 找平衡点用：
+// min 越小 ⇒ 波死得越远、但越容易走样；max 越大 ⇒ 淡出越缓）。
+uniform float uWaveLodPxMin;
+uniform float uWaveLodPxMax;
 // warp 限带：每条波的 warp 相位/梯度乘 min(1, kWarpSlopeLimit/(k·U))。
 // 与 CPU 的 water::kWarpSlopeLimit 同值（有测试锁一致性）。
 const float kWarpSlopeLimit = 0.25;
@@ -138,10 +141,10 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
             float lod_amp = 1.0;
             if (footprint > 1.0e-6) {
                 float wavelength_px = (6.283185307179586 / k) / footprint;
-                if (wavelength_px <= kWaveLodPxMin) {
+                if (wavelength_px <= uWaveLodPxMin) {
                     lod_amp = 0.0;
-                } else if (wavelength_px < kWaveLodPxMax) {
-                    float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                } else if (wavelength_px < uWaveLodPxMax) {
+                    float u = (wavelength_px - uWaveLodPxMin) / (uWaveLodPxMax - uWaveLodPxMin);
                     lod_amp = u * u * (3.0 - 2.0 * u);
                 }
             }
@@ -163,10 +166,10 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
             float lod_amp = 1.0;
             if (footprint > 1.0e-6) {
                 float wavelength_px = (6.283185307179586 / k) / footprint;
-                if (wavelength_px <= kWaveLodPxMin) {
+                if (wavelength_px <= uWaveLodPxMin) {
                     lod_amp = 0.0;
-                } else if (wavelength_px < kWaveLodPxMax) {
-                    float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+                } else if (wavelength_px < uWaveLodPxMax) {
+                    float uu = (wavelength_px - uWaveLodPxMin) / (uWaveLodPxMax - uWaveLodPxMin);
                     lod_amp = uu * uu * (3.0 - 2.0 * uu);
                 }
             }
@@ -246,10 +249,10 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, bool need_grad,
         float lod_amp = 1.0;
         if (footprint > 1.0e-6) {
             float wavelength_px = (6.283185307179586 / k) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= uWaveLodPxMin) {
                 lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+            } else if (wavelength_px < uWaveLodPxMax) {
+                float u = (wavelength_px - uWaveLodPxMin) / (uWaveLodPxMax - uWaveLodPxMin);
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
@@ -298,10 +301,10 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
         float lod_amp = 1.0;
         if (footprint > 1.0e-6) {
             float wavelength_px = (6.283185307179586 / k) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= uWaveLodPxMin) {
                 lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+            } else if (wavelength_px < uWaveLodPxMax) {
+                float uu = (wavelength_px - uWaveLodPxMin) / (uWaveLodPxMax - uWaveLodPxMin);
                 lod_amp = uu * uu * (3.0 - 2.0 * uu);
             }
         }
@@ -371,10 +374,10 @@ float WaveAmplitudeSum(float fade, float footprint) {
         float lod_amp = 1.0;
         if (footprint > 1.0e-6) {
             float wavelength_px = (6.283185307179586 / uWaveL[i].x) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= uWaveLodPxMin) {
                 lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+            } else if (wavelength_px < uWaveLodPxMax) {
+                float u = (wavelength_px - uWaveLodPxMin) / (uWaveLodPxMax - uWaveLodPxMin);
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
@@ -412,7 +415,7 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     float amp_sum = WaveAmplitudeSum(WaveFadeFactor(length(p_plane.xz - cam.xz)), footprint);
     // 位移波被足迹**全部**截断（浪被抗锯齿杀光）⇒ 曲面就是平面，没有高度修正。
     // 但法线仍必须由还解析得出来的细节波给：旧版在这里直接 return 平法线 (0,1,0)，
-    // 等于把远场做成完美镜面，且断点随 kWaveLodPxMin 平移（2 px→80 m、3 px→63 m，
+    // 等于把远场做成完美镜面，且断点随 uWaveLodPxMin 平移（2 px→80 m、3 px→63 m，
     // report_cam_75m 实测）——这就是 2026-11-23 报障的「波在固定距离硬消失」。
     // 与 CPU 的 IntersectWaveSurface 同口径。
     if (!(amp_sum > 0.0)) {

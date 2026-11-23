@@ -30,6 +30,10 @@ struct WaveUniformParams {
     bool has_flow_tex = false;            // 只有水皮会绑 flow map
     // 亚像素细节波的法线是否按足迹截断（默认 true；false 只用于 A/B 对照）。
     bool cull_subpixel = true;
+    // 谱截断窗口（px）。默认值 = CPU 的 kWaveLodPxMin / kWaveLodPxMax（3 / 8）。
+    // min 越小 ⇒ 波死得越远（远处波纹保留更多），但越容易走样；max 越大 ⇒ 淡出越缓。
+    float lod_px_min = 3.0f;
+    float lod_px_max = 8.0f;
 };
 
 // waves == nullptr ⇒ 全部按"关"上传（uWaveCount = 0）。

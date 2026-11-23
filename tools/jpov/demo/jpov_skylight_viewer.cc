@@ -853,7 +853,8 @@ int RunCaptureBoxCut(const std::string& out_dir) {
 // 回到平面。水体介质在这组里不参与波浪（契约 §11.5），所以水下吸收仍是平面口径。
 int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
                          bool ab_multiscatter = true, bool ab_cull_normals = true,
-                         float ab_lobe_var_scale = 1.0f) {
+                         float ab_lobe_var_scale = 1.0f, float lod_px_min = 3.0f,
+                         float lod_px_max = 8.0f) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 水面波浪（法线扰动/高度置换）（headless）";
     cfg.width  = jpov_skylight::kViewerWidth;
@@ -870,6 +871,7 @@ int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
     app.Init();
     app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
     app.SetWaterAbLobeVarScale(ab_lobe_var_scale);
+    app.SetWaterLodWindow(lod_px_min, lod_px_max);
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
@@ -1116,7 +1118,8 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 // 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
 int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s,
                        int water_debug, bool ab_lobe_var_p, bool ab_multiscatter,
-                       bool ab_cull_normals) {
+                       bool ab_cull_normals, float ab_lobe_var_scale = 1.0f,
+                       float lod_px_min = 3.0f, float lod_px_max = 8.0f) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -2208,6 +2211,8 @@ int main(int argc, char** argv) {
     bool ab_multiscatter = true;
     bool ab_cull_normals = true;
     float ab_lobe_var_scale = 1.0f;   // M1 强度（--lobe-var-scale，A/B 找平衡点）
+    float lod_px_min = 3.0f;          // 谱截断 min（--lod-px-min：小=波活更远）
+    float lod_px_max = 8.0f;          // 谱截断 max（--lod-px-max：大=淡出更缓）
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2272,6 +2277,10 @@ int main(int argc, char** argv) {
             ab_cull_normals = false;
         } else if (std::strcmp(argv[i], "--lobe-var-scale") == 0 && i + 1 < argc) {
             ab_lobe_var_scale = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--lod-px-min") == 0 && i + 1 < argc) {
+            lod_px_min = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--lod-px-max") == 0 && i + 1 < argc) {
+            lod_px_max = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2282,12 +2291,14 @@ int main(int argc, char** argv) {
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
                                   water_debug, ab_lobe_var_p, ab_multiscatter,
-                                  ab_cull_normals);
+                                  ab_cull_normals, ab_lobe_var_scale, lod_px_min,
+                                  lod_px_max);
     }
     if (!ocean_lab_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
                                   water_debug, ab_lobe_var_p, ab_multiscatter,
-                                  ab_cull_normals);
+                                  ab_cull_normals, ab_lobe_var_scale, lod_px_min,
+                                  lod_px_max);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2303,7 +2314,8 @@ int main(int argc, char** argv) {
     }
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir, ab_lobe_var_p, ab_multiscatter,
-                                    ab_cull_normals, ab_lobe_var_scale);
+                                    ab_cull_normals, ab_lobe_var_scale, lod_px_min,
+                                    lod_px_max);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);

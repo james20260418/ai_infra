@@ -229,7 +229,9 @@ inline SlopeVariance ShortWaveVariance(const WaterWaves& waves) {
 }
 
 inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_footprint_m,
-                                          float fade, bool cull_subpixel = true) {
+                                          float fade, bool cull_subpixel = true,
+                                          float lod_px_min = kWaveLodPxMin,
+                                          float lod_px_max = kWaveLodPxMax) {
     SlopeVariance v;
     if (!waves.enabled) {
         return v;   // 波浪整个关掉 = 镜面水：短波也不参与（与 GLSL 同口径）
@@ -250,11 +252,10 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
             // ⚠️ 必须用 wv（主波或细节波自己）；旧版写死 waves.waves[i]，
             //    i ≥ num_waves 时既用错波长又越过 waves[8] 读 detail_waves 的内存。
             const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= lod_px_min) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
-                                       (kWaveLodPxMax - kWaveLodPxMin));
+            } else if (wavelength_px < lod_px_max) {
+                lod_amp = SmoothStep01((wavelength_px - lod_px_min) / (lod_px_max - lod_px_min));
             }
         }
         if (!cull_subpixel) {
@@ -287,7 +288,9 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
                                    float fade, float pixel_footprint_m,
                                    const WaveWarpSample& warp, WaterWaveSample* out,
                                    float depth_m = kDeepWaterDepthM,
-                                   bool cull_subpixel = true) {
+                                   bool cull_subpixel = true,
+                                   float lod_px_min = kWaveLodPxMin,
+                                   float lod_px_max = kWaveLodPxMax) {
     if (out == nullptr || !waves.enabled || fade <= 0.0f) {
         return;
     }
@@ -311,11 +314,10 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= lod_px_min) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
-                                       (kWaveLodPxMax - kWaveLodPxMin));
+            } else if (wavelength_px < lod_px_max) {
+                lod_amp = SmoothStep01((wavelength_px - lod_px_min) / (lod_px_max - lod_px_min));
             }
         }
         if (!cull_subpixel) {
@@ -352,7 +354,9 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
                                        float time_s, float flow_x, float flow_z,
                                        float fade, float pixel_footprint_m = 0.0f,
                                        float depth_m = kDeepWaterDepthM,
-                                       bool need_grad = true) {
+                                       bool need_grad = true,
+                                       float lod_px_min = kWaveLodPxMin,
+                                       float lod_px_max = kWaveLodPxMax) {
     WaterWaveSample out;
     if (!waves.enabled || waves.num_waves <= 0 || fade <= 0.0f) {
         return out;
@@ -403,11 +407,10 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = w.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= lod_px_min) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
-                                       (kWaveLodPxMax - kWaveLodPxMin));
+            } else if (wavelength_px < lod_px_max) {
+                lod_amp = SmoothStep01((wavelength_px - lod_px_min) / (lod_px_max - lod_px_min));
             }
         }
         const float amp = w.amplitude_m * amp_gain * fade * lod_amp;
@@ -448,7 +451,9 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
 // 有效振幅上界 ΣA·fade·lod_amp —— 必须与 GLSL 的 WaveAmplitudeSum(fade, footprint) 同口径，
 // 否则二分区间在 GPU/CPU 之间不一致（成片差异只在掠射区露出来）。
 inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_z,
-                              float fade, float pixel_footprint_m = 0.0f) {
+                              float fade, float pixel_footprint_m = 0.0f,
+                              float lod_px_min = kWaveLodPxMin,
+                              float lod_px_max = kWaveLodPxMax) {
     if (!waves.enabled || waves.num_waves <= 0 || fade <= 0.0f) {
         return 0.0f;
     }
@@ -461,11 +466,10 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= kWaveLodPxMin) {
+            if (wavelength_px <= lod_px_min) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
-                                       (kWaveLodPxMax - kWaveLodPxMin));
+            } else if (wavelength_px < lod_px_max) {
+                lod_amp = SmoothStep01((wavelength_px - lod_px_min) / (lod_px_max - lod_px_min));
             }
         }
         const float a = waves.waves[i].amplitude_m * lod_amp;
@@ -513,7 +517,9 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
                                  float time_s, float pixel_footprint_m,
                                  WaveSurfaceHit* out /*output*/,
                                  float depth_m = kDeepWaterDepthM,
-                                 bool cull_subpixel = true) {
+                                 bool cull_subpixel = true,
+                                 float lod_px_min = kWaveLodPxMin,
+                                 float lod_px_max = kWaveLodPxMax) {
     if (out == nullptr) {
         return false;
     }
@@ -547,7 +553,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     const float dxp = p_plane.x() - cam_pos.x();
     const float dzp = p_plane.z() - cam_pos.z();
     const float fade_bound = WaveFadeFactor(waves, std::sqrt(dxp * dxp + dzp * dzp));
-    float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound, pixel_footprint_m);
+    float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound, pixel_footprint_m,
+                                     lod_px_min, lod_px_max);
 
     const auto height_at = [&](float tt) {
         const Vec3f p{cam_pos.x() + rd.x() * tt,
@@ -579,7 +586,7 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
                             pixel_footprint_m, depth_m);
         AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
                                SampleWaveWarp(waves, p.x(), p.z()), &s, depth_m,
-                               cull_subpixel);
+                               cull_subpixel, lod_px_min, lod_px_max);
         return s;
     };
     // 唯一的收尾：不管 t 是二分出来的、还是回退到平面解，法线都按同一个口径求。
@@ -613,7 +620,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
         const float dzp = rd.z() * t_probe;
         const float fade_probe = WaveFadeFactor(waves, std::sqrt(dxp * dxp + dzp * dzp));
         amp_sum = std::max(amp_sum, WaveAmplitudeSum(waves, flow_x, flow_z, fade_probe,
-                                                     pixel_footprint_m));
+                                                     pixel_footprint_m, lod_px_min,
+                                                     lod_px_max));
         span = amp_sum / rdy;
     }
     float t_lo = t_plane - span;

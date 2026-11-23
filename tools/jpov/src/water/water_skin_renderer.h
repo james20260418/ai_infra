@@ -60,6 +60,8 @@ public:
         // 着色 A/B（默认全 true = 正确算法，见 WaterCommand::ShadingAb）。
         bool lobe_var_p = true;
         float lobe_var_scale = 1.0f;
+        float lod_px_min = 3.0f;
+        float lod_px_max = 8.0f;
         bool multiscatter = true;
         bool cull_subpixel_normals = true;
 

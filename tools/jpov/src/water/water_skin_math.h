@@ -135,7 +135,9 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
                                float depth_m = 300.0f,
                                bool cull_subpixel_normals = true,
                                bool multiscatter = true,
-                               float lobe_var_scale = 1.0f) {
+                               float lobe_var_scale = 1.0f,
+                               float lod_px_min = kWaveLodPxMin,
+                               float lod_px_max = kWaveLodPxMax) {
     if (out == nullptr) {
         return false;
     }
@@ -154,7 +156,8 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         }
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
-                                  time_s, footprint, &wh, depth_m, cull_subpixel_normals)) {
+                                  time_s, footprint, &wh, depth_m, cull_subpixel_normals,
+                                  lod_px_min, lod_px_max)) {
             return false;
         }
         t = wh.t;
@@ -202,7 +205,7 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
             const float hdist = std::sqrt(dx * dx + dz * dz);
             const SlopeVariance v =
                 WaveFilteredVariance(*waves, footprint, WaveFadeFactor(*waves, hdist),
-                                     cull_subpixel_normals);
+                                     cull_subpixel_normals, lod_px_min, lod_px_max);
             const float rl = std::sqrt(ray_dir.x() * ray_dir.x() + ray_dir.z() * ray_dir.z());
             const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
             const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;

@@ -288,12 +288,19 @@ public:
     bool water_ab_multiscatter_ = true;    // M2：多散射补偿
     bool water_ab_cull_normals_ = true;    // true = 亚像素法线按足迹截断（关 = 法线永不杀）
     float water_ab_lobe_var_scale_ = 1.0f;  // M1 强度 [0,1]（A/B 找平衡点）
+    // 谱截断窗口（px）：「远处波纹消失多快」的主旋钮。
+    float water_lod_px_min_ = 3.0f;
+    float water_lod_px_max_ = 8.0f;
     void SetWaterAbShading(bool lobe_var_p, bool multiscatter, bool cull_normals) {
         water_ab_lobe_var_p_ = lobe_var_p;
         water_ab_multiscatter_ = multiscatter;
         water_ab_cull_normals_ = cull_normals;
     }
     void SetWaterAbLobeVarScale(float s) { water_ab_lobe_var_scale_ = s; }
+    void SetWaterLodWindow(float px_min, float px_max) {
+        water_lod_px_min_ = px_min;
+        water_lod_px_max_ = px_max;
+    }
 
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
@@ -787,6 +794,8 @@ public:
             }
             w.shading.lobe_var_p = water_ab_lobe_var_p_;
             w.shading.lobe_var_scale = water_ab_lobe_var_scale_;
+            w.shading.lod_px_min = water_lod_px_min_;
+            w.shading.lod_px_max = water_lod_px_max_;
             w.shading.multiscatter = water_ab_multiscatter_;
             w.shading.cull_subpixel_normals = water_ab_cull_normals_;
             w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
@@ -1036,6 +1045,12 @@ private:
                                 row(0, 14), 0.0f, 1.0f, 2);
                 ui_.Checkbox("A/B · 亚像素法线按足迹截断（关 = 永不杀）",
                              &water_ab_cull_normals_, row(1, 13));
+                // 「远处波纹消失太快」的主旋钮：min 越小波活得越远（会走样）；
+                // max 越大淡出越缓（过渡不像「切断」）。
+                ui_.SliderFloat("谱截断 min (px，小=活更远)", &water_lod_px_min_, row(0, 15),
+                                1.5f, 6.0f, 2);
+                ui_.SliderFloat("谱截断 max (px，大=淡出更缓)", &water_lod_px_max_, row(1, 15),
+                                4.0f, 32.0f, 1);
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
