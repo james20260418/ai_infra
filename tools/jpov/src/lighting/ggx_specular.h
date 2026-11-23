@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 #include "tools/jpov/interface/camera.h"   // Vec3f
 
@@ -76,6 +78,88 @@ inline float GgxFootprintA2(float dhdx_x, float dhdx_y, float dhdx_z,
     const float a = dhdx_x * dhdx_x + dhdx_y * dhdx_y + dhdx_z * dhdx_z;
     const float b = dhdy_x * dhdy_x + dhdy_y * dhdy_y + dhdy_z * dhdy_z;
     return 0.25f * (a + b);
+}
+
+// ── 单次散射方向反照率 E_ss(μ, α)（GGX + Smith，F = 1）──
+//
+// 定义：E_ss(μo) = ∫ f_ss(ωo,ωi)·(ωi·n) dωi，f_ss = D·G/(4 μo μi)，F ≡ 1。
+// 物理含义：**这个 lobe 到底把多少入射能量反射出去了**。粗糙面上 Smith 遮蔽吃掉的那部分
+// (1 − E_ss) 在单次散射模型里永远回不来 ⇒ 远场粗糙水面「变暗」。
+//
+// 用途：多散射补偿（Turquin 2019 / Kulla–Conty）：
+//   ms = 1 + F_avg·(1 − E_ss)/E_ss ，乘到镜面项上（与反射率 F 同一处，见 water_skin_shader.h）。
+//
+// 表：16（μ，log 0.02→1）× 16（α，log 0.01→1）。按 NDF 重要性采样离线算，
+//   3 组 seed × 20 万样本平均（抖动量级 < 0.3%）。α=1、μ=1 时 0.307，与文献
+//   （Kulla–Conty：α=1 的 E≈0.31）一致。
+// ⚠️ GLSL 端的同一张表由 `GgxAlbedoGlsl()` **从这里格式化生成**（不是手抄）⇒ 不可能漂。
+inline constexpr int kGgxAlbedoN = 16;
+inline constexpr float kGgxAlbedoMuMin = 0.02f;
+inline constexpr float kGgxAlbedoMuRatio = 50.0f;    // μmax/μmin
+inline constexpr float kGgxAlbedoAlphaMin = 0.01f;
+inline constexpr float kGgxAlbedoAlphaRatio = 100.0f;  // αmax/αmin
+inline constexpr float kGgxAlbedoTable[kGgxAlbedoN * kGgxAlbedoN] = {
+    
+    0.90966f, 0.88970f, 0.88001f, 0.88013f, 0.88627f, 0.89420f, 0.90118f, 0.90566f, 0.90677f, 0.90346f, 0.89394f, 0.87497f, 0.84172f, 0.78813f, 0.70852f, 0.60133f,
+    0.93106f, 0.90612f, 0.88747f, 0.87929f, 0.88036f, 0.88670f, 0.89400f, 0.89956f, 0.90194f, 0.89975f, 0.89092f, 0.87233f, 0.83922f, 0.78545f, 0.70550f, 0.59788f,
+    0.95191f, 0.92716f, 0.90267f, 0.88531f, 0.87852f, 0.88037f, 0.88630f, 0.89242f, 0.89606f, 0.89502f, 0.88700f, 0.86897f, 0.83600f, 0.78203f, 0.70164f, 0.59346f,
+    0.96889f, 0.94839f, 0.92318f, 0.89919f, 0.88325f, 0.87751f, 0.87948f, 0.88476f, 0.88912f, 0.88905f, 0.88207f, 0.86468f, 0.83188f, 0.77771f, 0.69671f, 0.58781f,
+    0.98082f, 0.96620f, 0.94463f, 0.91910f, 0.89578f, 0.88077f, 0.87572f, 0.87783f, 0.88132f, 0.88196f, 0.87598f, 0.85922f, 0.82673f, 0.77222f, 0.69044f, 0.58060f,
+    0.98854f, 0.97897f, 0.96326f, 0.94078f, 0.91478f, 0.89172f, 0.87802f, 0.87333f, 0.87384f, 0.87408f, 0.86853f, 0.85256f, 0.82025f, 0.76529f, 0.68250f, 0.57148f,
+    0.99325f, 0.98735f, 0.97702f, 0.96007f, 0.93632f, 0.91011f, 0.88779f, 0.87408f, 0.86867f, 0.86604f, 0.86018f, 0.84454f, 0.81226f, 0.75661f, 0.67251f, 0.56005f,
+    0.99607f, 0.99255f, 0.98603f, 0.97468f, 0.95643f, 0.93184f, 0.90485f, 0.88247f, 0.86809f, 0.85982f, 0.85168f, 0.83532f, 0.80254f, 0.74585f, 0.66013f, 0.54586f,
+    0.99770f, 0.99563f, 0.99171f, 0.98443f, 0.97214f, 0.95244f, 0.92633f, 0.89846f, 0.87470f, 0.85809f, 0.84446f, 0.82543f, 0.79111f, 0.73285f, 0.64501f, 0.52853f,
+    0.99864f, 0.99743f, 0.99502f, 0.99072f, 0.98272f, 0.96896f, 0.94765f, 0.91940f, 0.88956f, 0.86323f, 0.84098f, 0.81615f, 0.77850f, 0.71765f, 0.62692f, 0.50754f,
+    0.99914f, 0.99841f, 0.99707f, 0.99443f, 0.98946f, 0.98055f, 0.96510f, 0.94124f, 0.91025f, 0.87661f, 0.84387f, 0.80988f, 0.76598f, 0.70056f, 0.60561f, 0.48277f,
+    0.99942f, 0.99901f, 0.99824f, 0.99663f, 0.99361f, 0.98792f, 0.97758f, 0.95987f, 0.93264f, 0.89666f, 0.85498f, 0.80968f, 0.75560f, 0.68242f, 0.58142f, 0.45407f,
+    0.99962f, 0.99936f, 0.99884f, 0.99792f, 0.99605f, 0.99242f, 0.98579f, 0.97353f, 0.95252f, 0.91929f, 0.87394f, 0.81783f, 0.75033f, 0.66514f, 0.55485f, 0.42168f,
+    0.99975f, 0.99955f, 0.99922f, 0.99862f, 0.99744f, 0.99518f, 0.99084f, 0.98265f, 0.96733f, 0.94039f, 0.89704f, 0.83487f, 0.75328f, 0.65133f, 0.52718f, 0.38591f,
+    0.99981f, 0.99970f, 0.99945f, 0.99900f, 0.99828f, 0.99681f, 0.99394f, 0.98825f, 0.97736f, 0.95683f, 0.91981f, 0.85813f, 0.76623f, 0.64464f, 0.49997f, 0.34740f,
+    0.99989f, 0.99980f, 0.99962f, 0.99932f, 0.99880f, 0.99773f, 0.99568f, 0.99170f, 0.98379f, 0.96831f, 0.93848f, 0.88318f, 0.78866f, 0.64794f, 0.47522f, 0.30696f};
+
+// 节点坐标 → [0, N−1] 的连续下标（log 间距；越界钳到端点）。
+inline float GgxAlbedoCoordLog(float v, float vmin, float vmax_ratio) {
+    if (!(v > 0.0f)) {
+        return 0.0f;
+    }
+    const float t = std::log(v / vmin) / std::log(vmax_ratio);   // [0,1]
+    return std::clamp(t, 0.0f, 1.0f) * static_cast<float>(kGgxAlbedoN - 1);
+}
+
+// E_ss 查表（双线性）。Pre-condition: no_v > 0；a2 ≥ 0（a2 = 0 ⇒ 完美镜面 ⇒ 返回 1）。
+inline float GgxDirectionalAlbedoSS(float no_v, float a2) {
+    if (!(a2 > 0.0f)) {
+        return 1.0f;   // δ 镜面：没有遮蔽损失
+    }
+    const float alpha = std::sqrt(a2);
+    const float fx = GgxAlbedoCoordLog(std::max(no_v, kGgxAlbedoMuMin), kGgxAlbedoMuMin,
+                                       kGgxAlbedoMuRatio);
+    const float fy = GgxAlbedoCoordLog(std::max(alpha, kGgxAlbedoAlphaMin),
+                                       kGgxAlbedoAlphaMin, kGgxAlbedoAlphaRatio);
+    const int x0 = std::min(static_cast<int>(fx), kGgxAlbedoN - 2);
+    const int y0 = std::min(static_cast<int>(fy), kGgxAlbedoN - 2);
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+    const auto at = [&](int x, int y) {
+        return kGgxAlbedoTable[x * kGgxAlbedoN + y];
+    };
+    const float e00 = at(x0, y0);
+    const float e01 = at(x0, y0 + 1);
+    const float e10 = at(x0 + 1, y0);
+    const float e11 = at(x0 + 1, y0 + 1);
+    const float e0 = e00 + (e01 - e00) * ty;
+    const float e1 = e10 + (e11 - e10) * ty;
+    return std::clamp(e0 + (e1 - e0) * tx, 0.0f, 1.0f);
+}
+
+// 多散射补偿系数：`f_total = f_ss · ms`（Kulla–Conty / Turquin 的常用简化）。
+//   f_avg = 界面的半球平均反射率（见 water_optics.h::FresnelAvgDielectric）。
+// 护栏：E_ss 极小时（alpha→1、grazing）比值可以很大，钳到 4 以内 —— 这不是物理上限，
+// 是**单次散射模型已经失效**的区域不该被补偿公式放大成过曝。
+inline float GgxMultiscatterScale(float no_v, float a2, float f_avg) {
+    const float e = std::max(GgxDirectionalAlbedoSS(no_v, a2), 1.0e-2f);
+    const float ms = 1.0f + std::max(f_avg, 0.0f) * (1.0f - e) / e;
+    return std::min(ms, 4.0f);
 }
 
 // 平行光（视作角半径 θ 的盘）在**平面/光滑表面**上的镜面出射辐射度。
@@ -165,6 +249,72 @@ float GgxDiskBandwidthA2(float angularRadius) {
     return h * h;
 }
 )glsl";
+
+// E_ss 表 + 查表（多散射补偿 M2）。表内容由 C++ 的 kGgxAlbedoTable **格式化生成**，
+// 保证 CPU/GPU 是同一张表（改表只改上面那一处，这里不手抄）。
+inline std::string GgxAlbedoGlsl() {
+    std::string s = R"glsl(
+const int kAlbedoN = 16;
+const float kAlbedoMuMin = 0.02;
+const float kAlbedoMuRatio = 50.0;
+const float kAlbedoAlphaMin = 0.01;
+const float kAlbedoAlphaRatio = 100.0;
+const float kAlbedoTable[256] = float[256](
+    GLSL_TABLE
+);
+float GgxAlbedoCoordLog(float v, float vmin, float vmaxRatio) {
+    if (!(v > 0.0)) {
+        return 0.0;
+    }
+    float t = log(v / vmin) / log(vmaxRatio);
+    return clamp(t, 0.0, 1.0) * float(kAlbedoN - 1);
+}
+// 单次散射方向反照率 E_ss(NoV, a2)：与 CPU 的 GgxDirectionalAlbedoSS 同口径（双线性查表）。
+float GgxAlbedoSS(float NoV, float a2) {
+    if (!(a2 > 0.0)) {
+        return 1.0;
+    }
+    float alpha = sqrt(a2);
+    float fx = GgxAlbedoCoordLog(max(NoV, kAlbedoMuMin), kAlbedoMuMin, kAlbedoMuRatio);
+    float fy = GgxAlbedoCoordLog(max(alpha, kAlbedoAlphaMin), kAlbedoAlphaMin,
+                                 kAlbedoAlphaRatio);
+    int x0 = min(int(fx), kAlbedoN - 2);
+    int y0 = min(int(fy), kAlbedoN - 2);
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+    float e00 = kAlbedoTable[x0 * kAlbedoN + y0];
+    float e01 = kAlbedoTable[x0 * kAlbedoN + y0 + 1];
+    float e10 = kAlbedoTable[(x0 + 1) * kAlbedoN + y0];
+    float e11 = kAlbedoTable[(x0 + 1) * kAlbedoN + y0 + 1];
+    float e0 = e00 + (e01 - e00) * ty;
+    float e1 = e10 + (e11 - e10) * ty;
+    return clamp(e0 + (e1 - e0) * tx, 0.0, 1.0);
+}
+// 多散射补偿：f_total = f_ss · ms（Kulla–Conty / Turquin 简化式），上限 4。
+float GgxMultiscatterScale(float NoV, float a2, float fAvg) {
+    float e = max(GgxAlbedoSS(NoV, a2), 1e-2);
+    float ms = 1.0 + max(fAvg, 0.0) * (1.0 - e) / e;
+    return min(ms, 4.0);
+}
+)glsl";
+    // 表字面量从 kGgxAlbedoTable 现场格式化 —— 单一出处，CPU/GPU 不可能漂。
+    std::string table;
+    table.reserve(16 * 16 * 10);
+    char buf[32];
+    for (int i = 0; i < kGgxAlbedoN * kGgxAlbedoN; ++i) {
+        std::snprintf(buf, sizeof(buf), "%.5ff", kGgxAlbedoTable[i]);
+        if (i != 0) {
+            table += (i % kGgxAlbedoN == 0) ? ",\n    " : ", ";
+        }
+        table += buf;
+    }
+    const std::string token = "GLSL_TABLE";
+    const size_t pos = s.find(token);
+    if (pos != std::string::npos) {
+        s.replace(pos, token.size(), table);
+    }
+    return s;
+}
 
 }  // namespace lighting
 }  // namespace jpov

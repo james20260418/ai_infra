@@ -17,6 +17,7 @@
 #include <cmath>
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/lighting/ggx_specular.h"   // E_ss 表 / 多散射补偿（M2）
 #include "tools/jpov/src/water/water_optics.h"   // 菲涅尔 / 临界角 / ior（唯一出处）   // Vec3f（header-only，无 GL）
 #include "tools/jpov/src/water/water_wave_math.h"  // 波浪高度场求交（WaterWaves / IntersectWaveSurface）
 
@@ -202,7 +203,13 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
             const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
             const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;
             const float var_p = tx * tx * v.xx + 2.0f * tx * tz * v.xz + tz * tz * v.zz;
-            out->reflectance = RoughFresnelAlbedo(out->cos_i, var_p, ior);
+            // ③ 单次散射反射率 → ④ 多散射补偿（M2，与着色器同一条）：
+            //    粗糙面 Smith 遮蔽吃掉的那部分能量 (1−E_ss) 按 Kulla–Conty 补回。
+            //    R 与 T 一起动（`read->reflectance` 是唯一的 R 出口），保证 R+T=1。
+            const float f_ss = RoughFresnelAlbedo(out->cos_i, var_p, ior);
+            const float ms = lighting::GgxMultiscatterScale(
+                out->cos_i, var_p, FresnelAvgDielectric(ior));
+            out->reflectance = std::min(f_ss * ms, 1.0f);
         }
     }
     return true;

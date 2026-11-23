@@ -86,6 +86,22 @@ inline float RoughFresnelAlbedo(float cos_i, float mss, float ior) {
 }
 
 
+// 界面的**半球平均反射率** F_avg = 2·∫₀¹ F(μ)·μ dμ（μ = cosθ，入射侧为空气）。
+//
+// 用途：多散射补偿（Kulla–Conty / Turquin 2019）的 `ms = 1 + F_avg·(1−E_ss)/E_ss`。
+// 水（ior 1.333）≈ 0.068 —— 掠射段被 μ 权重压小，所以远小于直觉。
+// 64 点梯形积分（被积函数光滑，误差 < 1e-4）；CPU 每帧算一次，GPU 侧走 uniform。
+inline float FresnelAvgDielectric(float ior) {
+    constexpr int kSteps = 64;
+    float sum = 0.0f;
+    for (int i = 0; i < kSteps; ++i) {
+        const float mu = (static_cast<float>(i) + 0.5f) / static_cast<float>(kSteps);
+        sum += FresnelDielectric(mu, 1.0f, ior) * mu;
+    }
+    return 2.0f * sum / static_cast<float>(kSteps);
+}
+
+
 // Henyey-Greenstein 相位函数（mu = 1 为前向散射）。
 // Pre-condition: g ∈ [0, 0.95]（超出会被夹住，不 crash）。
 inline float HgPhase(float mu, float g) {

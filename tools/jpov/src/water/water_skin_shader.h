@@ -98,6 +98,7 @@ uniform vec3  uSunToward;         // 指向太阳（气侧，单位）
 uniform vec3  uSunIrradiance;     // color × intensity（辐照度语义）
 uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU 对拍测试置 0）
+uniform float uFresnelAvg;        // 界面半球平均反射率 F_avg（CPU 算，供多散射补偿 M2）
 
 const float kBackgroundDepth = 0.999999;
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
@@ -240,7 +241,15 @@ void main() {
     // ③ 角度平均菲涅尔：粗糙界面的方向反照率。反射↓、透射↑（两边一起动）。
     //    没有开关 —— 这是正确算法（掠射 2° 平面 0.80 → 0.36@MSS0.017）。
     if (!under) {
+        // ③ 单次散射反射率（粗糙界面的方向反照率）。
         F = RoughFresnelAlbedo(cos_i, var_p, uWaterIor);
+        // ④ 多散射补偿（M2，Turquin 2019 / Kulla–Conty）：
+        //    Smith 遮蔽吃掉的 (1−E_ss) 在单次散射模型里永远回不来 ⇒ 粗糙面「变暗」。
+        //    f_total = f_ss·(1 + F_avg·(1−E_ss)/E_ss)，同一条乘子也给 R 与 T（保 R+T=1）。
+        //    ⚠️ 必须用**物理粗糙度**（var_p + 像素内方差），不能用带盘角/足迹的 a2：
+        //       盘角是光源属性、足迹是采样属性，它们不该被当成表面粗糙度去算能量损失。
+        float a2_phys = min(var_p + normal_var_px, 0.25);
+        F = min(F * GgxMultiscatterScale(cos_i, a2_phys, uFresnelAvg), 1.0);
     }
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
@@ -261,9 +270,14 @@ void main() {
             // 带宽 = 盘角半径 + 视线像素足迹 + **像素内法线方差**。
             // 最后一项不能省：远处一条波只占几个像素时，逐像素法线各不相同但 GGX lobe
             // 仍按 θ 级窄带算 ⇒ 高光变成稀疏白点（llvmpipe 实测就是「波峰交界的麻点」）。
+            // ⚠️ M1（2026-11-23）：**必须再加 var_p**（被足迹截断的斜率方差 + 短波 MSS）。
+            //    否则远场是「粗糙面的反射率 + 镜面精度的 lobe」—— BRDF 不自洽：
+            //    F 按 6~7.5° 的粗糙面算，lobe 却是 0.13° 的太阳盘 ⇒ 远海「暗 + 平」（倒不了光）。
+            //    量化见 known_issue §10.16 M1。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
-                           + normal_var_px,
+                           + normal_var_px
+                           + var_p,
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
@@ -272,6 +286,7 @@ void main() {
             sun_spec = uSunIrradiance * (Fw * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
         }
     }
+    vec3 sun_debug = sun_spec;   // debug=14（M1 回归）
 
     vec3  C;      // 层色（P 点辐射度，未经相机段衰减）
     float alpha;  // 层遮挡率
@@ -385,6 +400,14 @@ void main() {
     if (uWaveDebug == 13) {
         // 反射率 F（探针支路同口径）
         oAccum  = vec4(vec3(FresnelDebug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 14) {
+        // 太阳的像（M1 回归用）：lobe 宽度直接读回，见 test/water:water_skin_gpu_test
+        // 的 SunLobeWidensWithSlopeVariance。
+        oAccum  = vec4(sun_debug, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;

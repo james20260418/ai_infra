@@ -955,3 +955,186 @@ TEST(WaterSkinGpu, FarFieldKeepsDetailNormals) {
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }
+
+// 回归（M1，2026-11-23）：**太阳的 lobe 必须吃被截断的斜率方差 `var_p`**。
+//
+// 现象（修之前）：远场是「粗糙面的反射率 + 镜面精度的 lobe」⇒ 远海「暗 + 平」，
+//   碎光带只剩 0.13° 的太阳盘。物理上 6~7.5°（known_issue §10.16 M1）。
+//
+// 隔离手法（这是这条用例的关键）：让波**全部处在 fade 之外**（fade 1~2 m）——
+//   · 法线严格是平面法线（梯度恒 0，`WaveSampleAt` 直接返回）；
+//   · 但 `WaveFilteredVariance` 里 geom = 0 ⇒ `var_p` 是**满的** MSS。
+//   ⇒ 两次渲染的几何/法线完全相同，唯一变量就是 var_p。若 a2 里漏了 var_p，两次的
+//   亮像素数应当一样少（δ lobe 只照亮镜面反射那一个像素）。
+TEST(WaterSkinGpu, SunLobeWidensWithSlopeVariance) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, -10.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+    const float time_s = 0.0f;
+
+    jpov::WaterWaves waves = MakeTestWaves();       // λ 9/5/3 m、A 0.35/0.18/0.08
+    waves.fade_start_m = 1.0f;                      // ⇒ 20 m 外振幅与梯度都是 0
+    waves.fade_end_m = 2.0f;
+    waves.num_detail_waves = 0;
+    waves.displacement = true;
+
+    // 太阳方向 = 中轴线的镜像（仰角 ≈ 27°），让镜面像落在画面中央附近。
+    const Vec3f fwd = NormalizeOr(Vec3f{cam.target.x() - cam.position.x(),
+                                        cam.target.y() - cam.position.y(),
+                                        cam.target.z() - cam.position.z()},
+                                  Vec3f{0.0f, 0.0f, 1.0f});
+    const Vec3f sun_toward = NormalizeOr(Vec3f{fwd.x(), -fwd.y(), fwd.z()}, Vec3f{0.0f, 1.0f, 0.0f});
+    const Vec3f irradiance{3.0f, 3.0f, 3.0f};
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+
+    auto lit_pixels = [&](const jpov::WaterWaves* w) {
+        f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/true,
+                 // ⚠️ sun_footprint = 0：48×32 的测试分辨率下 dFdx 足迹项极大
+                 //（每像素 ~2°），会盖掉本用例唯一想量的 var_p。真实分辨率下它才是
+                 // 有效的 specular AA 项，这里必须关掉才能隔离 M1。
+                 sun_toward, irradiance, jpov::lighting::kSunAngularRadiusRad,
+                 /*sun_footprint=*/0.0f, w, /*wave_flow_tex=*/0, time_s,
+                 /*wave_depth_m=*/300.0f, /*wave_debug=*/14);
+        const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+        // lobe 宽度的稳健量：**装下 90% 总能量所需的像素数**（与峰值缩放/绝对阈值无关）。
+        //  δ lobe ⇒ 1~3 个像素；var_p 拉宽 ⇒ 几十个像素。
+        std::vector<float> vals;
+        vals.reserve(kWidth * kHeight);
+        double total = 0.0;
+        for (int i = 0; i < kWidth * kHeight; ++i) {
+            const float v = std::max(accum[i * 4 + 0], 0.0f);
+            vals.push_back(v);
+            total += static_cast<double>(v);
+        }
+        if (!(total > 0.0)) {
+            return 0;
+        }
+        std::sort(vals.begin(), vals.end(), std::greater<float>());
+        double acc = 0.0;
+        int need = 0;
+        for (float v : vals) {
+            acc += static_cast<double>(v);
+            ++need;
+            if (acc >= 0.9 * total) {
+                break;
+            }
+        }
+        return need;
+    };
+
+    // ⚠️ 不能拿「没有波浪」当对照组：a2 = 5.4e-6 时峰值 ~1e9，会被 accum 的 fp16
+    //    (65504) 钳平，90% 能量统计就失真了。改成**两档 var_p**：
+    //    S1: 0.002（α≈0.045，半角 2.6°） vs S2: 0.0695（α≈0.26，半角 14.9°）。
+    jpov::WaterWaves waves_small = waves;
+    const float kSmallScale = 0.17f;   // 0.0695 · 0.17² ≈ 0.002
+    for (int i = 0; i < waves_small.num_waves; ++i) {
+        waves_small.waves[i].amplitude_m *= kSmallScale;
+    }
+
+    const int spread_small = lit_pixels(&waves_small);
+    const int spread_large = lit_pixels(&waves);
+
+    EXPECT_GT(spread_small, 0) << "小区间也该有几像素";
+    EXPECT_GT(spread_large, 2 * spread_small)
+        << "a2 里漏了 var_p ⇒ 两档粗糙度的太阳像宽度一样（远海会「暗+平」）"
+        << " small=" << spread_small << " large=" << spread_large;
+}
+
+// 隔离证明：上面那组「已淡出的波」法线必须严格是平面法线（否则上面的对比测到了别的）。
+TEST(WaterSkinGpu, FadedWavesKeepFlatNormalsButFullVariance) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, -10.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    waves.fade_start_m = 1.0f;
+    waves.fade_end_m = 2.0f;
+    waves.num_detail_waves = 0;
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, 0.0f, 1.333f, /*medium=*/nullptr, false, {}, {},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, 0.0f, 300.0f, /*wave_debug=*/1);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    int checked = 0;
+    for (int i = 0; i < kWidth * kHeight; ++i) {
+        const float nx = accum[i * 4 + 0] * 2.0f - 1.0f;
+        const float ny = accum[i * 4 + 1] * 2.0f - 1.0f;
+        const float nz = accum[i * 4 + 2] * 2.0f - 1.0f;
+        if (ny < 0.5f) {
+            continue;   // 背景/未命中（accum 被清成 0）
+        }
+        EXPECT_NEAR(nx, 0.0f, 1.0e-3f);
+        EXPECT_NEAR(ny, 1.0f, 1.0e-3f);
+        EXPECT_NEAR(nz, 0.0f, 1.0e-3f);
+        ++checked;
+    }
+    EXPECT_GT(checked, 100) << "命中像素太少，用例没覆盖到水面";
+}
+
+// M2（多散射补偿）的接线：反射率必须**逐位等于** `min(F_ss · ms, 1)`。
+// 这条只验接线；E_ss 表本身的正确性由 test/lighting:ggx_albedo_test 钉。
+TEST(WaterSkinGpu, ReflectanceIncludesMultiscatter) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, -10.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float pixel_angle = 2.0f * std::tan(0.5f * cam.fov * 3.14159265358979323846f / 180.0f) /
+                              static_cast<float>(kHeight);
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    waves.fade_start_m = 1.0f;   // 法线平、var_p 满（与 M1 用例同一手法）
+    waves.fade_end_m = 2.0f;
+
+    const jpov::Vec3f rd = NormalizeOr(jpov::Vec3f{0.0f, -0.5f, 1.0f},
+                                       jpov::Vec3f{0.0f, -1.0f, 0.0f});
+    const jpov::Vec3f fwd = NormalizeOr(jpov::Vec3f{0.0f, -0.6f, 1.0f},
+                                        jpov::Vec3f{0.0f, -1.0f, 0.0f});
+    WaterPixel px;
+    ASSERT_TRUE(EvaluateWaterPixel(cam.position, fwd, rd, 0.0f, 1.333f, 1.0f, cam.near,
+                                   cam.far, &px, &waves, 0.0f, 0.0f, pixel_angle, 0.0f,
+                                   300.0f));
+
+    // 用**同一套公式**独立算出该像素的 var_p / F_ss / ms，逐位比对。
+    const float t_plane = (0.0f - cam.position.y()) / rd.y();
+    const float rdy = (std::fabs(rd.y()) < 0.15f) ? 0.15f : std::fabs(rd.y());
+    const float footprint = t_plane * pixel_angle / rdy;
+    const float dx = rd.x() * t_plane;
+    const float dz = rd.z() * t_plane;
+    const float hdist = std::sqrt(dx * dx + dz * dz);
+    const jpov::water::SlopeVariance v =
+        jpov::water::WaveFilteredVariance(waves, footprint, jpov::water::WaveFadeFactor(waves, hdist));
+    const float rl = std::sqrt(rd.x() * rd.x() + rd.z() * rd.z());
+    const float tx = (rl > 1.0e-6f) ? rd.x() / rl : 1.0f;
+    const float tz = (rl > 1.0e-6f) ? rd.z() / rl : 0.0f;
+    const float var_p = tx * tx * v.xx + 2.0f * tx * tz * v.xz + tz * tz * v.zz;
+    ASSERT_GT(var_p, 0.02f) << "本例要求 var_p 足够大才有补偿量（实际 " << var_p << "）";
+    const float f_ss = jpov::water::RoughFresnelAlbedo(px.cos_i, var_p, 1.333f);
+    const float ms = jpov::lighting::GgxMultiscatterScale(
+        px.cos_i, var_p, jpov::water::FresnelAvgDielectric(1.333f));
+    ASSERT_GT(ms, 1.002f) << "补偿量太小，这条用例测不到东西";
+    EXPECT_NEAR(px.reflectance, std::min(f_ss * ms, 1.0f), 1.0e-5f)
+        << "反射率不等于 F_ss·ms ⇒ 多散射补偿没接上（或接了但没和 R/T 同步）";
+EXPECT_LT(px.reflectance, 1.0f);
+    f.TearDown();
+}

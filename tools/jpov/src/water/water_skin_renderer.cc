@@ -77,6 +77,7 @@ void WaterSkinRenderer::Init(ShaderManager* shader_mgr) {
     fs += water::kWaterMediumGlsl;
     fs += water::kWaterWaveGlsl;
     fs += lighting::kGgxSpecularGlsl;
+    fs += lighting::GgxAlbedoGlsl();   // E_ss 表 + 多散射补偿（M2）
     fs += water::kWaterSkinFs;
     prog_draw_ = shader_mgr_->GetOrCreate("water_skin_draw",
                                           {water::kWaterSkinVs, fs.c_str()});
@@ -177,6 +178,9 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
                 in.has_sun ? in.sun_irradiance.z() : 0.0f);
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunAngularRadius"), in.sun_angular_radius);
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunFootprint"), in.sun_footprint);
+    // 多散射补偿（M2）用的半球平均反射率：由 ior 现场算，CPU/GPU 同一个数。
+    glUniform1f(shader_mgr_->GetUniform(prog, "uFresnelAvg"),
+                water::FresnelAvgDielectric(in.ior));
 
     // 波浪谱（主波 / warp / Stokes / 细节短波 / 短波）：与天球折射共用同一份上传。
     water::WaveUniformParams wp;
