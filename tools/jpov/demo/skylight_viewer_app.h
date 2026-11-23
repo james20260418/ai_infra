@@ -924,9 +924,11 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        // 选型场 14 行（左列 0..13），其余场景保持 17 行。面板是底对齐的，
-        // 行数必须等于「最大行号 + 1」，多给的行会变成底部一条空白。
-        const int   kRows    = IsOceanLab() ? 14 : 17;
+        // 选型场 16 行（0..15，含 A/B 与谱截断窗口那四条），其余场景 17 行。
+        // ⚠️ 面板是底对齐的：行数必须 >=「该场景用到的最大行号 + 1」，
+        //    否则超出的控件会被画到屏幕下边缘之外（2026-11-23 踩过：M1 强度/谱截断
+        //    放在 14/15 行，而 kRows 还是 14 ⇒ 滑条出屏）。
+        const int   kRows    = IsOceanLab() ? 16 : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -1043,7 +1045,7 @@ private:
                 ui_.Checkbox("A/B · M2 多散射补偿", &water_ab_multiscatter_, row(1, 12));
                 ui_.SliderFloat("A/B · M1 强度 (var_p 比例)", &water_ab_lobe_var_scale_,
                                 row(0, 14), 0.0f, 1.0f, 2);
-                ui_.Checkbox("A/B · 亚像素法线按足迹截断（关 = 永不杀）",
+                ui_.Checkbox("A/B · 亚像素法线截断（关=永不杀）",
                              &water_ab_cull_normals_, row(1, 13));
                 // 「远处波纹消失太快」的主旋钮：min 越小波活得越远（会走样）；
                 // max 越大淡出越缓（过渡不像「切断」）。
