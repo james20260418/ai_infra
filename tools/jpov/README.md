@@ -14,6 +14,7 @@ JPOV 是一个面向 AI 自测输出的、支持流式绘制 + 简单交互的�
 > - **[docs/jpov_strip3d_translucent_design.md](docs/jpov_strip3d_translucent_design.md)** — 半透明 3D 条带（Strip3D）：左右双轨 + 逐点 uv/alpha + 8 段宽度剖面 → 1× WBO 双集合（遮罩 / 发光）。廉价玻璃、流星拖尾、剑气、光环；不动三大 renderer 的 blend。做带状半透明效果前先读。
 > - **[interface/README.md](interface/README.md)** — 渲染接口层说明。
 > - **[tools/vegetation_tool_v2/README.md](tools/vegetation_tool_v2/README.md)** — 植被资产链（Blender/Sapling → shape）。**资产一律存二进制 `.vegshape`**（ShapeProto 的 protobuf 二进制），文本 `.pbtxt` 只用于人工查看，用 `gen/shape_convert` 互转；含三棵树的三档顶点预算（5 万顶点 / 5000 三角 / 高配）。
+> - **[tools/2d_inpaint/README.md](tools/2d_inpaint/README.md)** — 2D 纹理 inpaint（方形四边保留、补中间）：`quilting`（快、颗粒真实）/ `criminisi`（结构延拓好、会复制边缘碎片）两个预设；纯 CPU 可跑，gold 固定在 flagstone 上，供后续 C++ 移植做跨语言一致性测试。
 
 ## 快速开始
 
