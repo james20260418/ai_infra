@@ -50,6 +50,14 @@ inline float DispersionOmega(float k, float depth_m) {
     return std::sqrt(kWaveGravity * k * th);
 }
 
+// 谱截断的像素阈值：一个波长只占 < kLodPxMin 像素 ⇒ 这条波不进几何/法线，方差整份交给 BRDF。
+// 2 px 是 Nyquist 的理论极限，但逐像素中心采样 + 双线性插值实际需要 ≥ 4 px 才不走样：
+// 2026-11-23 的「低风速海面硬边」就是 2~4 px 的细节波在反射里走样
+//（实测该工况带状对比度 32 → 9.6/255，其余机位几乎不变）。
+// ⚠️ 必须与 water_wave_shader.h 的 kWaveLodPxMin / kWaveLodPxMax 同值（有 GPU 对拍测试兜底）。
+inline constexpr float kWaveLodPxMin = 3.0f;
+inline constexpr float kWaveLodPxMax = 8.0f;
+
 // 二分次数：区间半宽 = ΣA/|rd.y|，12 次 ⇒ 精度 = 区间/4096（ΣA=1 m、|rd.y|=0.3 时 ~0.8 mm）。
 // 用二分而不是 Newton：区间端点必有变号（|h| ≤ ΣA），全局收敛且相邻像素连续
 // （Newton 在波谷/陡坡处 f'→0 会跳根，实测表现为法线噪点）。
@@ -242,10 +250,11 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
             // ⚠️ 必须用 wv（主波或细节波自己）；旧版写死 waves.waves[i]，
             //    i ≥ num_waves 时既用错波长又越过 waves[8] 读 detail_waves 的内存。
             const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= 2.0f) {
+            if (wavelength_px <= kWaveLodPxMin) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < 8.0f) {
-                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            } else if (wavelength_px < kWaveLodPxMax) {
+                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
+                                       (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
         const float geom = fade * lod_amp;   // 仍在几何里的比例
@@ -298,10 +307,11 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = wv.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= 2.0f) {
+            if (wavelength_px <= kWaveLodPxMin) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < 8.0f) {
-                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            } else if (wavelength_px < kWaveLodPxMax) {
+                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
+                                       (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
         const float amp = wv.amplitude_m * fade * lod_amp;
@@ -386,10 +396,11 @@ inline WaterWaveSample SampleWaveField(const WaterWaves& waves, float x, float z
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = w.wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= 2.0f) {
+            if (wavelength_px <= kWaveLodPxMin) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < 8.0f) {
-                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            } else if (wavelength_px < kWaveLodPxMax) {
+                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
+                                       (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
         const float amp = w.amplitude_m * amp_gain * fade * lod_amp;
@@ -443,10 +454,11 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
         float lod_amp = 1.0f;
         if (pixel_footprint_m > 1.0e-6f) {
             const float wavelength_px = waves.waves[i].wavelength_m / pixel_footprint_m;
-            if (wavelength_px <= 2.0f) {
+            if (wavelength_px <= kWaveLodPxMin) {
                 lod_amp = 0.0f;
-            } else if (wavelength_px < 8.0f) {
-                lod_amp = SmoothStep01((wavelength_px - 2.0f) / 6.0f);
+            } else if (wavelength_px < kWaveLodPxMax) {
+                lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
+                                       (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
         const float a = waves.waves[i].amplitude_m * lod_amp;

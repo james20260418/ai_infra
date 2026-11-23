@@ -1110,7 +1110,8 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 
 // 海面选型场的验证拍摄：只换 WaterConfig 里的风/涌，机位固定 3 个。
 // 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
-int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s) {
+int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s,
+                       int water_debug) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -1134,6 +1135,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     app.SetOceanLab(true);
     // 冻结时刻：同一时刻下差异只来自配置（报障复现用 --ocean-time 对齐）。
     app.SetWaterWaveTime(wave_time_s);
+    app.SetWaterWaveDebug(water_debug);   // 1=法线 2=像素内法线方差 11=探针 LOD
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -2191,6 +2193,7 @@ int main(int argc, char** argv) {
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
+    int water_debug = 0;         // 水皮 debug 档（1=法线 2=法线方差 11=探针 LOD）
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2245,6 +2248,8 @@ int main(int argc, char** argv) {
             ocean_config_path = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-time") == 0 && i + 1 < argc) {
             ocean_time_s = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-debug") == 0 && i + 1 < argc) {
+            water_debug = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2253,10 +2258,12 @@ int main(int argc, char** argv) {
         return RunCaptureEnv(env_out_dir);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
-        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s);
+        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
+                                  water_debug);
     }
     if (!ocean_lab_out_dir.empty()) {
-        return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s);
+        return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
+                                  water_debug);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);

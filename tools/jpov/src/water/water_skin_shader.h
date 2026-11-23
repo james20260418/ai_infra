@@ -228,6 +228,9 @@ void main() {
         }
     }
 
+    float env_lod_debug = 0.0;   // 调试用（uWaveDebug=11）
+    vec3  refl_debug = vec3(0.0);   // 调试用（uWaveDebug=12）
+    float FresnelDebug = 0.0;       // 调试用（uWaveDebug=13）
     // ── ⑤ 入射角与菲涅尔（法线可为波浪扰动法线）──
     bool  under = (uCamPos.y < uWaterLevelY);
     float cos_i = abs(dot(rd, N));
@@ -309,22 +312,33 @@ void main() {
         } else {
             rdir = normalize(rdir);
         }
-        // 探针 LOD：像素内法线方差越大 ⇒ 反射越糊（specular AA / Toksvig 同口径）。
-        // 128² cube 的每面 texel 角 ≈ (π/2)/128；无波浪时 sqrt(var)=0 ⇒ LOD 0（零回归）。
-        const float kEnvTexelAngle = 1.5707963268 / 128.0;
-        // ⚠️ 上限只能到 2，不能到 7（= 1×1 mip）：水面最上面那一行的 2×2 quad 里，
-        //    上半部分是天空、fragment 被 discard、N 从未参与求值 ⇒ dFdy(N) 是垃圾值
-        //    ⇒ normal_var_px 爆掉 ⇒ LOD 冲到最大级。而探针下半球是**地色**，
-        //    1×1 mip ≈ (天空+地色)/2 ⇒ 那一行整行发暗，形成地平线"深色裂隙"。
-        //    128² 探针在 LOD2 已经是 32²，足够糊掉逐像素法线噪声。
-        float env_lod = clamp(log2(max(sqrt(normal_var_px), 1.0e-6) / kEnvTexelAngle),
-                              0.0, 1.5);
+        // ── 探针 LOD（拉糊）：把「像素足迹内**未解析**的斜率方差」折成模糊角 ──
+        // 两个来源相加（方差可加）：
+        //   · var_p          谱侧：被足迹/淡出截掉的那部分波 + 短波 MSS。它们不在几何里，
+        //                    但物理上存在 —— 反射必须按它们的斜率分布模糊，否则会走样；
+        //   · normal_var_px  屏幕侧：相邻像素法线的实际跳变（残余/边缘走样）。
+        // 镜面反射把斜率放大 2×（入射角=反射角）⇒ 需要的模糊角 ≈ 2σ；
+        // 128² 探针的 texel 角 = (π/2)/128 · 2^lod。
+        //
+        // ⚠️ 上限随反射方向仰角放开：探针**下半球是地色**，地平线附近糊大了会把地色卷进来
+        //    （整行发暗的"地平线裂隙"）。近地平线仍钳 1.5 级（≈2° 的 texel）；
+        //    仰角 >~20° 时放到 3 级（探针 16²/面 ≈ 5.6°）。
+        //    2026-11-23 报的「低风速海面硬边」就是 2~6 px 的细节波在 27° 仰角的反射里走样：
+        //    旧上限 1.5 级糊不到 3° 以上，这条边就留着（known_issue §10.16 的"拉糊"）。
+        const float kEnvTexelAngle = 1.5707963268 / 128.0;   // 常量表达式（GLSL const 限制）
+        float refl_sigma = sqrt(max(var_p, 0.0) + max(normal_var_px, 0.0));
+        float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
+        float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, rdir.y));
+        float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
+        env_lod_debug = env_lod;
         vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
         // 环境反射 + 太阳的像。
         // ⚠️ 太阳项是**加法**：探针不含日月盘（kEnvProbe），SSR 也不负责它 ——
         //    将来接 SSR 时写成 F*(A*SSR + (1-A)*sky) + sun_spec，
         //    千万别把 sun_spec 也乘上 A（那会让日盘像随 SSR 命中与否闪）。
         C = F * refl + sun_spec;
+        refl_debug = refl;
+        FresnelDebug = F;
 
         // 透射率 = (1−F)/n²（辐射度跨介质守恒）；WBO 的 α 是“背景衰减率”= 1 − T。
         alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
@@ -356,6 +370,28 @@ void main() {
     if (uWaveDebug == 6) {
         // 纯红不透明：只回答「这一像素有没有水面覆盖」。
         oAccum  = vec4(1.0, 0.0, 0.0, 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 12) {
+        // 探针反射色（未乘 F）：判断"硬边"是不是探针本身带的
+        oAccum  = vec4(refl_debug, 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 13) {
+        // 反射率 F（探针支路同口径）
+        oAccum  = vec4(vec3(FresnelDebug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (uWaveDebug == 11) {
+        // 探针 LOD（调试）：0 = 原图，1 = LOD3。看"拉糊"到底有没有生效/生效在哪。
+        float v = env_lod_debug / 3.0;
+        oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;
