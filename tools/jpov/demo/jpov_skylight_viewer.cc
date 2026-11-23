@@ -1110,7 +1110,7 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 
 // 海面选型场的验证拍摄：只换 WaterConfig 里的风/涌，机位固定 3 个。
 // 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
-int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
+int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -1132,7 +1132,8 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
     }
     app.InstallTextMeasure();
     app.SetOceanLab(true);
-    app.SetWaterWaveTime(7.0f);   // 冻结：同一时刻，差异只来自配置
+    // 冻结时刻：同一时刻下差异只来自配置（报障复现用 --ocean-time 对齐）。
+    app.SetWaterWaveTime(wave_time_s);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -1157,15 +1158,18 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
         float swell_tp;
         float swell_dir_deg;
     };
-    const Preset kPresets[4] = {
+    const Preset kPresets[5] = {
         {"a_windsea",   8.0f,  34.0f, 250.0f, 0.0f, 9.5f,  0.0f},
         {"b_wind_swell", 8.0f,  34.0f, 250.0f, 1.3f, 9.5f, 104.0f},
         {"c_young_sea", 12.0f,  34.0f,  40.0f, 0.0f, 9.5f,  0.0f},
         {"d_calm",      4.0f,  34.0f, 250.0f, 0.0f, 9.5f,  0.0f},
+        // 报障配置（2026-11-23 Danis 截图）：面板风速被拖到 0.7（几乎无风），
+        // 其余 = 选型场默认值。这个档位下海面只剩细节短波，用来复现「硬边」。
+        {"e_light_air", 0.7f,  34.0f, 250.0f, 0.0f, 9.5f,  0.0f},
     };
     const float theta_toward = (app.deg_.sun_azim_deg - 180.0f) * kPi / 180.0f;
     struct Shot { const char* suffix; float phi; float R; float theta; };
-    const Shot kShots[5] = {
+    const Shot kShots[6] = {
         {"45deg_5m",      45.0f * kPi / 180.0f, 5.0f / std::sin(45.0f * kPi / 180.0f),
          theta_toward},
         {"45deg_40m",     45.0f * kPi / 180.0f, 40.0f / std::sin(45.0f * kPi / 180.0f),
@@ -1175,6 +1179,10 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui) {
         {"wide_250m",     25.0f * kPi / 180.0f, 250.0f, theta_toward},
         // Danis 报障机位：pos(4.68, 53.50, 1.99) ⇒ R≈53.74、phi≈84.6°（近俯视）
         {"topdown_53m",   84.6f * kPi / 180.0f, 53.74f, theta_toward},
+        // Danis 报障机位（2026-11-23 截图 HUD 的 CAM pos）
+        //   pos(53.0605698, 34.0492859, 40.6229286) → target(0,0,0)
+        //   ⇒ R=75.0、phi=27.0°、theta=52.5625°（ViewConfig 的球坐标口径）
+        {"report_cam_75m", 27.0f * kPi / 180.0f, 75.0f, 52.5625f * kPi / 180.0f},
     };
 
     for (const Preset& p : kPresets) {
@@ -2182,6 +2190,7 @@ int main(int argc, char** argv) {
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
+    float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2234,6 +2243,8 @@ int main(int argc, char** argv) {
             ocean_lab_ui_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
             ocean_config_path = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--ocean-time") == 0 && i + 1 < argc) {
+            ocean_time_s = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2242,10 +2253,10 @@ int main(int argc, char** argv) {
         return RunCaptureEnv(env_out_dir);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
-        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true);
+        return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s);
     }
     if (!ocean_lab_out_dir.empty()) {
-        return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false);
+        return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
