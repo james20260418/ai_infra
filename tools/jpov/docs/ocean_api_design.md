@@ -1,5 +1,10 @@
 # 海面「人类可读」接口设计（OceanState → 谱 → 渲染）
 
+> **落地状态（2026-11-23）**：v1 已按本文口径落地成 `interface/water_config.h`
+> （`WaterConfig` + `BuildWater` + `WaterQuality`/`WaterReadout`，测试在
+> `test/water/ocean_state_test.cc`）。文中出现的 `OceanState` / `OceanCondition` /
+> `CurrentField` / `BuildOceanSpectrum` / `BuildWaterCommand` 是当时规划的 **v2 命名，未实现**
+> —— 现在没有 `src/water/ocean_state.h`，别照着去找。
 2026-11-20。目标：美术只写「风多大、吹哪边、这儿有股流」，谱/细节/亚像素全部推导；
 flow map 变成「画速度场 + 一个记忆时间」，而不是调 flow_align / warp_amp 这些实现细节。
 
