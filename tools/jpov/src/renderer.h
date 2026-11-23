@@ -252,10 +252,6 @@ private:
     void EnsureBloomChain(int full_w, int full_h, int levels);
     void DestroyBloomChain();
 
-    // 「大气色天空」离屏 FBO（远景仰角雾的收敛色用；单独一趟天空绘制，不含日月盘/光晕）。
-    void EnsureSkyColorFBO(int w, int h);
-    void DestroySkyColorFBO();
-
     // ---- 环境镜面（IBL specular）的天空 cubemap ----
     // Renderer 每帧在 cmds.env_specular 有值时把天空渲成一张 size²的 cubemap
     //（6 个面，只含大气色，下半球用地色），三份 PBR 着色器按 reflect(-V,N) 采样。
@@ -303,12 +299,6 @@ private:
     std::vector<int> bloom_level_h_;
     unsigned int bloom_work_fbo_ = 0, bloom_work_tex_ = 0;
     int bloom_work_w_ = 0, bloom_work_h_ = 0;
-
-    // 「天空色」纹理（RGBA16F，单采样，与 3D FBO 同尺寸）：大气色天空（不含日月盘/光晕），
-    // 供远景仰角雾当收敛色。为何不用 MRT 附件：GL 规范里「某 shader 未写该颜色附件」
-    // 其内容是未定义的，会被之后画的几何 shader 写成垃圾（实测 NaN）。
-    unsigned int sky_fbo_ = 0, sky_tex_ = 0;
-    int sky_w_ = 0, sky_h_ = 0;
 
     // 环境镜面的天空 cubemap（RGBA16F + mip 链）+ 只挂一个颜色附件的逐面 FBO。
     // 生命周期：首次用到时建（EnsureSkyEnvCube），Finalize 时销毁；不随窗口尺寸重建。
@@ -379,8 +369,8 @@ private:
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
     SkeletonRenderer skeleton_renderer_;
 
-    // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
-    // 单一自包含，与 object3d / horizon_fog 平级。见 src/fog/。
+    // 雾场烘焙子渲染器（点状雾体；froxel 屏幕空间摊销）。单一自包含，与 object3d 平级。
+    // 见 src/fog/。
     FogRenderer fog_renderer_;
     // 雾的合成趟（雾场 + 0..N 个透明层交替积分）。与「烘场」分开两个类，
     // 见 src/fog/fog_composite_renderer.h。
