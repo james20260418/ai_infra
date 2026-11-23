@@ -852,7 +852,8 @@ int RunCaptureBoxCut(const std::string& out_dir) {
 // 验收点：反射的天光被扰动成碎光、太阳的像被拉成随波起伏的亮带；远处（fade_end 700 m）
 // 回到平面。水体介质在这组里不参与波浪（契约 §11.5），所以水下吸收仍是平面口径。
 int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
-                         bool ab_multiscatter = true, bool ab_cull_normals = true) {
+                         bool ab_multiscatter = true, bool ab_cull_normals = true,
+                         float ab_lobe_var_scale = 1.0f) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 水面波浪（法线扰动/高度置换）（headless）";
     cfg.width  = jpov_skylight::kViewerWidth;
@@ -868,6 +869,7 @@ int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
     app.SetWaterScene(true);
     app.Init();
     app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
+    app.SetWaterAbLobeVarScale(ab_lobe_var_scale);
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
@@ -2205,6 +2207,7 @@ int main(int argc, char** argv) {
     bool ab_lobe_var_p = true;
     bool ab_multiscatter = true;
     bool ab_cull_normals = true;
+    float ab_lobe_var_scale = 1.0f;   // M1 强度（--lobe-var-scale，A/B 找平衡点）
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2267,6 +2270,8 @@ int main(int argc, char** argv) {
             ab_multiscatter = false;
         } else if (std::strcmp(argv[i], "--no-cull-normals") == 0) {
             ab_cull_normals = false;
+        } else if (std::strcmp(argv[i], "--lobe-var-scale") == 0 && i + 1 < argc) {
+            ab_lobe_var_scale = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2298,7 +2303,7 @@ int main(int argc, char** argv) {
     }
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir, ab_lobe_var_p, ab_multiscatter,
-                                    ab_cull_normals);
+                                    ab_cull_normals, ab_lobe_var_scale);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);

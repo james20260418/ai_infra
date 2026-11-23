@@ -1097,6 +1097,9 @@ struct WaterCommand {
         // 太阳的像的带宽里是否并入 var_p（被足迹截断的斜率方差 + 短波 MSS）。
         // false ⇒ 回到「粗糙面反射率 + 0.13° 镜面 lobe」的旧行为（远海暗+平）。
         bool lobe_var_p = true;
+        // M1 的强度（0 = 等效关闭，1 = 全部 var_p）。给 A/B 找平衡点用：
+        // 全量 var_p 会把低风速的太阳路径抹成「一层黏膜」，0.3~0.5 通常才像海。
+        float lobe_var_scale = 1.0f;
         // 单次散射的多散射能量补偿（Kulla–Conty / Turquin）。
         // false ⇒ 粗糙面整体偏暗（Smith 遮蔽吃掉的那部分不补）。
         bool multiscatter = true;

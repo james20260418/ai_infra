@@ -101,6 +101,7 @@ uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU �
 uniform float uFresnelAvg;        // 界面半球平均反射率 F_avg（CPU 算，供多散射补偿 M2）
 // 着色 A/B（默认 1 = 正确算法；面板/CLI 只用于隔离对比，见 WaterCommand::ShadingAb）。
 uniform int   uLobeVarP;          // 1 = 太阳 lobe 并入 var_p（M1）
+uniform float uLobeVarScale;      // M1 强度 [0,1]（A/B 找平衡点；1 = 全量 var_p）
 uniform int   uMultiScatter;      // 1 = 多散射补偿（M2）
 
 const float kBackgroundDepth = 0.999999;
@@ -291,7 +292,7 @@ void main() {
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
                            + normal_var_px
-                           + (uLobeVarP != 0 ? var_p : 0.0),
+                           + (uLobeVarP != 0 ? uLobeVarScale * var_p : 0.0),
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);

@@ -2035,6 +2035,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.wave_depth_m = cmds.water->depth_m;
                 wsi.wave_debug = cmds.water->waves.debug;
                 wsi.lobe_var_p = cmds.water->shading.lobe_var_p;
+                wsi.lobe_var_scale = cmds.water->shading.lobe_var_scale;
                 wsi.multiscatter = cmds.water->shading.multiscatter;
                 wsi.cull_subpixel_normals = cmds.water->shading.cull_subpixel_normals;
                 if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {

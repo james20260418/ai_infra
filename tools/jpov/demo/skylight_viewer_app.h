@@ -287,11 +287,13 @@ public:
     bool water_ab_lobe_var_p_ = true;      // M1：太阳 lobe 并入 var_p
     bool water_ab_multiscatter_ = true;    // M2：多散射补偿
     bool water_ab_cull_normals_ = true;    // true = 亚像素法线按足迹截断（关 = 法线永不杀）
+    float water_ab_lobe_var_scale_ = 1.0f;  // M1 强度 [0,1]（A/B 找平衡点）
     void SetWaterAbShading(bool lobe_var_p, bool multiscatter, bool cull_normals) {
         water_ab_lobe_var_p_ = lobe_var_p;
         water_ab_multiscatter_ = multiscatter;
         water_ab_cull_normals_ = cull_normals;
     }
+    void SetWaterAbLobeVarScale(float s) { water_ab_lobe_var_scale_ = s; }
 
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
@@ -784,6 +786,7 @@ public:
                 w.time_s = static_cast<double>(base_t * ocean_time_speed_);
             }
             w.shading.lobe_var_p = water_ab_lobe_var_p_;
+            w.shading.lobe_var_scale = water_ab_lobe_var_scale_;
             w.shading.multiscatter = water_ab_multiscatter_;
             w.shading.cull_subpixel_normals = water_ab_cull_normals_;
             w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
@@ -1029,6 +1032,8 @@ private:
                 ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 6), 0.0f, 3.0f, 2);
                 ui_.Checkbox("A/B · M1 太阳 lobe 吃 var_p", &water_ab_lobe_var_p_, row(1, 11));
                 ui_.Checkbox("A/B · M2 多散射补偿", &water_ab_multiscatter_, row(1, 12));
+                ui_.SliderFloat("A/B · M1 强度 (var_p 比例)", &water_ab_lobe_var_scale_,
+                                row(0, 14), 0.0f, 1.0f, 2);
                 ui_.Checkbox("A/B · 亚像素法线按足迹截断（关 = 永不杀）",
                              &water_ab_cull_normals_, row(1, 13));
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);

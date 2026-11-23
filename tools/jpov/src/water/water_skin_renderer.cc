@@ -183,6 +183,8 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
                 water::FresnelAvgDielectric(in.ior));
     // 着色 A/B 开关（默认 true；面板/CLI 只用于隔离对比）。
     glUniform1i(shader_mgr_->GetUniform(prog, "uLobeVarP"), in.lobe_var_p ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uLobeVarScale"),
+                std::clamp(in.lobe_var_scale, 0.0f, 1.0f));
     glUniform1i(shader_mgr_->GetUniform(prog, "uMultiScatter"), in.multiscatter ? 1 : 0);
 
     // 波浪谱（主波 / warp / Stokes / 细节短波 / 短波）：与天球折射共用同一份上传。

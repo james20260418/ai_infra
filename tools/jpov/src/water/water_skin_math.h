@@ -134,7 +134,8 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
                                float time_s = 0.0f,
                                float depth_m = 300.0f,
                                bool cull_subpixel_normals = true,
-                               bool multiscatter = true) {
+                               bool multiscatter = true,
+                               float lobe_var_scale = 1.0f) {
     if (out == nullptr) {
         return false;
     }
@@ -210,6 +211,7 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
             //    粗糙面 Smith 遮蔽吃掉的那部分能量 (1−E_ss) 按 Kulla–Conty 补回。
             //    R 与 T 一起动（`read->reflectance` 是唯一的 R 出口），保证 R+T=1。
             const float f_ss = RoughFresnelAlbedo(out->cos_i, var_p, ior);
+            (void)lobe_var_scale;   // 只影响太阳的像（不参与水皮的 C/α）
             out->reflectance =
                 multiscatter
                     ? std::min(f_ss * lighting::GgxMultiscatterScale(
