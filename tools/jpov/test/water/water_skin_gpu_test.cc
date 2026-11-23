@@ -114,12 +114,6 @@ unsigned int MakeEnvCube() {
     return tex;
 }
 
-// gl_FragCoord.z 编码（与 MRT#1 同口径）。
-//   ndc = ((f+n) − 2·n·f/z) / (f − n)
-float NdcOfViewDepth(float z_view) {
-    return ((kFar + kNear) - 2.0f * kNear * kFar / z_view) / (kFar - kNear);
-}
-
 unsigned int MakeDepthTexture(const std::vector<float>& values) {
     CHECK_EQ(static_cast<int>(values.size()), kWidth * kHeight);
     unsigned int tex = 0;

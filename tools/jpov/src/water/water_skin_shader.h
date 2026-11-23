@@ -207,8 +207,9 @@ void main() {
     float tdl = length(td);
     td = (tdl > 1.0e-6) ? (td / tdl) : vec2(1.0, 0.0);
     float var_p = td.x * td.x * sxx + 2.0 * td.x * td.y * sxz + td.y * td.y * szz;
-    // 本 PR 只做透射率补偿：拉宽 / 拉糊两个消费者按 known_issue §10.16 暂缓，
-    // 所以 a2 与 env LOD 仍走旧的 dFdx 口径（normal_var_px），只有 F_eff 吃 var_p。
+    // 本 PR 里 var_p 的消费者只有两个：F_eff（`:242`）与探针 LOD（`:329`）。
+    // **太阳的像（`:263` 的 a2）还不吃 var_p** ⇒ 远场是「粗糙面的反射率 + 镜面精度的 lobe」，
+    // BRDF 不自洽（远海因此过度变平；修法见 known_issue §10.16 M1/M2）。
     if (!wave_ok) {
         discard;   // 求交失败 / 交点跑到相机后方
     }

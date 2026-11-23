@@ -48,8 +48,8 @@ uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各�
 uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
 
 const int kWaveBisectIters = 12;
-// 抗锯齿：一个波长占的像素数 ≤ 4 就消失、≥ 8 就全幅。
-// 2 px 是 Nyquist 的理论极限；逐像素中心采样实际需要 4 px 才不走样
+// 抗锯齿：一个波长占的像素数 ≤ kMin 就消失、≥ kMax 就全幅（当前 3 / 8）。
+// 2 px 是 Nyquist 的理论极限，但逐像素中心采样 + 双线性插值实际需要 ≥ 4 px 才不走样
 //（2026-11-23「低风速海面硬边」= 2~4 px 的细节波在反射里走样）。
 // ⚠️ 与 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax 同值（GPU 对拍测试兜底）。
 const float kWaveLodPxMin = 3.0;
