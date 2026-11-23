@@ -539,7 +539,7 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     const float dxp = p_plane.x() - cam_pos.x();
     const float dzp = p_plane.z() - cam_pos.z();
     const float fade_bound = WaveFadeFactor(waves, std::sqrt(dxp * dxp + dzp * dzp));
-    const float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound, pixel_footprint_m);
+    float amp_sum = WaveAmplitudeSum(waves, flow_x, flow_z, fade_bound, pixel_footprint_m);
 
     const auto height_at = [&](float tt) {
         const Vec3f p{cam_pos.x() + rd.x() * tt,
@@ -554,11 +554,14 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
             .height_m;
     };
 
-    // 法线 only（debug）：求交仍用平面解，只把法线换成该点的梯度。
-    if (!waves.displacement) {
-        const Vec3f p{cam_pos.x() + rd.x() * t,
-                      cam_pos.y() + rd.y() * t,
-                      cam_pos.z() + rd.z() * t};
+    // 采样射线参数 tt 处的完整水面样本（主波梯度 + 细节波梯度）。
+    // ⚠️ **必须与「求交怎么定 t」解耦**：细节波不进求交，主波被足迹截断后它们仍然在
+    //    几何里；旧版把法线求值塞在二分成功之后，一旦走进兜底分支就整片退化成平法线
+    //    （2026-11-23 报障的「波在固定距离硬消失」就是这个）。
+    const auto sample_at = [&](float tt) {
+        const Vec3f p{cam_pos.x() + rd.x() * tt,
+                      cam_pos.y() + rd.y() * tt,
+                      cam_pos.z() + rd.z() * tt};
         const float dx = p.x() - cam_pos.x();
         const float dz = p.z() - cam_pos.z();
         const float dist = std::sqrt(dx * dx + dz * dz);
@@ -568,15 +571,42 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
                             pixel_footprint_m, depth_m);
         AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
                                SampleWaveWarp(waves, p.x(), p.z()), &s, depth_m);
+        return s;
+    };
+    // 唯一的收尾：不管 t 是二分出来的、还是回退到平面解，法线都按同一个口径求。
+    const auto finish = [&](float tt) {
         out->hit = true;
-        out->t = t;
-        out->sample = s;
-        out->normal = WaveNormal(s);
+        out->t = tt;
+        out->sample = sample_at(tt);
+        out->normal = WaveNormal(out->sample);
         return true;
+    };
+
+    // 法线 only（debug）：求交仍用平面解，只把法线换成该点的梯度。
+    if (!waves.displacement) {
+        return finish(t);
+    }
+
+    // 位移波被足迹**全部**截断（浪已经被抗锯齿杀掉）⇒ 曲面就是平面，没有高度修正。
+    // 但法线仍要算：细节波还在几何里，旧版在这里直接 return 平法线，等于把远场做成完美镜面，
+    // 而且断点随 kWaveLodPxMin 平移（2 px→80 m、3 px→63 m，report_cam_75m 实测）。
+    if (!(amp_sum > 0.0f)) {
+        return finish(t_plane);
     }
 
     const float rdy = (std::fabs(rd.y()) < 1.0e-3f) ? 1.0e-3f : std::fabs(rd.y());
-    const float span = amp_sum / rdy;
+    float span = amp_sum / rdy;
+    // 二分区间的振幅上界必须覆盖**整个区间**：fade 随距离单调不增 ⇒ 最近端点给的上界最大。
+    // span 依赖 amp_sum（循环依赖）⇒ 用平面点的 span 先估一次，无三角函数，成本可忽略。
+    {
+        const float t_probe = std::max(t_plane - span, 1.0e-4f);
+        const float dxp = rd.x() * t_probe;
+        const float dzp = rd.z() * t_probe;
+        const float fade_probe = WaveFadeFactor(waves, std::sqrt(dxp * dxp + dzp * dzp));
+        amp_sum = std::max(amp_sum, WaveAmplitudeSum(waves, flow_x, flow_z, fade_probe,
+                                                     pixel_footprint_m));
+        span = amp_sum / rdy;
+    }
     float t_lo = t_plane - span;
     float t_hi = t_plane + span;
     if (t_lo < 1.0e-4f) {
@@ -594,11 +624,9 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     const float f_lo = f_of_t(t_lo);
     const float f_hi = f_of_t(t_hi);
     if ((f_lo > 0.0f) == (f_hi > 0.0f)) {
-        // 区间没有变号（理论上不会发生；极端 fade/参数下兜底回平面解）。
-        out->hit = true;
-        out->t = t_plane;
-        out->normal = Vec3f{0.0f, 1.0f, 0.0f};
-        return true;
+        // 区间没有变号（数值兜底：fade 边界/极端参数）。t 回退到平面解，
+        // 但**法线照常按梯度求** —— 绝不返回平法线（否则远场变镜面 + 硬分界）。
+        return finish(t_plane);
     }
     bool lo_positive = (f_lo > 0.0f);
     for (int i = 0; i < kWaveBisectIterations; ++i) {
@@ -614,24 +642,7 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     if (t <= 0.0f) {
         return false;
     }
-
-    const Vec3f p{cam_pos.x() + rd.x() * t,
-                  cam_pos.y() + rd.y() * t,
-                  cam_pos.z() + rd.z() * t};
-    const float dx = p.x() - cam_pos.x();
-    const float dz = p.z() - cam_pos.z();
-    const float dist = std::sqrt(dx * dx + dz * dz);
-    const float fade_here = WaveFadeFactor(waves, dist);
-    WaterWaveSample s =
-        SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z, fade_here,
-                        pixel_footprint_m, depth_m);
-    AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
-                           SampleWaveWarp(waves, p.x(), p.z()), &s, depth_m);
-    out->hit = true;
-    out->t = t;
-    out->sample = s;
-    out->normal = WaveNormal(s);
-    return true;
+    return finish(t);
 }
 
 }  // namespace water

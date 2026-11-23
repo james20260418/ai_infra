@@ -558,6 +558,16 @@ footprint = t · (2·tanHalfFov / viewport_h) / max(|rd.y|, 0.15)
 - **① 拉宽（`var_p` → 太阳 lobe）没有采用**：实测把 `var_p` 加进 `a2` 会让海面整体**提亮 18%**
   （lobe 变宽后更多像素命中太阳），而硬边对比度只从 31 降到 26 —— 那是"改观感"不是"修 bug"，
   要做得对得先补能量补偿（多散射 / 归一化），单独再做。
+- **真因（2026-11-23 二次定位，上面那条只治了走样带）**：生硬的来源是**求交的兜底分支**。
+  `amp_sum` 只累加**位移波**（细节波不进求交）；位移波被足迹全部截断后 `amp_sum == 0`
+  ⇒ `span == 0` ⇒ 二分区间两端同号 ⇒ 走进"理论上不会发生"的兜底：`t = t_plane; return`，
+  而法线留在初值 `(0,1,0)`、**`AddDetailWaveGradients` 根本没被调用**。
+  ⇒ 一过门限整片水面变成完美镜面（连仍旧解析得出来的细节波一起丢），
+  且断点随 `kWaveLodPxMin` 平移（2 px→80 m、3 px→63 m，`report_cam_75m` 实测）。
+  修法：把「定 t」与「求法线」解耦（CPU `sample_at`/`finish`，GLSL `WaveNormalAt`），
+  兜底只回退 t、法线照常按梯度求；`amp_sum == 0` 直接跳过二分（省 12 次全零求值）。
+  回归：`WaterWaveMath.TruncatedMainWavesKeepDetailNormals`（旧代码红）+ 负向
+  `WaterWaveMath.FullyTruncatedWavesAreFlat`（连细节波都亚像素 ⇒ 必须确实是平面）。
 - 仍未做：`C *= 1 + F·(1−E_ss)/E_ss`（Turquin 2019 多散射补偿，需要 Kulla–Conty LUT），
   以及"真正对 lobe 积分"的各向异性预滤波。
 

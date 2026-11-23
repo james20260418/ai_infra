@@ -320,6 +320,24 @@ vec3 WaveNormalFromGrad(vec2 grad) {
     return normalize(vec3(-grad.x, 1.0, -grad.y));
 }
 
+// 采样射线参数 tt 处的完整法线（主波梯度 + 细节波梯度）。
+// ⚠️ **必须与“求交怎么定 t”解耦**：细节波不进求交，主波被足迹截断后它们仍在几何里。
+//    旧版把法线求值塞在二分成功之后，一旦走进兜底分支就整片退化成平法线
+//    （2026-11-23 报障的「波在固定距离硬消失」）。与 CPU 的 sample_at/finish 同口径。
+vec3 WaveNormalAt(vec3 cam, vec3 ray_dir, float tt, float footprint) {
+    vec3 p = cam + ray_dir * tt;
+    float dist = length(p.xz - cam.xz);
+    float fade = WaveFadeFactor(dist);
+    float h;
+    vec2 grad;
+    WaveSampleAt(p.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
+    vec2 wu, wdux, wduz;
+    WaveWarpAt(p.xz, /*need_grad=*/true, wu, wdux, wduz);
+    vec2 dgrad;
+    WaveDetailGrad(p.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
+    return WaveNormalFromGrad(grad + dgrad);
+}
+
 // f(t) = (cam.y + rd.y·t − level) − h(p.xz)
 float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
     vec3 p = cam + ray_dir * tt;
@@ -371,19 +389,10 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     pos = vec3(0.0);
     normal = vec3(0.0, 1.0, 0.0);
 
-    // 法线 only（debug）：求交仍用平面解。
+    // 法线 only（debug）：求交仍用平面解，法线照常按梯度求。
     if (uWaveDisplace == 0) {
         pos = cam + ray_dir * t;
-        float dist = length(pos.xz - cam.xz);
-        float fade = WaveFadeFactor(dist);
-        float h;
-        vec2 grad;
-        WaveSampleAt(pos.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
-        vec2 wu, wdux, wduz;
-        WaveWarpAt(pos.xz, /*need_grad=*/true, wu, wdux, wduz);
-        vec2 dgrad;
-        WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
-        normal = WaveNormalFromGrad(grad + dgrad);
+        normal = WaveNormalAt(cam, ray_dir, t, footprint);
         return true;
     }
 
@@ -392,7 +401,27 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     // 区间半径用**平面交点处的有效振幅**（含 fade 与足迹截断）：
     // 远处谱已截断成平面 ⇒ span → 0 ⇒ t 连续，不会把量化噪声喂给合成趟的层深。
     vec3 p_plane = cam + ray_dir * t_plane;
-    float span = WaveAmplitudeSum(WaveFadeFactor(length(p_plane.xz - cam.xz)), footprint) / rdy;
+    float amp_sum = WaveAmplitudeSum(WaveFadeFactor(length(p_plane.xz - cam.xz)), footprint);
+    // 位移波被足迹**全部**截断（浪被抗锯齿杀光）⇒ 曲面就是平面，没有高度修正。
+    // 但法线仍必须由还解析得出来的细节波给：旧版在这里直接 return 平法线 (0,1,0)，
+    // 等于把远场做成完美镜面，且断点随 kWaveLodPxMin 平移（2 px→80 m、3 px→63 m，
+    // report_cam_75m 实测）——这就是 2026-11-23 报障的「波在固定距离硬消失」。
+    // 与 CPU 的 IntersectWaveSurface 同口径。
+    if (!(amp_sum > 0.0)) {
+        pos = p_plane;
+        normal = WaveNormalAt(cam, ray_dir, t_plane, footprint);
+        return true;
+    }
+    float span = amp_sum / rdy;
+    // 二分区间的振幅上界必须覆盖**整个区间**：fade 随距离单调不增 ⇒ 最近端点给的上界最大。
+    // span 依赖 amp_sum（循环依赖）⇒ 用平面点的 span 先估一次（无三角函数，成本可忽略）。
+    {
+        float t_probe = max(t_plane - span, 1.0e-4);
+        vec3 p_probe = cam + ray_dir * t_probe;
+        amp_sum = max(amp_sum,
+                      WaveAmplitudeSum(WaveFadeFactor(length(p_probe.xz - cam.xz)), footprint));
+        span = amp_sum / rdy;
+    }
     float t_lo = max(t_plane - span, 1.0e-4);
     float t_hi = t_plane + span;
     if (t_hi <= t_lo) {
@@ -401,9 +430,11 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     float f_lo = WaveFAt(cam, ray_dir, level, footprint, t_lo);
     float f_hi = WaveFAt(cam, ray_dir, level, footprint, t_hi);
     if ((f_lo > 0.0) == (f_hi > 0.0)) {
-        // 理论不会发生；兜底回平面解（不要给出一个乱跳的法线）。
+        // 数值兜底（fade 边界/极端参数）：t 回退平面解，但**法线照常按梯度求** ——
+        // 绝不返回平法线（否则远场变镜面 + 硬分界）。
         t = t_plane;
         pos = cam + ray_dir * t;
+        normal = WaveNormalAt(cam, ray_dir, t, footprint);
         return true;
     }
     bool lo_positive = (f_lo > 0.0);
@@ -421,16 +452,7 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
         return false;
     }
     pos = cam + ray_dir * t;
-    float dist = length(pos.xz - cam.xz);
-    float fade = WaveFadeFactor(dist);
-    float h;
-    vec2 grad;
-    WaveSampleAt(pos.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
-    vec2 wu, wdux, wduz;
-    WaveWarpAt(pos.xz, /*need_grad=*/true, wu, wdux, wduz);
-    vec2 dgrad;
-    WaveDetailGrad(pos.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
-    normal = WaveNormalFromGrad(grad + dgrad);
+    normal = WaveNormalAt(cam, ray_dir, t, footprint);
     return true;
 }
 )glsl";

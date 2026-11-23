@@ -308,7 +308,7 @@ struct Fixture {
                 float sun_footprint = 0.0f,
                 const jpov::WaterWaves* waves = nullptr,
                 unsigned int wave_flow_tex = 0, float wave_time_s = 0.0f,
-                float wave_depth_m = 300.0f) {
+                float wave_depth_m = 300.0f, int wave_debug = 0) {
         WaterSkinRenderer::Inputs in;
         in.camera = cam;
         in.full_w = kWidth;
@@ -329,6 +329,7 @@ struct Fixture {
         in.wave_flow_tex = wave_flow_tex;
         in.wave_time_s = wave_time_s;
         in.wave_depth_m = wave_depth_m;
+        in.wave_debug = wave_debug;   // 1 = 输出法线色（N*0.5+0.5），供回归用例直接读回
         water.Begin(kWidth, kHeight);
         water.Draw(in);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -866,6 +867,97 @@ TEST(WaterSkinGpu, WavesWithFlowMapMatchReference) {
     EXPECT_GT(compared, 20) << "覆盖像素太少";
 
     glDeleteTextures(1, &flow_tex);
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// 回归（2026-11-23 报障）：位移主波被足迹截断后，**细节波的法线必须留在画面里**。
+//
+// 旧版求交的兜底分支（区间两端同号）直接 t=t_plane + 法线留成 (0,1,0)，而且不跑
+// AddDetailWaveGradients ⇒ 只要位移波被足迹全部截断，整片水面瞬间退化成完美镜面：
+// 「某种波的 pattern 在固定距离生硬消失」，断点随 kWaveLodPxMin 平移
+// （2 px→80 m、3 px→63 m，report_cam_75m 实测）。
+//
+// 判据（只挑「位移波已被截断」的像素，否则测不到这条分支）：
+//   ① CPU 参考的法线必须是非平的（细节波还在几何里）；
+//   ② GPU debug=1（N*0.5+0.5）必须与 CPU 参考逐像素同口径。
+TEST(WaterSkinGpu, FarFieldKeepsDetailNormals) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 8.0f, 0.0f};
+    cam.target = {0.0f, 0.0f, 12.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+    const float time_s = 1.5f;
+    const float depth_m = 300.0f;
+
+    jpov::WaterWaves waves;
+    waves.enabled = true;
+    waves.displacement = true;
+    waves.fade_start_m = 0.0f;
+    waves.fade_end_m = 0.0f;   // 不淡出：差异只来自足迹截断
+    waves.num_waves = 1;
+    waves.waves[0] = jpov::WaterWave{1.0f, 0.0f, 0.5f, 0.02f, 0.0f};   // 唯一的位移波
+    waves.num_detail_waves = 2;
+    waves.detail_waves[0] = jpov::WaterWave{1.0f, 0.0f, 6.0f, 0.05f, 0.0f};
+    waves.detail_waves[1] = jpov::WaterWave{0.3f, 0.95f, 4.0f, 0.03f, 1.7f};
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, time_s, depth_m, /*wave_debug=*/1);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const Reference ref = BuildReference(cam);
+    const float pixel_angle = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
+
+    int examined = 0;    // 位移波已被截断的像素数
+    int textured = 0;    // 其中法线仍非平的像素数
+    float worst = 0.0f;  // GPU vs CPU 法线的最大偏差
+    for (int y = 0; y < kHeight; y += 2) {
+        for (int x = 0; x < kWidth; x += 2) {
+            const Vec3f rd = RayAt(ref, x, y);
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            if (!(rd.y() < -1.0e-3f)) {
+                continue;
+            }
+            const float t_plane = (level - cam.position.y()) / rd.y();
+            const float rdy = (std::fabs(rd.y()) < 0.15f) ? 0.15f : std::fabs(rd.y());
+            const float footprint = t_plane * pixel_angle / rdy;
+            if (jpov::water::WaveAmplitudeSum(waves, 0.0f, 0.0f, 1.0f, footprint) != 0.0f) {
+                continue;   // 这条像素的位移波还活着 ⇒ 测的不是兜底分支
+            }
+            WaterPixel px;
+            if (!EvaluateWaterPixel(cam.position, ref.fwd, rd, level, ior, depth[i],
+                                    cam.near, cam.far, &px, &waves, 0.0f, 0.0f,
+                                    pixel_angle, time_s, depth_m)) {
+                continue;
+            }
+            ++examined;
+            const float tilt = std::sqrt(px.normal.x() * px.normal.x() +
+                                         px.normal.z() * px.normal.z());
+            if (tilt > 0.01f) {   // ≈ 0.6°
+                ++textured;
+            }
+            const float gx = accum[i * 4 + 0] * 2.0f - 1.0f;
+            const float gy = accum[i * 4 + 1] * 2.0f - 1.0f;
+            const float gz = accum[i * 4 + 2] * 2.0f - 1.0f;
+            worst = std::max(worst, std::fabs(gx - px.normal.x()));
+            worst = std::max(worst, std::fabs(gy - px.normal.y()));
+            worst = std::max(worst, std::fabs(gz - px.normal.z()));
+        }
+    }
+    EXPECT_GT(examined, 40) << "没有像素落在「位移波被截断」的区间，用例失效";
+    EXPECT_GT(textured, 20)
+        << "位移波截断后法线全平 ⇒ 细节波被丢了（远场会变完美镜面 + 硬分界）";
+    EXPECT_LT(worst, 0.02f) << "GPU 与 CPU 参考的法线不同口径";
+
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }
