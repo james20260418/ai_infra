@@ -28,6 +28,8 @@ struct WaveUniformParams {
     int debug = 0;                        // 水皮 debug 档（天球固定 0）
     bool displacement = true;             // false = 法线 only（debug 二分用）
     bool has_flow_tex = false;            // 只有水皮会绑 flow map
+    // 亚像素细节波的法线是否按足迹截断（默认 true；false 只用于 A/B 对照）。
+    bool cull_subpixel = true;
 };
 
 // waves == nullptr ⇒ 全部按"关"上传（uWaveCount = 0）。

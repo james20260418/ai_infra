@@ -132,7 +132,9 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
                                float flow_x = 0.0f, float flow_z = 0.0f,
                                float pixel_angle_rad = 0.0f,
                                float time_s = 0.0f,
-                               float depth_m = 300.0f) {
+                               float depth_m = 300.0f,
+                               bool cull_subpixel_normals = true,
+                               bool multiscatter = true) {
     if (out == nullptr) {
         return false;
     }
@@ -151,7 +153,7 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         }
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
-                                  time_s, footprint, &wh, depth_m)) {
+                                  time_s, footprint, &wh, depth_m, cull_subpixel_normals)) {
             return false;
         }
         t = wh.t;
@@ -198,7 +200,8 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
             const float dz = ray_dir.z() * t;
             const float hdist = std::sqrt(dx * dx + dz * dz);
             const SlopeVariance v =
-                WaveFilteredVariance(*waves, footprint, WaveFadeFactor(*waves, hdist));
+                WaveFilteredVariance(*waves, footprint, WaveFadeFactor(*waves, hdist),
+                                     cull_subpixel_normals);
             const float rl = std::sqrt(ray_dir.x() * ray_dir.x() + ray_dir.z() * ray_dir.z());
             const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
             const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;
@@ -207,9 +210,12 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
             //    粗糙面 Smith 遮蔽吃掉的那部分能量 (1−E_ss) 按 Kulla–Conty 补回。
             //    R 与 T 一起动（`read->reflectance` 是唯一的 R 出口），保证 R+T=1。
             const float f_ss = RoughFresnelAlbedo(out->cos_i, var_p, ior);
-            const float ms = lighting::GgxMultiscatterScale(
-                out->cos_i, var_p, FresnelAvgDielectric(ior));
-            out->reflectance = std::min(f_ss * ms, 1.0f);
+            out->reflectance =
+                multiscatter
+                    ? std::min(f_ss * lighting::GgxMultiscatterScale(
+                                           out->cos_i, var_p, FresnelAvgDielectric(ior)),
+                               1.0f)
+                    : f_ss;
         }
     }
     return true;

@@ -851,7 +851,8 @@ int RunCaptureBoxCut(const std::string& out_dir) {
 //
 // 验收点：反射的天光被扰动成碎光、太阳的像被拉成随波起伏的亮带；远处（fade_end 700 m）
 // 回到平面。水体介质在这组里不参与波浪（契约 §11.5），所以水下吸收仍是平面口径。
-int RunCaptureWaterWaves(const std::string& out_dir) {
+int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
+                         bool ab_multiscatter = true, bool ab_cull_normals = true) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 水面波浪（法线扰动/高度置换）（headless）";
     cfg.width  = jpov_skylight::kViewerWidth;
@@ -866,6 +867,7 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
     app.SetShowPanel(false);
     app.SetWaterScene(true);
     app.Init();
+    app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
@@ -1111,7 +1113,8 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 // 海面选型场的验证拍摄：只换 WaterConfig 里的风/涌，机位固定 3 个。
 // 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
 int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s,
-                       int water_debug) {
+                       int water_debug, bool ab_lobe_var_p, bool ab_multiscatter,
+                       bool ab_cull_normals) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -1136,6 +1139,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     // 冻结时刻：同一时刻下差异只来自配置（报障复现用 --ocean-time 对齐）。
     app.SetWaterWaveTime(wave_time_s);
     app.SetWaterWaveDebug(water_debug);   // 1=法线 2=像素内法线方差 11=探针 LOD
+    app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -2194,6 +2198,13 @@ int main(int argc, char** argv) {
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
     int water_debug = 0;         // 水皮 debug 档（1=法线 2=法线方差 11=探针 LOD）
+    // 着色 A/B（默认全开 = 正确算法）：
+    //   --no-lobe-var-p   关 M1（太阳 lobe 不吃 var_p）
+    //   --no-multiscatter 关 M2（多散射补偿）
+    //   --no-cull-normals 关亚像素法线截断（= 法线永不杀；会走样，纯对照）
+    bool ab_lobe_var_p = true;
+    bool ab_multiscatter = true;
+    bool ab_cull_normals = true;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -2250,6 +2261,12 @@ int main(int argc, char** argv) {
             ocean_time_s = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-debug") == 0 && i + 1 < argc) {
             water_debug = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--no-lobe-var-p") == 0) {
+            ab_lobe_var_p = false;
+        } else if (std::strcmp(argv[i], "--no-multiscatter") == 0) {
+            ab_multiscatter = false;
+        } else if (std::strcmp(argv[i], "--no-cull-normals") == 0) {
+            ab_cull_normals = false;
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2259,11 +2276,13 @@ int main(int argc, char** argv) {
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
-                                  water_debug);
+                                  water_debug, ab_lobe_var_p, ab_multiscatter,
+                                  ab_cull_normals);
     }
     if (!ocean_lab_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
-                                  water_debug);
+                                  water_debug, ab_lobe_var_p, ab_multiscatter,
+                                  ab_cull_normals);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2278,7 +2297,8 @@ int main(int argc, char** argv) {
         return RunCaptureHorizonRepro(horizon_repro_out_dir);
     }
     if (!water_waves_out_dir.empty()) {
-        return RunCaptureWaterWaves(water_waves_out_dir);
+        return RunCaptureWaterWaves(water_waves_out_dir, ab_lobe_var_p, ab_multiscatter,
+                                    ab_cull_normals);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);

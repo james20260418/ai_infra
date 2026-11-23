@@ -181,6 +181,9 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     // 多散射补偿（M2）用的半球平均反射率：由 ior 现场算，CPU/GPU 同一个数。
     glUniform1f(shader_mgr_->GetUniform(prog, "uFresnelAvg"),
                 water::FresnelAvgDielectric(in.ior));
+    // 着色 A/B 开关（默认 true；面板/CLI 只用于隔离对比）。
+    glUniform1i(shader_mgr_->GetUniform(prog, "uLobeVarP"), in.lobe_var_p ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uMultiScatter"), in.multiscatter ? 1 : 0);
 
     // 波浪谱（主波 / warp / Stokes / 细节短波 / 短波）：与天球折射共用同一份上传。
     water::WaveUniformParams wp;
@@ -189,6 +192,7 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     wp.debug = in.wave_debug;
     wp.displacement = (in.waves != nullptr) && in.waves->displacement;
     wp.has_flow_tex = in.wave_flow_tex != 0u;
+    wp.cull_subpixel = in.cull_subpixel_normals;
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
 }
 

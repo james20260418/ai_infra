@@ -1089,6 +1089,22 @@ struct WaterCommand {
     // ⚠️ 波浪只改**界面几何**（水皮求交与法线）；水体介质仍按 level_y 的半空间积分
     //    （波浪化介质见 known_issue §11.5，另 PR）。
     WaterWaves waves;
+
+    // ── 着色 A/B 开关（默认全 true = 正确算法；只给「隔离对比」用，不是产品旋钮）──
+    // 2026-11-23 Danis 要「能对比前后效果」才加的：面板勾掉就能看差异，
+    // 但**默认值必须是正确的那一侧**，别让谁忘了打开还以为是产品行为。
+    struct ShadingAb {
+        // 太阳的像的带宽里是否并入 var_p（被足迹截断的斜率方差 + 短波 MSS）。
+        // false ⇒ 回到「粗糙面反射率 + 0.13° 镜面 lobe」的旧行为（远海暗+平）。
+        bool lobe_var_p = true;
+        // 单次散射的多散射能量补偿（Kulla–Conty / Turquin）。
+        // false ⇒ 粗糙面整体偏暗（Smith 遮蔽吃掉的那部分不补）。
+        bool multiscatter = true;
+        // 亚像素细节波的法线是否按足迹截断。
+        // false ⇒ **法线永不杀**（细节波无论多细都参与法线）：远场保留结构，
+        // 代价是亚像素斜率直接进入着色 ⇒ 走样（闪烁/摩尔纹）。纯 A/B 用。
+        bool cull_subpixel_normals = true;
+    } shading;
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。

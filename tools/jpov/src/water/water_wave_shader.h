@@ -40,6 +40,7 @@ uniform int   uWaveStokes2;
 // 细节短波（只进法线，不进几何）：(k, amplitude, phase, omega) + 方向。
 // omega 由 CPU 按有限水深算好传上来（与主波同一个 DispersionOmega）：GPU 不重算 ⇒
 // 每像素省 64 次 sqrt，且 CPU 参考与 GPU 逐位同源（"同源"不能只写在注释里）。
+uniform int   uWaveCullSubpixel;   // 1 = 按足迹截断细节波法线（默认）；0 = 法线永不杀（A/B 用）
 uniform int   uWaveDetailCount;
 uniform vec4  uWaveDetailL[64];    // (k, amplitude, phase, omega)
 uniform vec2  uWaveDetailDir[64];
@@ -168,6 +169,9 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                     float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
                     lod_amp = uu * uu * (3.0 - 2.0 * uu);
                 }
+            }
+            if (uWaveCullSubpixel == 0) {
+                lod_amp = 1.0;   // 细节波法线没被截断 ⇒ 它们的方差留在几何里，不进 var_p
             }
             float geom = fade * lod_amp;
             float a = amp * k;
@@ -300,6 +304,10 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
                 float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
                 lod_amp = uu * uu * (3.0 - 2.0 * uu);
             }
+        }
+        // 法线永不杀（A/B）：跳过足迹截断 —— 亚像素斜率会直接进入着色（走样，但是对照实验）。
+        if (uWaveCullSubpixel == 0) {
+            lod_amp = 1.0;
         }
         float amp = L.y * fade * lod_amp;
         if (amp == 0.0) {

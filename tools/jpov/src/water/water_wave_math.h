@@ -229,7 +229,7 @@ inline SlopeVariance ShortWaveVariance(const WaterWaves& waves) {
 }
 
 inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_footprint_m,
-                                          float fade) {
+                                          float fade, bool cull_subpixel = true) {
     SlopeVariance v;
     if (!waves.enabled) {
         return v;   // 波浪整个关掉 = 镜面水：短波也不参与（与 GLSL 同口径）
@@ -257,6 +257,9 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
                                        (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
+        if (!cull_subpixel) {
+            lod_amp = 1.0f;   // 法线没被截断 ⇒ 方差留在几何里，不进 BRDF（避免双计）
+        }
         const float geom = fade * lod_amp;   // 仍在几何里的比例
         const float a = amp * k;
         const float w = 0.5f * a * a * (1.0f - geom * geom);
@@ -283,7 +286,8 @@ inline SlopeVariance WaveFilteredVariance(const WaterWaves& waves, float pixel_f
 inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, float time_s,
                                    float fade, float pixel_footprint_m,
                                    const WaveWarpSample& warp, WaterWaveSample* out,
-                                   float depth_m = kDeepWaterDepthM) {
+                                   float depth_m = kDeepWaterDepthM,
+                                   bool cull_subpixel = true) {
     if (out == nullptr || !waves.enabled || fade <= 0.0f) {
         return;
     }
@@ -313,6 +317,9 @@ inline void AddDetailWaveGradients(const WaterWaves& waves, float x, float z, fl
                 lod_amp = SmoothStep01((wavelength_px - kWaveLodPxMin) /
                                        (kWaveLodPxMax - kWaveLodPxMin));
             }
+        }
+        if (!cull_subpixel) {
+            lod_amp = 1.0f;   // 法线永不杀（A/B）：亚像素斜率直接进入着色 ⇒ 会走样
         }
         const float amp = wv.amplitude_m * fade * lod_amp;
         if (amp <= 0.0f) {
@@ -505,7 +512,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
                                  const WaterWaves& waves, float flow_x, float flow_z,
                                  float time_s, float pixel_footprint_m,
                                  WaveSurfaceHit* out /*output*/,
-                                 float depth_m = kDeepWaterDepthM) {
+                                 float depth_m = kDeepWaterDepthM,
+                                 bool cull_subpixel = true) {
     if (out == nullptr) {
         return false;
     }
@@ -570,7 +578,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
             SampleWaveField(waves, p.x(), p.z(), time_s, flow_x, flow_z, fade_here,
                             pixel_footprint_m, depth_m);
         AddDetailWaveGradients(waves, p.x(), p.z(), time_s, fade_here, pixel_footprint_m,
-                               SampleWaveWarp(waves, p.x(), p.z()), &s, depth_m);
+                               SampleWaveWarp(waves, p.x(), p.z()), &s, depth_m,
+                               cull_subpixel);
         return s;
     };
     // 唯一的收尾：不管 t 是二分出来的、还是回退到平面解，法线都按同一个口径求。

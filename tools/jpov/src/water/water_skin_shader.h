@@ -99,6 +99,9 @@ uniform vec3  uSunIrradiance;     // color × intensity（辐照度语义）
 uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU 对拍测试置 0）
 uniform float uFresnelAvg;        // 界面半球平均反射率 F_avg（CPU 算，供多散射补偿 M2）
+// 着色 A/B（默认 1 = 正确算法；面板/CLI 只用于隔离对比，见 WaterCommand::ShadingAb）。
+uniform int   uLobeVarP;          // 1 = 太阳 lobe 并入 var_p（M1）
+uniform int   uMultiScatter;      // 1 = 多散射补偿（M2）
 
 const float kBackgroundDepth = 0.999999;
 const float kDeepSeaRayT = 1.0e6; // “无穷远”的射线参数（均质介质下 τ 早已饱和）
@@ -249,7 +252,9 @@ void main() {
         //    ⚠️ 必须用**物理粗糙度**（var_p + 像素内方差），不能用带盘角/足迹的 a2：
         //       盘角是光源属性、足迹是采样属性，它们不该被当成表面粗糙度去算能量损失。
         float a2_phys = min(var_p + normal_var_px, 0.25);
-        F = min(F * GgxMultiscatterScale(cos_i, a2_phys, uFresnelAvg), 1.0);
+        if (uMultiScatter != 0) {
+            F = min(F * GgxMultiscatterScale(cos_i, a2_phys, uFresnelAvg), 1.0);
+        }
     }
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
@@ -286,7 +291,7 @@ void main() {
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
                            + normal_var_px
-                           + var_p,
+                           + (uLobeVarP != 0 ? var_p : 0.0),
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);

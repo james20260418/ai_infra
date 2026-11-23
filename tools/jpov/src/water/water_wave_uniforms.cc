@@ -103,6 +103,7 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
     // ── 细节短波：只进法线（不进几何/求交）──
     // .w = ω：色散在 CPU 算一次（与主波同一份 DispersionOmega），GPU 不重算
     //（逐像素 ×64 次 sqrt 是不必要的；更要紧的是与 CPU 参考必须同一个 ω）。
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveCullSubpixel"), p.cull_subpixel ? 1 : 0);
     const int detail_count =
         on ? std::clamp(w->num_detail_waves, 0, WaterWaves::kMaxDetailWaves) : 0;
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveDetailCount"), detail_count);

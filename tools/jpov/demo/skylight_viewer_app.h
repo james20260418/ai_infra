@@ -283,6 +283,15 @@ public:
     // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
     // 方向自动取 4 波谱的主方向；量由 Cox–Munk 风速给出（面板滑条）。
     float water_wind_ms_ = 8.0f;
+    // ── 着色 A/B 开关（默认 = 正确算法；只给「隔离对比」用）──
+    bool water_ab_lobe_var_p_ = true;      // M1：太阳 lobe 并入 var_p
+    bool water_ab_multiscatter_ = true;    // M2：多散射补偿
+    bool water_ab_cull_normals_ = true;    // true = 亚像素法线按足迹截断（关 = 法线永不杀）
+    void SetWaterAbShading(bool lobe_var_p, bool multiscatter, bool cull_normals) {
+        water_ab_lobe_var_p_ = lobe_var_p;
+        water_ab_multiscatter_ = multiscatter;
+        water_ab_cull_normals_ = cull_normals;
+    }
 
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
@@ -774,6 +783,9 @@ public:
                                                 : static_cast<float>(frame_count) / 60.0f);
                 w.time_s = static_cast<double>(base_t * ocean_time_speed_);
             }
+            w.shading.lobe_var_p = water_ab_lobe_var_p_;
+            w.shading.multiscatter = water_ab_multiscatter_;
+            w.shading.cull_subpixel_normals = water_ab_cull_normals_;
             w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
             w.ior = ocean_lab ? water_cfg_.ior : water_ior_;
             w.skin = water_skin_on_;
@@ -1015,6 +1027,10 @@ private:
                 ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 5),
                                 0.0f, 3.0f, 2);
                 ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 6), 0.0f, 3.0f, 2);
+                ui_.Checkbox("A/B · M1 太阳 lobe 吃 var_p", &water_ab_lobe_var_p_, row(1, 11));
+                ui_.Checkbox("A/B · M2 多散射补偿", &water_ab_multiscatter_, row(1, 12));
+                ui_.Checkbox("A/B · 亚像素法线按足迹截断（关 = 永不杀）",
+                             &water_ab_cull_normals_, row(1, 13));
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉

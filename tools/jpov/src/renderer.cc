@@ -2034,6 +2034,9 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.wave_time_s = static_cast<float>(cmds.water->time_s);
                 wsi.wave_depth_m = cmds.water->depth_m;
                 wsi.wave_debug = cmds.water->waves.debug;
+                wsi.lobe_var_p = cmds.water->shading.lobe_var_p;
+                wsi.multiscatter = cmds.water->shading.multiscatter;
+                wsi.cull_subpixel_normals = cmds.water->shading.cull_subpixel_normals;
                 if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
                     const unsigned int flow_gl =
                         texture_mgr_.GetGLTexture(cmds.water->waves.flow_texture_id);

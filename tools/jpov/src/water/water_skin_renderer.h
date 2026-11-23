@@ -57,6 +57,10 @@ public:
         unsigned int wave_flow_tex = 0;
         // debug：0 = 正常；1 = 把交点法线编码成颜色输出（定位法线噪点用）。
         int wave_debug = 0;
+        // 着色 A/B（默认全 true = 正确算法，见 WaterCommand::ShadingAb）。
+        bool lobe_var_p = true;
+        bool multiscatter = true;
+        bool cull_subpixel_normals = true;
 
         // ── 太阳的像（解析 GGX，盘状光源）──
         // 与介质那份 sun 分开：介质可以关，水面依然该有日盘像。
