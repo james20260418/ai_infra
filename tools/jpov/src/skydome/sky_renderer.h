@@ -287,6 +287,19 @@ float beerLambertAttenuation(float body_elev, float turbidity) {
     return exp(-tau * AM);
 }
 
+// 大气质量（airmass）**颜色**衰减：返回只含色度、亮度归一化的 RGB 乘子。
+//   AM = 1/max(sin(elev), 0.02)，以 AM=1 为参考（正午 ⇒ 返回 (1,1,1)，零回归）。
+// Pre-condition: turbidity >= 0（负值按 0 处理）
+vec3 skyAirMassColor(float elev, float turbidity) {
+    const vec3 kTauRayleigh = vec3(0.036, 0.098, 0.230);   // ∝ λ⁻⁴（R/G/B 近似）
+    const vec3 kTauAerosol  = vec3(0.021, 0.025, 0.029);   // 每单位 turbidity
+    float am = 1.0 / max(sin(elev), 0.02);
+    vec3 tau = kTauRayleigh + kTauAerosol * max(turbidity, 0.0);
+    vec3 t = exp(-tau * max(am - 1.0, 0.0));
+    float lum = dot(t, vec3(0.2126, 0.7152, 0.0722));
+    return t / max(lum, 1e-4);
+}
+
 // 角盘 mask：在**角度空间**做 smoothstep（而非 cos 空间）。
 // 经典写法 smoothstep(cosSA, 1.0, cos_theta) 在 cosSA 接近 1（小盘）时失效：
 // cos 在 θ→0 处斜率→0，cos 空间分辨率极不均匀，过渡被挤成 1 像素硬边。
@@ -422,9 +435,18 @@ void main() {
     vec3 sun_disc_dir = discDirRemap(sun_dir, sun_elev, uSunSetStartAngle,
                                      uSunSetAngleRatio);
 
-    // 太阳盘色温（开尔文）：仰角越高色温越高（正午白~5600K，日出日落红~2000K）。
-    float sun_temp = mix(2000.0, 5600.0, clamp(sun_elev / 0.3, 0.0, 1.0));
-    vec3 sun_body_color = colorTempToLinear(sun_temp);   // 黑体色，线性 RGB
+    // ── 直射光的**颜色**：大气质量（airmass）模型 ──
+    //
+    // 取代原来的经验曲线 `sun_temp = mix(2000, 5600, elev/0.3)`：
+    //   AM = 1/max(sin(elev), 0.02)                       // 仰角越低，穿过的大气越长
+    //   T(λ) = exp(-(τ_R(λ) + τ_A(λ)·turbidity) · (AM-1))
+    // 以 **AM = 1（天顶）为参考**归一 ⇒ 正午严格无色偏（零回归），低太阳自动变红。
+    //   · τ_R ∝ λ⁻⁴：分子散射，蓝衰减最狠（日落红的物理来源）
+    //   · τ_A 随浊度增长：气溶胶，近似灰
+    // 只取**色度**（除以亮度）：亮度仍由既有 `beerLambertAttenuation` / DNI 曲线负责，
+    // 本 PR 只改"颜色随仰角怎么变"，不动任何亮度标定。
+    // CPU 侧 `SkyCommand::SunDirectionalColor()` 是同一套公式（唯一出处，勿各写一份）。
+    vec3 sun_body_color = colorTempToLinear(5600.0) * skyAirMassColor(sun_elev, uTurbidity);
 
     // HDR 亮度：sun_brightness × Beer-Lambert 衰减（只有太阳在地平线上时才画）。
     float sun_brightness = uSunBrightness * beerLambertAttenuation(sun_elev, uTurbidity);

@@ -2164,11 +2164,61 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+
+// 用法：jpov_skylight_viewer --capture-sun-altitude <out_dir>
+//
+// airmass 颜色模型的验收工件：**同一机位、只改太阳仰角与浊度**，看日盘与天空/环境光
+// 的颜色怎么随"大气质量"变化（仰角 60/30/15/5° × 浊度 2.5/6 = 8 张）。
+// 本分支没有云（cloud 命令不在 main 上）⇒ 只评天光本身。
+int RunCaptureSunAltitude(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — airmass 天光色（headless capture）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(true);   // 有物体才看得见"方向光颜色"（天光色改动的直接证据）
+    app.SetSmaa(false);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_azim_deg = 200.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.02;             // 地平线略低于画面中心：地面/方块与日盘都进画面
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R     = 10.0;
+
+    for (float turb : {2.5f, 6.0f}) {
+        app.deg_.turbidity = turb;
+        for (float elev : {60.0f, 30.0f, 15.0f, 5.0f}) {
+            app.deg_.sun_elev_deg = elev;
+            const std::string name =
+                "air_t" + std::to_string(static_cast<int>(turb * 10.0f)) +
+                "_e" + std::to_string(static_cast<int>(elev)) + ".png";
+            app.RunOnce(input, winfo, (out_dir + "/" + name).c_str());
+        }
+    }
+    LOG(INFO) << "sun-altitude ladder captured to " << out_dir;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
     std::string out_dir;
     std::string smaa_out_dir;
+    std::string sun_altitude_out_dir;
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string mat_out_dir;
@@ -2200,6 +2250,8 @@ int main(int argc, char** argv) {
             out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-smaa") == 0 && i + 1 < argc) {
             smaa_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-sun-altitude") == 0 && i + 1 < argc) {
+            sun_altitude_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
             env_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ssr") == 0 && i + 1 < argc) {
@@ -2253,6 +2305,9 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!sun_altitude_out_dir.empty()) {
+        return RunCaptureSunAltitude(sun_altitude_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);

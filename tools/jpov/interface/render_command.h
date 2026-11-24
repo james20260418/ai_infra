@@ -1434,6 +1434,33 @@ struct CascadeFBO {
 //   色温乘子分两把：daylight_season 只染太阳能通道（日盘/日主光/白天散射/白天 ambient），
 //   moon_season 只染月亮（月盘 + 月光），夜色两色都不染。
 // 月盘为整圆发光盘（无月相）；夜色只表达气辉 + 星光 + 城市光污染的低频底色。
+// 大气质量（airmass）**颜色**衰减：只含色度、亮度已归一化的 RGB 乘子。
+//
+//   AM = 1 / max(sin(elev), 0.02)                 // 仰角越低，穿过的大气越长
+//   T(λ) = exp(-(τ_R(λ) + τ_A(λ)·turbidity) · (AM - 1))
+//
+// 以 **AM = 1（天顶）为参考**归一 ⇒ 正午返回 (1,1,1)，正午外观零回归；低太阳自动变红。
+//   · τ_R ∝ λ⁻⁴：分子（Rayleigh）散射，蓝衰减最狠 —— 日落红的物理来源
+//   · τ_A 随浊度增长：气溶胶（Mie），近似灰
+// 只取色度（除以亮度）：亮度仍由 `SunDirectionalIntensity` / shader 的
+// `beerLambertAttenuation` 负责，本函数不改变任何亮度标定。
+//
+// ⚠️ 与 shader `sky_renderer.h::skyAirMassColor()` **必须同步改**（同一套公式两份实现）。
+// Pre-condition: turbidity 任意；负值按 0 处理
+inline Vec3f SkyAirMassColor(float elev, float turbidity) {
+    const Vec3f kTauRayleigh = {0.036f, 0.098f, 0.230f};
+    const Vec3f kTauAerosol  = {0.021f, 0.025f, 0.029f};
+    const float am = 1.0f / std::max(std::sin(elev), 0.02f);
+    const float am_excess = std::max(am - 1.0f, 0.0f);
+    const float turb = std::max(turbidity, 0.0f);
+    const float tr = std::exp(-(kTauRayleigh.x() + kTauAerosol.x() * turb) * am_excess);
+    const float tg = std::exp(-(kTauRayleigh.y() + kTauAerosol.y() * turb) * am_excess);
+    const float tb = std::exp(-(kTauRayleigh.z() + kTauAerosol.z() * turb) * am_excess);
+    const float lum = 0.2126f * tr + 0.7152f * tg + 0.0722f * tb;
+    const float inv = 1.0f / std::max(lum, 1.0e-4f);
+    return {tr * inv, tg * inv, tb * inv};
+}
+
 struct SkyCommand {
     // ── 太阳位置（时间） ──
     //
@@ -1705,15 +1732,17 @@ struct SkyCommand {
         // 太阳在天球上的仰角（弧度）。sun_dir 长度不必归一，取 y 前先 normalize。
         const Vec3f d = sun_dir.Unit();
         const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
-        // 色温（开尔文）：仰角越高色温越高。与 shader 同阈值（0.3 rad ≈ 17°）。
-        const float kelvin = 2000.0f + (5600.0f - 2000.0f) *
-            std::clamp(elev / 0.3f, 0.0f, 1.0f);
-        const Color base = ColorTempToLinear(kelvin);
+        // 颜色 = 太阳本体色温 × 大气质量（airmass）色度衰减。
+        // 与 shader 的 `skyAirMassColor()` **同一套公式**（唯一出处的两份实现：
+        // GLSL 与 C++ 必须同步改，行为等价性由 jpov_sun_path gold 把关）。
+        const Color base = ColorTempToLinear(5600.0f);
+        const Vec3f amc = SkyAirMassColor(elev, turbidity);
         // 季节色温偏置：乘归一化后的纯色调 daylight_season
         //（只偏色、不改亮度，见 DaylightSeasonTintScale()）。
-        return Color{base.r * daylight_season.r * DaylightSeasonTintScale(),
-                     base.g * daylight_season.g * DaylightSeasonTintScale(),
-                     base.b * daylight_season.b * DaylightSeasonTintScale(),
+        const float kTint = DaylightSeasonTintScale();
+        return Color{base.r * amc.x() * daylight_season.r * kTint,
+                     base.g * amc.y() * daylight_season.g * kTint,
+                     base.b * amc.z() * daylight_season.b * kTint,
                      1.0f};
     }
 
