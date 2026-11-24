@@ -128,8 +128,18 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         glUniform2f(detail_dir_loc + i, dx, dz);
     }
 
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeStart"), on ? w->fade_start_m : 0.0f);
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeEnd"), on ? w->fade_end_m : 0.0f);
+    // 远处口径（WaterWaves::far_field）：两条路只能整体切，所以这两个 uniform 一起上传 ——
+    //   · kLegacyFade：fade_start/end 生效 + 掠射地板 0.15；
+    //   · kFootprintTruncation：fade 上传 0/0（GLSL 的 `end <= start ⇒ 恒 1` 就是「没有 fade」）
+    //     + 掠射护栏 1e-4（只防除零）。
+    // 上传 0/0 而不是删 uniform：fade 的两个字段还留着给 A/B 对照，字段与实现必须对得上。
+    const bool legacy_fade = on && (w->far_field == WaterWaves::FarField::kLegacyFade);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeStart"),
+                legacy_fade ? w->fade_start_m : 0.0f);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeEnd"),
+                legacy_fade ? w->fade_end_m : 0.0f);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveGrazeFloor"),
+                legacy_fade ? kGrazeFloorLegacy : kGrazeFloorPhysical);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowAlign"), on ? w->flow_align : 0.0f);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowWindGain"),
                 on ? w->flow_wind_gain : 0.0f);

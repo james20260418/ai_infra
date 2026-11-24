@@ -302,6 +302,17 @@ public:
         water_lod_px_max_ = px_max;
     }
 
+    // 远处口径开关（面板 checkbox / CLI --wave-legacy-fade）：false（默认）= 足迹截断，
+    // 没有 fade 也没有 8.6° 掠射地板；true = 遗留 fade 口径（只用于 A/B 对比）。
+    // ⚠️ 映射到 WaterWaves::far_field 时**两个分支都要写**（选型场 / 手调谱各一份），
+    //    否则会有一个场景的勾选框不起作用。
+    bool water_legacy_fade_ = false;
+    void SetWaterLegacyFade(bool on) { water_legacy_fade_ = on; }
+    jpov::WaterWaves::FarField WaterFarField() const {
+        return water_legacy_fade_ ? jpov::WaterWaves::FarField::kLegacyFade
+                                  : jpov::WaterWaves::FarField::kFootprintTruncation;
+    }
+
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
     static jpov::WaterWaves MakeDefaultWaves() {
@@ -329,6 +340,9 @@ public:
     void SetWaterWavesConfig(const jpov::WaterWaves& waves) {
         water_waves_ = waves;
         water_use_config_count_ = true;
+        // 远处口径也跟着配置走 —— 否则帧内重算 wv.far_field 时会把配置文件里的
+        // `farfield` 行静默覆盖掉（配置驱动的报告会拿到默认值）。
+        water_legacy_fade_ = (waves.far_field == jpov::WaterWaves::FarField::kLegacyFade);
     }
     void SetWaterWaveAmplitudeScale(float scale) { water_wave_amp_scale_ = scale; }
     void SetWaterFlowTexture(uint32_t id) { water_waves_.flow_texture_id = id; }
@@ -827,6 +841,7 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
+                wv.far_field = WaterFarField();
                 w.waves = wv;
             } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
@@ -850,6 +865,7 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
+                wv.far_field = WaterFarField();
                 // 短波：方向 = 4 波方向的矢量和（波谱主方向），斜率 RMS 由滑条给。
                 float sx = 0.0f;
                 float sz = 0.0f;
@@ -1053,6 +1069,10 @@ private:
                                 1.5f, 6.0f, 2);
                 ui_.SliderFloat("谱截断 max (px，大=淡出更缓)", &water_lod_px_max_, row(1, 15),
                                 4.0f, 32.0f, 1);
+                // 远处口径（与场景 3 同一个开关）：关 = 只靠足迹截断，开 = 遗留 fade。
+                // 选型场的 fade 区间是 BuildWater 给的固定值（300/2000 m），不开放给用户。
+                ui_.Checkbox("波浪 远处淡出 fade (关=只靠足迹截断)", &water_legacy_fade_,
+                             row(1, 14));
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
@@ -1100,12 +1120,19 @@ private:
                 // 时间倍率改成"调用方对 time 的缩放"，不再是波谱里的字段。
                 ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_time_speed_,
                                 row(0, 10), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
-                                row(0, 11), 0.0f, 2000.0f, 0);
-                ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
-                                row(0, 12), 0.0f, 3000.0f, 0);
+                // 远处口径（2026-11-24）：默认「足迹截断」—— 没有 fade、足迹也没有 8.6° 地板，
+                // 远处的变平由每条波长自己的截断距离决定（波长得越短死得越近）。
+                // 勾上 = 遗留口径（足迹地板 0.15 + 下面两条 fade 滑条），只用于 A/B 对比。
+                ui_.Checkbox("波浪 远处淡出 fade (关=只靠足迹截断)", &water_legacy_fade_,
+                             row(0, 11));
+                if (water_legacy_fade_) {
+                    ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
+                                    row(0, 12), 0.0f, 2000.0f, 0);
+                    ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
+                                    row(0, 13), 0.0f, 3000.0f, 0);
+                }
                 ui_.Checkbox("波浪 真位移 (关=只改法线)", &water_waves_.displacement,
-                             row(0, 13));
+                             row(0, 14));
                 // 左列最后一格：水皮开关（与 row(0,1) 的「水体介质」正交）。
                 //   水皮 = 界面层 WBO（反射 / 透射 / 水面高光 / Snell 窗）；
                 //   介质 = 水下体积（吸收 + 单次散射注入）。

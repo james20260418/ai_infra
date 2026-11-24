@@ -988,8 +988,25 @@ struct WaterWaves {
     // flow 强度对振幅的增益：A *= (1 + flow_wind_gain·|flow|)。
     float flow_wind_gain = 1.0f;
 
-    // 远处淡出（按相机水平距离，米）：dist ≥ fade_end ⇒ 波消失（回纯平面）。
-    // fade_end <= fade_start ⇒ 不淡出（恒 1）。
+    // ── 远处怎么变平：两种口径，**整体二选一**（2026-11-24）──
+    // 远处的波必须变平（波长小于像素就会走样），能做这件事的只有两条路，而且它们
+    // **不是独立旋钮**：
+    //   · kFootprintTruncation：靠像素足迹截断谱 —— 每条波长在自己「波长 < LOD 门限」
+    //     的距离上被截断，被截掉的斜率方差转进 BRDF（反射率重分配 / 太阳 lobe 拉宽 /
+    //     探针模糊）。过渡宽度由波长与视线仰角自己算出来 ⇒ **没有任何距离参数**。
+    //   · kLegacyFade：靠距离淡出 —— 按相机水平距离把振幅 smoothstep 压到 0。
+    //     它当年是给「足迹地板」争取距离用的（地板把截断推远 3×），代价是波在一个
+    //     和物理无关的固定距离上「生硬消失」。
+    // ⚠️ 地板与 fade 必须**一起切**：留着地板又关 fade ⇒ 该杀的波没杀（亚像素抖动）；
+    //    只去地板不删 fade ⇒ 截断永远轮不到生效，fade 继续当兜底。
+    enum class FarField {
+        kFootprintTruncation = 0,   // 默认：只有物理（无 fade、足迹无地板）
+        kLegacyFade = 1,            // A/B 对照：足迹地板 0.15 + fade_start_m..fade_end_m
+    };
+    FarField far_field = FarField::kFootprintTruncation;
+
+    // 遗留口径的参数（**仅 kLegacyFade 生效**；按相机水平距离，米）。
+    // dist ≥ fade_end ⇒ 波消失（回纯平面）；fade_end <= fade_start ⇒ 不淡出（恒 1）。
     float fade_start_m = 150.0f;
     float fade_end_m = 900.0f;
 

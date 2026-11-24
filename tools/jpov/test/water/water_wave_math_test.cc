@@ -208,6 +208,8 @@ TEST(WaterWaveMath, FlowStrengthensAmplitude) {
 
 TEST(WaterWaveMath, FadeFactorIsOneInsideAndZeroOutside) {
     WaterWaves w;
+    // fade 只属于遗留口径（默认的足迹截断口径里没有 fade 这件事）。
+    w.far_field = WaterWaves::FarField::kLegacyFade;
     w.fade_start_m = 100.0f;
     w.fade_end_m = 300.0f;
     EXPECT_FLOAT_EQ(WaveFadeFactor(w, 0.0f), 1.0f);
@@ -220,6 +222,7 @@ TEST(WaterWaveMath, FadeFactorIsOneInsideAndZeroOutside) {
 
 TEST(WaterWaveMath, FadeEndNotSetMeansNoFade) {
     WaterWaves w;
+    w.far_field = WaterWaves::FarField::kLegacyFade;
     w.fade_start_m = 50.0f;
     w.fade_end_m = 50.0f;   // <= start ⇒ 关
     EXPECT_FLOAT_EQ(WaveFadeFactor(w, 1.0e6f), 1.0f);
@@ -383,6 +386,89 @@ TEST(WaterWaveMath, FullyTruncatedWavesAreFlat) {
     EXPECT_FLOAT_EQ(hit.normal.x(), 0.0f);
     EXPECT_FLOAT_EQ(hit.normal.y(), 1.0f);
     EXPECT_FLOAT_EQ(hit.normal.z(), 0.0f);
+}
+
+// ───────────────────────── 远处口径（足迹截断 vs 遗留 fade）─────────────────────────
+
+// 默认口径（足迹截断）里**根本没有 fade 这件事**：fade_start/end 写得再陡也不生效。
+TEST(WaterWaveMath, FootprintModeIgnoresFadeFields) {
+    WaterWaves w = MakeSingleWave(1.0f, 0.0f, 10.0f, 1.0f, 0.0f);
+    ASSERT_EQ(w.far_field, WaterWaves::FarField::kFootprintTruncation);
+    w.fade_start_m = 1.0f;   // 遗留口径下：20 m 外振幅与梯度都应为 0
+    w.fade_end_m = 2.0f;
+    EXPECT_FLOAT_EQ(WaveFadeFactor(w, 1.0e6f), 1.0f);
+    // 场本身也不能偷偷乘 fade：扫一个波长，峰值必须仍是振幅 A（不靠相位约定）。
+    float peak = 0.0f;
+    for (int i = 0; i < 1000; ++i) {
+        const float x = 0.01f * static_cast<float>(i);   // 扫满一个波长（λ = 10 m）
+        const WaterWaveSample s =
+            SampleWaveField(w, x, 0.0f, 0.4f, 0.0f, 0.0f, WaveFadeFactor(w, 1.0e6f));
+        peak = std::max(peak, std::fabs(s.height_m));
+    }
+    EXPECT_NEAR(peak, 1.0f, 0.01f) << "足迹口径下振幅被 fade 压了 ⇒ 口径开关没接上";
+}
+
+// 掠射护栏随口径切换：同一个像素，遗留口径的地板把足迹压小 1/0.15 倍。
+TEST(WaterWaveMath, FootprintFloorDependsOnPolicy) {
+    const float t_plane = 500.0f;    // 500 m 外的水面
+    const float pixel_angle = 0.0017f;
+    const float grazing_rdy = 0.02f; // ≈1.15°：比 8.6° 更贴水面
+
+    WaterWaves legacy;
+    legacy.far_field = WaterWaves::FarField::kLegacyFade;
+    const float fp_legacy = jpov::water::WaveFootprintM(legacy, t_plane, -grazing_rdy,
+                                                       pixel_angle);
+    EXPECT_NEAR(fp_legacy, t_plane * pixel_angle / jpov::water::kGrazeFloorLegacy, 1.0e-2f);
+
+    WaterWaves fp;
+    const float fp_physical = jpov::water::WaveFootprintM(fp, t_plane, -grazing_rdy,
+                                                         pixel_angle);
+    EXPECT_NEAR(fp_physical, t_plane * pixel_angle / grazing_rdy, 1.0e-2f);
+    // 0.15/0.02 = 7.5×：这就是当年「截断被推远 3 倍多」的数学来源。
+    EXPECT_GT(fp_physical, 7.0f * fp_legacy);
+
+    // 高仰角（|rd.y| = 1）时地板不咬 ⇒ 两口径必须逐位相同（近场零回归）。
+    EXPECT_FLOAT_EQ(jpov::water::WaveFootprintM(legacy, t_plane, -1.0f, pixel_angle),
+                    jpov::water::WaveFootprintM(fp, t_plane, -1.0f, pixel_angle));
+}
+
+// 极限掠射不能溢出到 inf（否则 cam + rd·t 里出 0·inf = NaN），必须钳到 kMaxFootprintM。
+TEST(WaterWaveMath, FootprintIsCappedAtHorizon) {
+    WaterWaves w;
+    const float cap = jpov::water::kMaxFootprintM;
+    // |rd.y| 极小 + 极远的平面交点：裸公式是 inf。
+    EXPECT_FLOAT_EQ(jpov::water::WaveFootprintM(w, 1.0e30f, -1.0e-30f, 0.0017f), cap);
+    // 无足迹信息 ⇒ 0（调用方据此跳过截断，不当作「足迹为 0 米」）。
+    EXPECT_FLOAT_EQ(jpov::water::WaveFootprintM(w, 0.0f, -0.5f, 0.0017f), 0.0f);
+    EXPECT_FLOAT_EQ(jpov::water::WaveFootprintM(w, 100.0f, -0.5f, 0.0f), 0.0f);
+    // 交点跑到相机后方 ⇒ 0。
+    EXPECT_FLOAT_EQ(jpov::water::WaveFootprintM(w, -10.0f, -0.5f, 0.0017f), 0.0f);
+}
+
+// 核心判据：同一片海、同一条射线，**足迹口径该把波杀掉而我们曾经留着**。
+// 24 m 的波：真实截断距离 ≈ 336 m，遗留地板把它推到 ≈1080 m。
+TEST(WaterWaveMath, FootprintPolicyTruncatesWhereLegacyKeepsWaves) {
+    WaterWaves w = MakeSingleWave(1.0f, 0.0f, 24.0f, 0.28f, 0.0f);
+    const float pixel_angle = 0.0017f;   // 1280×720、fov≈60°
+    const float cam_h = 15.8f;
+    const float t_plane = 500.0f;        // 500 m 外（≈1.8° 仰角）
+    const float rdy = -cam_h / t_plane;
+
+    w.far_field = WaterWaves::FarField::kLegacyFade;
+    const float fp_legacy = jpov::water::WaveFootprintM(w, t_plane, rdy, pixel_angle);
+    const float amp_legacy =
+        jpov::water::WaveAmplitudeSum(w, 0.0f, 0.0f, /*fade=*/1.0f, fp_legacy);
+    EXPECT_GT(amp_legacy, 0.01f)
+        << "遗留口径在 500 m 应该有波（这正是必须靠 fade 兜底的那段）";
+
+    w.far_field = WaterWaves::FarField::kFootprintTruncation;
+    const float fp_new = jpov::water::WaveFootprintM(w, t_plane, rdy, pixel_angle);
+    EXPECT_GT(fp_new, fp_legacy);
+    // 24 m / 8 px = 3 m：足迹 ≥ 3 m 就开始淡出，≥ 8 m 就完全截断。
+    EXPECT_GT(fp_new, 8.0f);
+    EXPECT_FLOAT_EQ(jpov::water::WaveAmplitudeSum(w, 0.0f, 0.0f, /*fade=*/1.0f, fp_new),
+                    0.0f)
+        << "足迹口径下 500 m 的 24 m 波必须已被截断";
 }
 
 }  // namespace

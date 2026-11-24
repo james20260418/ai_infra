@@ -132,7 +132,7 @@ void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S)
 | flow map | RG 纹理，编码 `flow*0.5+0.5`；调制**波方向**（朝流对齐）与**振幅**（风浪增益）。`texture_id=0` ⇒ 各向同性谱 |
 | 法线 | `normalize(−∂h/∂x, 1, −∂h/∂z)` —— **派生量**，不另存 normal map（反射/菲涅尔/日盘像吃同一个几何量） |
 | 求交 | 平面初值 + Newton（`f(t) = (p.y−level) − h(p.xz)`），4 次迭代；残差 < 1e-3 m（单测锁） |
-| 淡出 | 按**相机水平距离** smoothstep 到 0（防远处高频走样 + Newton 抖动）；`fade_end ≤ fade_start` = 关 |
+| 远处变平 | **`WaterWaves::far_field` 二选一**（2026-11-24）：`kFootprintTruncation`（默认）= 只靠像素足迹截断谱（`λ/footprint < LOD 门限` 即消失，方差进 BRDF）+ 掠射护栏 1e-4；`kLegacyFade` = 足迹地板 0.15 + `fade_start_m..fade_end_m` 距离淡出（仅 A/B）。两者不拆开配 —— 地板是 fade 存在的原因 |
 | 零回归 | `enabled=false` 或 `num_waves=0` ⇒ 不走迭代，逐字节等于旧平面 |
 
 **边界（明确不做）**：

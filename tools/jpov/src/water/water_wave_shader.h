@@ -23,8 +23,12 @@ uniform int   uWaveCount;          // 0 ⇒ 纯平面
 uniform vec4  uWaveL[8];           // (k, omega, amplitude, phase)
 uniform vec2  uWaveDir[8];         // 传播方向（单位，xz）
 uniform float uWaveTime;           // 秒
-uniform float uWaveFadeStart;      // 米（相机水平距离）
+uniform float uWaveFadeStart;      // 米（相机水平距离，**仅遗留口径**；= 0/0 ⇒ 恒 1）
 uniform float uWaveFadeEnd;        // 米；<= start ⇒ 不淡出
+// 掠射护栏（＝ CPU 的 kGrazeFloorLegacy / kGrazeFloorPhysical，由 WaveUniformParams 上传）：
+// 遗留口径 0.15（≈8.6°，给 fade 争取距离）；足迹口径 1e-4（只防除零）。
+// 与水皮、天球折射**共用**这一个值 ⇒ 两趟的谱截断永远同口径。
+uniform float uWaveGrazeFloor;
 uniform float uWaveFlowAlign;      // [0,1]
 uniform float uWaveFlowWindGain;   // >= 0
 uniform int   uWaveHasFlow;        // 0 = 无 flow
@@ -61,6 +65,21 @@ uniform float uWaveLodPxMax;
 // warp 限带：每条波的 warp 相位/梯度乘 min(1, kWarpSlopeLimit/(k·U))。
 // 与 CPU 的 water::kWarpSlopeLimit 同值（有测试锁一致性）。
 const float kWarpSlopeLimit = 0.25;
+// 足迹上限（米）＝ CPU 的 water::kMaxFootprintM。掠射行的 t 可能到几百公里，
+// 不钳的话 footprint 可以溢出到 inf（此时 λ/inf=0 本身无害，但 cam+rd·t 里会出 0·inf=NaN）。
+const float kWaveMaxFootprintM = 1.0e6;
+
+// 像素在水面上覆盖的世界尺寸（米）—— 与 CPU 的 water::WaveFootprintM **同一公式**。
+//   t_plane  平面交点距离（米）；rdy = rd.y（内部取绝对值）；pixel_angle = 2·tanHalfFov/视口高
+// uWaveGrazeFloor = 掠射护栏：遗留口径 0.15（≈8.6°）/ 足迹口径 1e-4（只防除零）。
+float WaveFootprint(vec3 cam_pos, vec3 ray_dir, float level_y, float pixel_angle) {
+    float t_plane = (level_y - cam_pos.y) / ray_dir.y;
+    if (t_plane <= 0.0) {
+        return 0.0;   // 交点在相机后方 ⇒ 不做截断（上层自己 discard）
+    }
+    float graze = max(abs(ray_dir.y), uWaveGrazeFloor);
+    return min(t_plane * pixel_angle / graze, kWaveMaxFootprintM);
+}
 
 float WaveFadeFactor(float dist) {
     if (uWaveFadeEnd <= uWaveFadeStart) {

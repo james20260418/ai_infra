@@ -854,7 +854,7 @@ int RunCaptureBoxCut(const std::string& out_dir) {
 int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
                          bool ab_multiscatter = true, bool ab_cull_normals = true,
                          float ab_lobe_var_scale = 1.0f, float lod_px_min = 3.0f,
-                         float lod_px_max = 8.0f) {
+                         float lod_px_max = 8.0f, bool legacy_fade = false) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 水面波浪（法线扰动/高度置换）（headless）";
     cfg.width  = jpov_skylight::kViewerWidth;
@@ -872,6 +872,7 @@ int RunCaptureWaterWaves(const std::string& out_dir, bool ab_lobe_var_p = true,
     app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
     app.SetWaterAbLobeVarScale(ab_lobe_var_scale);
     app.SetWaterLodWindow(lod_px_min, lod_px_max);
+    app.SetWaterLegacyFade(legacy_fade);
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
@@ -1057,7 +1058,15 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
         } else if (tag == "debug") {
             ss >> out->debug;
         } else if (tag == "fade") {
+            // 遗留口径的淡出区间（米）。写了这一行不会自动切到遗留口径 —— 远处口径
+            // 由 `farfield` 行控制（默认足迹截断，fade 参数被忽略）。
             ss >> out->waves.fade_start_m >> out->waves.fade_end_m;
+        } else if (tag == "farfield") {
+            // 远处口径：0（默认）= 足迹截断（无 fade、足迹无 8.6° 地板）；1 = 遗留 fade。
+            int v = 0;
+            ss >> v;
+            out->waves.far_field = (v != 0) ? jpov::WaterWaves::FarField::kLegacyFade
+                                            : jpov::WaterWaves::FarField::kFootprintTruncation;
         } else if (tag == "speed") {
             ss >> out->time_speed;
         } else if (tag == "stokes") {
@@ -1119,7 +1128,8 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s,
                        int water_debug, bool ab_lobe_var_p, bool ab_multiscatter,
                        bool ab_cull_normals, float ab_lobe_var_scale = 1.0f,
-                       float lod_px_min = 3.0f, float lod_px_max = 8.0f) {
+                       float lod_px_min = 3.0f, float lod_px_max = 8.0f,
+                       bool legacy_fade = false) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -1145,6 +1155,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     app.SetWaterWaveTime(wave_time_s);
     app.SetWaterWaveDebug(water_debug);   // 1=法线 2=像素内法线方差 11=探针 LOD
     app.SetWaterAbShading(ab_lobe_var_p, ab_multiscatter, ab_cull_normals);
+    app.SetWaterLegacyFade(legacy_fade);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -2207,9 +2218,12 @@ int main(int argc, char** argv) {
     //   --no-lobe-var-p   关 M1（太阳 lobe 不吃 var_p）
     //   --no-multiscatter 关 M2（多散射补偿）
     //   --no-cull-normals 关亚像素法线截断（= 法线永不杀；会走样，纯对照）
+    //   --wave-legacy-fade 切回遗留口径（足迹地板 0.15 + fade 距离淡出；只用于 A/B）
     bool ab_lobe_var_p = true;
     bool ab_multiscatter = true;
     bool ab_cull_normals = true;
+    // 远处口径：false（默认）= 足迹截断（没有 fade）；true = 遗留 fade 口径（A/B 对照）。
+    bool wave_legacy_fade = false;
     float ab_lobe_var_scale = 1.0f;   // M1 强度（--lobe-var-scale，A/B 找平衡点）
     float lod_px_min = 3.0f;          // 谱截断 min（--lod-px-min：小=波活更远）
     float lod_px_max = 8.0f;          // 谱截断 max（--lod-px-max：大=淡出更缓）
@@ -2275,6 +2289,8 @@ int main(int argc, char** argv) {
             ab_multiscatter = false;
         } else if (std::strcmp(argv[i], "--no-cull-normals") == 0) {
             ab_cull_normals = false;
+        } else if (std::strcmp(argv[i], "--wave-legacy-fade") == 0) {
+            wave_legacy_fade = true;
         } else if (std::strcmp(argv[i], "--lobe-var-scale") == 0 && i + 1 < argc) {
             ab_lobe_var_scale = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--lod-px-min") == 0 && i + 1 < argc) {
@@ -2292,13 +2308,13 @@ int main(int argc, char** argv) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
                                   water_debug, ab_lobe_var_p, ab_multiscatter,
                                   ab_cull_normals, ab_lobe_var_scale, lod_px_min,
-                                  lod_px_max);
+                                  lod_px_max, wave_legacy_fade);
     }
     if (!ocean_lab_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
                                   water_debug, ab_lobe_var_p, ab_multiscatter,
                                   ab_cull_normals, ab_lobe_var_scale, lod_px_min,
-                                  lod_px_max);
+                                  lod_px_max, wave_legacy_fade);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2315,7 +2331,7 @@ int main(int argc, char** argv) {
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir, ab_lobe_var_p, ab_multiscatter,
                                     ab_cull_normals, ab_lobe_var_scale, lod_px_min,
-                                    lod_px_max);
+                                    lod_px_max, wave_legacy_fade);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);
@@ -2400,6 +2416,8 @@ int main(int argc, char** argv) {
     if (start_ocean_lab) {
         app.SetOceanLab(true);
     }
+    // 远处口径（--wave-legacy-fade）：与面板勾选框同一个字段，交互/拍摄都走这里。
+    app.SetWaterLegacyFade(wave_legacy_fade);
     if (start_water_waves) {
         app.SetWaterScene(true);
         app.BuildWaterPeople();

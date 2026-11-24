@@ -58,6 +58,24 @@ inline float DispersionOmega(float k, float depth_m) {
 inline constexpr float kWaveLodPxMin = 3.0f;
 inline constexpr float kWaveLodPxMax = 8.0f;
 
+// ── 像素足迹的两个掠射护栏 + 上限 ──────────────────────────────────
+// 足迹 = t · 每像素弧度 / |rd.y|（水面相对视线是斜的 ⇒ 交点再被拉长 1/|rd.y|）。
+// |rd.y| → 0（视线贴水面）时它 → ∞，物理上对（一个像素确实盖住几公里海面），
+// 所以护栏只该防「除零/溢出」，不该防「变大」。
+//   · kGrazeFloorLegacy = 0.15（≈ 8.6°）：遗留口径的地板。它把有效掠射角钳住，
+//     足迹最大只到 t/6.67 ⇒ 截断被系统性推远（24 m 的波本该 336 m 死，算成 1080 m），
+//     **这正是历史上必须靠 fade 兜底的原因**。只由 kLegacyFade 使用。
+//   · kGrazeFloorPhysical = 1e-4：只防除零。剩下的发散由截断本身吃掉
+//     （footprint 大到 λ/footprint < LOD 门限 ⇒ 波自己消失），不需要第二道保险。
+inline constexpr float kGrazeFloorLegacy = 0.15f;
+inline constexpr float kGrazeFloorPhysical = 1.0e-4f;
+
+// 足迹上限（米）。极端掠射行（|rd.y| ~ 1e-4）的 t 会到几百公里，t·像素角/护栏
+// 仍可能溢出到 inf；inf 本身对截断无害（λ/inf = 0 ⇒ 全截断），但 `cam + rd·t` 里
+// `0 · inf = NaN` 会顺着 sin/cos 污染法线。钳到一个「远到什么都看不见」的值即可。
+// 1e6 m（1000 km）与 depth 的「无穷远」口径同量级，且远大于任何波长的截断距离。
+inline constexpr float kMaxFootprintM = 1.0e6f;
+
 // 二分次数：区间半宽 = ΣA/|rd.y|，12 次 ⇒ 精度 = 区间/4096（ΣA=1 m、|rd.y|=0.3 时 ~0.8 mm）。
 // 用二分而不是 Newton：区间端点必有变号（|h| ≤ ΣA），全局收敛且相邻像素连续
 // （Newton 在波谷/陡坡处 f'→0 会跳根，实测表现为法线噪点）。
@@ -156,9 +174,13 @@ inline float SmoothStep01(float u) {
 }
 
 // 远处淡出系数 ∈ [0,1]：1 = 全振幅，0 = 回到纯平面。
-// 按**相机水平距离**淡出（不是视轴深度）：远处高频波长小于像素时就该消失，
-// 否则 Newton 求交会在远处抖动、法线走样成噪点。
+// 按**相机水平距离**淡出（不是视轴深度）。
+// **只在 kLegacyFade 口径下生效**：kFootprintTruncation 口径没有距离淡出，恒 1
+//（远处的淡出由足迹截断完成，见 WaveFootprintM）。
 inline float WaveFadeFactor(const WaterWaves& waves, float horizontal_dist_m) {
+    if (waves.far_field != WaterWaves::FarField::kLegacyFade) {
+        return 1.0f;   // 足迹截断口径：没有 fade 这件事
+    }
     if (waves.fade_end_m <= waves.fade_start_m) {
         return 1.0f;   // 未配置淡出 ⇒ 恒 1
     }
@@ -171,6 +193,24 @@ inline float WaveFadeFactor(const WaterWaves& waves, float horizontal_dist_m) {
     const float x = (horizontal_dist_m - waves.fade_start_m) /
                     (waves.fade_end_m - waves.fade_start_m);
     return 1.0f - x * x * (3.0f - 2.0f * x);   // smoothstep
+}
+
+// 像素在水面上覆盖的世界尺寸（米）—— **CPU 参考与 GLSL 的唯一口径**（照抄会漂）。
+//   t_plane_m        视线与水平面的**平面**交点距离（米，> 0）
+//   ray_dir_y        视线方向的 y 分量（未归一也可；内部取 |·|）
+//   pixel_angle_rad  每像素弧度 = 2·tanHalfFov / viewport_h
+// 返回 0 ⇒ 调用方不要做截断（没有足迹信息）。
+// 口径由 waves.far_field 决定掠射护栏（见 kGrazeFloor* 的注释）。
+inline float WaveFootprintM(const WaterWaves& waves, float t_plane_m, float ray_dir_y,
+                           float pixel_angle_rad) {
+    if (!(t_plane_m > 0.0f) || !(pixel_angle_rad > 0.0f)) {
+        return 0.0f;
+    }
+    const float floor = (waves.far_field == WaterWaves::FarField::kLegacyFade)
+                            ? kGrazeFloorLegacy
+                            : kGrazeFloorPhysical;
+    const float graze = std::max(std::fabs(ray_dir_y), floor);
+    return std::min(t_plane_m * pixel_angle_rad / graze, kMaxFootprintM);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

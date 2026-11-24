@@ -147,13 +147,10 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
     Vec3f normal{0.0f, 1.0f, 0.0f};
     float footprint = 0.0f;   // 像素足迹（供 F_eff 用；着色器同一公式）
     if (waves != nullptr && waves->enabled && waves->num_waves > 0) {
-        // 像素在水面上覆盖的世界尺寸（与着色器同一公式：掠射按 |rd.y| 放大）。
+        // 像素在水面上覆盖的世界尺寸：**调同一个口径函数**（WaveFootprintM），
+        // 不在这里再写一遍公式 —— 抄两份就会漂（掠射护栏改变时只改到一边）。
         const float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
-        if (pixel_angle_rad > 0.0f && t_plane > 0.0f) {
-            const float rdy = (std::fabs(ray_dir.y()) < 0.15f) ? 0.15f
-                                                              : std::fabs(ray_dir.y());
-            footprint = t_plane * pixel_angle_rad / rdy;
-        }
+        footprint = WaveFootprintM(*waves, t_plane, ray_dir.y(), pixel_angle_rad);
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
                                   time_s, footprint, &wh, depth_m, cull_subpixel_normals,
