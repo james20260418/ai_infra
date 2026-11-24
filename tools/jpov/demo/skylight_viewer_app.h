@@ -899,12 +899,14 @@ private:
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
         // 行数**由面板自己声明**，不再手维护（2026-11-24 第二次踩坑：加控件忘了加行数，
-        // 水面/水位那两格直接画到屏幕外）。水体面板用到 row(0,0..15) + row(1,0..12)，
-        // 所以它需要 16 行；其余场景沿用 17 行。
-        // ⚠️ 改水体面板的 row 索引时，只需改 kWaterPanelRows（它就是「最大行号 + 1」）。
-        constexpr int kWaterPanelRows = 16;
-        const bool water_panel = IsOceanLab() || IsWaterScene();
-        const int   kRows    = water_panel ? kWaterPanelRows : 17;
+        // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
+        // 多给的行变成顶部一片空白。
+        // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
+        constexpr int kOceanLabPanelRows = 14;   // 场景4：row(0,0..13) + row(1,0..10)
+        constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
+        const int kRows = IsOceanLab()   ? kOceanLabPanelRows
+                        : IsWaterScene() ? kWaterPanelRows
+                                         : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -1037,21 +1039,13 @@ private:
                                       std::atan(lab_readout_.rms_slope) * 57.29577951308232));
                     ui_.Text(buf, row(1, 10));
                 }
-                // ⑧ 时间：冻结 + 精确秒数（**报障/截图必须**：波浪是时变的，
-                //    不冻结就没法把"有问题的那一帧"对齐）。
-                ui_.Checkbox("时间 冻结", &water_wave_time_freeze_, row(1, 13));
-                ui_.SliderFloat("时间 s", &water_wave_time_s_, row(1, 14), 0.0f, 120.0f, 2);
-                // 场景 3 才有岩板（场景几何，不是水参数）
-                if (!ocean_lab) {
-                    ui_.SliderFloat("岩板顶面深度 m", &slab_top_depth_m_, row(1, 12), 0.5f,
-                                    20.0f, 2);
-                }
-            };
-
-            if (IsOceanLab()) {
-                draw_water(/*ocean_lab=*/true);
+                // 场景 4 的面板到这里就结束：**必须早退**，否则会继续画下面那套
+                // 「SSR / 天光自由度」通用面板，它们用的也是 row(0,1..15) / row(1,0..)，
+                // 两套控件叠在同一批行上 ⇒ 文字互相重叠、完全不可读
+                //（2026-11-24 Danis 报障：「场景4 UI 重叠，字都混在一起」）。
                 return;
             }
+
             if (IsWaterScene()) {
                 ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 1));
                 ui_.SliderFloat("吸收 R 1/m", &water_sigma_a_r_, row(0, 2), 0.0f, 1.0f, 3);
