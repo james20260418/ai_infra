@@ -16,6 +16,10 @@
 // 每个组合还带一条 min_ab_ratio：ON 与「六项全关」的差异必须 ≥ 它（否则说明这项没生效，
 // 后面的 gold 比较就变成空测 —— 这条自检就是为了防"gold 很绿但什么都没测到"）。
 //
+// 第 12 个（2026-11-24）是「暗物体倒影」性质守护：机位取 Danis 报障那一帧的 HUD 机位，
+// 地板上那块像素按几何是正上方方块的倒影 —— 它曾因为"合成层用视空间法线采世界空间天光"
+// 被渲染成亮奶油色。除 gold 图外还带一条 lum_cap 断言（见 SsrGoldCase::lum_cap）。
+//
 // 场景/资产与交互查看器的「场景1」同源（镜面地板 + 24 个散布方块 + 桌子/橡树 +
 // 4 个镜面蓝人），但**全部参数在这里钉死**：gold 不能依赖面板默认值。
 
@@ -37,6 +41,19 @@
 #include "tools/jpov/test/test_utils.h"
 
 namespace jpov_ssr_gold {
+
+// 「性质探针」：在某块 ROI 上断言平均亮度落在 [min, max]（w == 0 = 不启用）。
+//
+// 为什么除了 gold 图还要它：gold 是**某一帧的像素**，可以被盲目重生成；探针锁的是**性质**
+// （"暗物体的倒影不能比物体本身亮一个数量级"，也不能变成黑洞）。两者互补。
+struct LumProbe {
+    int   x = 0;
+    int   y = 0;
+    int   w = 0;
+    int   h = 0;
+    float min_mean_lum = 0.0f;
+    float max_mean_lum = 255.0f;
+};
 
 // 一帧的全部自变量。默认值 = 「场景1 + 默认天光」的常规机位。
 struct SsrGoldCase {
@@ -66,10 +83,13 @@ struct SsrGoldCase {
     // 「这一项真的起作用」的下限：该组合 ON 与「六项全关」的显著变化像素占比必须 ≥ 它。
     // 0 = 不做这项断言（5 个老组合）。取值 ≈ 实测的 40%~50%，留出 llvmpipe 波动余量。
     float min_ab_ratio = 0.0f;
+
+    // 性质探针（见 LumProbe 的注释）。默认 w == 0 ⇒ 不启用。
+    LumProbe lum_cap;
 };
 
 // 0.0013333 ≈ asin(0.06 / 45)：相机离地 6 cm、距原点 45 m（真正的掠射）。
-inline constexpr SsrGoldCase kCases[11] = {
+inline constexpr SsrGoldCase kCases[12] = {
     {"graze_mirror", /*phi*/ 0.0013333f, /*theta*/ 0.6f, /*R*/ 45.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f,
      /*max_ray*/ 220, /*thick*/ 6.0f},
@@ -123,6 +143,19 @@ inline constexpr SsrGoldCase kCases[11] = {
     {"filter_atrous", /*phi*/ 0.95f, /*theta*/ 0.3f, /*R*/ 12.0f,
      /*sun*/ 35.0f, 60.0f, /*turb*/ 2.0f, /*floor*/ 0, /*scale*/ 0.5f, 8.0f, 0.6f,
      /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, false, /*atrous*/ true, 2.0f, 1, /*minAB*/ 0.016f},
+
+    // ── ⑫ 「暗物体倒影」性质守护（2026-11-24）──
+    // 机位 = 报障那一帧的 HUD 机位（pos (-2.2632, 1.7144, -2.7855) → 原点，俯角 25.5°）：
+    // 画面右中部那片地板正对一个 3.42 m 散布方块的正面 ⇒ 按几何它映的是**方块自己的
+    // 正脸**（同一帧实测 (62,62,64)）；ROI 取 x=904..958 / y=140..178。
+    // 修复前它是 (226,219,222)：SSR 命中的本来就是这个暗色（辐亮度缓冲 63,63,65），
+    // 但合成层拿**视空间**法线去采**世界空间**天光探针 ⇒ "退回来的那份"少减了 84%，
+    // 剩下的亮天空把倒影洗白了。gold 锁这一帧的像素，lum_cap 锁性质（防止盲目重定 gold）。
+    {"dark_reflection", /*phi*/ 0.44561944f, /*theta*/ -2.4592780f, /*R*/ 3.9774756f,
+     /*sun*/ 35.0f, 60.0f, /*turb*/ jpov_skylight::kTurbidityDef, /*floor*/ 0,
+     /*scale*/ 0.5f, 8.0f, 0.6f,
+     /*max_ray*/ 220, /*thick*/ 6.0f, 0.0f, 0.0f, 0.0f, false, false, false, 2.0f, 1, /*minAB*/ 0.0f,
+     /*lum_cap*/ {/*x*/ 904, /*y*/ 140, /*w*/ 54, /*h*/ 38, /*min*/ 40.0f, /*max*/ 160.0f}},
 };
 
 inline std::string AssetPath(const std::string& rel) {
