@@ -26,6 +26,11 @@
 //   · ssr_L/A 来自 `SsrFilter` 的 A 预乘 mip 链，LOD = roughness² · roughness_to_lod：
 //     粗糙度连续变化 ⇒ 反射连续变糊（"逐渐磨砂"），并且在覆盖率掉光处自然交回 env。
 //
+// 2026-11-24：env_term 的**坐标系**也是不变量 —— 属性纹理存的是**视空间**法线（SSR 的约定），
+//   而 uEnvCube 是**世界方向**的天球探针。合成层必须先把 (N, V) 转回世界空间再求值，
+//   否则减掉的不是 3D pass 当初加进去的那一份，差额（通常是个大正值）会留在画面上：
+//   镜面地板里"暗物体的倒影"整块发亮/发白，就是这条。
+//
 // 已知限制（本版，写清楚免得当成 bug）：
 //   · **AO 不逐像素**（用 uniform，默认 1；本管线没有 SSAO）。
 //   · **模糊半径不随距离补偿**：屏幕空间 mip 的角分辨率在远处偏大（远景倒影糊得比
@@ -36,6 +41,8 @@
 
 #ifndef JPOV_SRC_SSR_SSR_FUSION_H_
 #define JPOV_SRC_SSR_SSR_FUSION_H_
+
+#include <array>
 
 #include "tools/jpov/interface/render_command.h"
 
@@ -78,6 +85,15 @@ struct SsrFusionInputs {
     float env_max_lod = 0.0f;
     float env_sky_scale = 1.0f;
     bool env_enabled = false;
+
+    // 世界 → 视空间（3×3 旋转，列主序；**与属性 pass 的 uWorldToView 同一份**）。
+    //
+    // 合成层用 transpose() 得到视空间 → 世界空间：属性纹理里的法线是视空间的，而天球
+    // 探针按世界方向渲 ⇒ env_term 必须在世界空间求值，才能与 3D pass 加的那一份对齐。
+    // 零初始化 + Run 里的 CHECK：忘了填直接 crash，不要静默按单位阵算（那等于没修）。
+    std::array<float, 9> world_to_view = {0.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f};
 
     // 材质 + 升采样参数 + 调试开关
     SsrConfig cfg;

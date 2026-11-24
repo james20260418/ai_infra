@@ -426,6 +426,7 @@ void SsrIntegration::Render(const SsrPassInputs& in, unsigned int dst_fbo) {
     fi.far_plane = in.far_plane;
     fi.tan_half_fov_y = in.tan_half_fov_y;
     fi.aspect = in.aspect;
+    fi.world_to_view = in.world_to_view;   // 合成层要把法线转回世界空间再采天球探针
     fi.env_cube_tex = in.env_cube_tex;
     fi.env_max_lod = in.env_max_lod;
     fi.env_sky_scale = in.env_sky_scale;

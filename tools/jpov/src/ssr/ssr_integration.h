@@ -23,6 +23,8 @@
 #ifndef JPOV_SRC_SSR_SSR_INTEGRATION_H_
 #define JPOV_SRC_SSR_SSR_INTEGRATION_H_
 
+#include <array>
+
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/ssr/ssr_downsample.h"
@@ -47,6 +49,13 @@ struct SsrPassInputs {
     float far_plane = 0.0f;
     float tan_half_fov_y = 0.0f;
     float aspect = 0.0f;
+
+    // 世界 → 视空间（3×3 旋转，列主序；与属性 pass 上传的 uWorldToView 同一份）。
+    // 合成层要它的转置：属性纹理存的是视空间法线，而天球探针是世界方向的
+    //（见 SsrFusionInputs::world_to_view）。零 = 没填，SsrFusion::Run 会 CHECK 打回。
+    std::array<float, 9> world_to_view = {0.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f};
 
     // 反射层材质在 SsrConfig 里（base_color / metallic / roughness / ao）；
     // **本版只支持"所有反射体共用一套材质"**（见 ssr_fusion.h 的"已知限制"）。

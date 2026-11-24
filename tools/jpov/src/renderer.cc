@@ -1865,6 +1865,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 ssi.attr_mat_tex = ssr_attr_mat_tex_;
                 ssi.full_w = fbo_3d_w;
                 ssi.full_h = fbo_3d_h;
+                // 世界 → 视空间（列主序）：与 DrawSsrAttrPass 上传给属性 pass 的**同一份**。
+                // 合成层用它的转置把视空间法线转回世界空间（天球探针是世界方向的），否则
+                // env_term 会在错的方位取值 —— 减不掉 3D pass 已加的那一份（2026-11-24）。
+                float ssr_view[16];
+                BuildLookAt(cmds.camera.position, cmds.camera.target, cmds.camera.up, ssr_view);
+                ssi.world_to_view = {ssr_view[0], ssr_view[1], ssr_view[2],
+                                     ssr_view[4], ssr_view[5], ssr_view[6],
+                                     ssr_view[8], ssr_view[9], ssr_view[10]};
                 ssi.near_plane = cmds.camera.near;
                 ssi.far_plane = cmds.camera.far;
                 ssi.tan_half_fov_y = std::tan(0.5f * cmds.camera.fov * 3.14159265358979323846f / 180.0f);
