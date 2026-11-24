@@ -420,7 +420,10 @@ void main() {
 
     float sun_y = normalize(uSunDir).y;
     // 昼夜过渡：0=夜 1=日（太阳仰角连续）。
-    float daylight = clamp((sun_y - 0.03) / 0.10, 0.0, 1.0);
+    // 昼夜过渡（0=夜 1=日）。原实现从 sin(仰角)=0.03（≈1.7°）才开始、到 0.13（≈7.4°）
+    // 才满 ⇒ **太阳在 2° 时只有 5% 的日间光**，天空和云直接灰掉。
+    // 真实黄昏：太阳贴地平线时天空仍然极亮（只是变红）。改成从地平线起、3.4° 满。
+    float daylight = clamp(sun_y / 0.06, 0.0, 1.0);
 
     // ── 太阳盘（自发光天体）：角盘 + 色温推导色 + Beer-Lambert 衰减 ──
     // 参数：uSunRadius（角半径）+ uSunBrightness（亮度基数）+ uSunGlow（光晕）由用户给；
@@ -447,14 +450,20 @@ void main() {
     float sun_ang = 0.0;
     float disk = discMaskAndAngle(dir, sun_disc_dir, uSunRadius, sun_ang);
 
+    // 云对日盘的遮挡：盘亮度 ~2e5×天空，只靠 alpha over 时 α=0.9 仍透出 2e4
+    // ⇒ 对盘另加一个强指数（见 cloud_shader.h 的 cloudLightBlock）。
+    float sun_cloud_block = (uCloudOn != 0) ? cloudLightBlock(sun_dir) : 1.0;
+
     // sun_brightness ≤ 0 时不画（disk 为 0）；否则叠加自发光盘。
     float sun_enable = (uSunBrightness > 0.0 && uSunRadius > 0.0) ? 1.0 : 0.0;
-    vec3 sun_contrib = sun_body_color * (sun_brightness * disk * sun_enable);
+    vec3 sun_contrib =
+        sun_body_color * (sun_brightness * disk * sun_enable * sun_cloud_block);
 
     // 太阳光晕：σ = 2×盘半径（日盘固定宽度，不随浊度变）。
     float sun_glow = (uSunGlow > 0.0 && sun_enable > 0.0)
         ? discGlow(sun_ang, uSunRadius, uSunGlow, 2.0) : 0.0;
-    vec3 sun_glow_contrib = sun_body_color * (sun_glow * sun_enable);
+    vec3 sun_glow_contrib =
+        sun_body_color * (sun_glow * sun_enable * sun_cloud_block);
 
     // ── 月亮盘（自发光天体）：与日盘同一套推导链，只是参数/色温按月亮调 ──
     // 方向 uMoonDir 是**独立输入**（日月反向只是调用方的摆放选择，不是接口契约）。
@@ -476,7 +485,10 @@ void main() {
     float moon_ang = 0.0;
     float moon_disk = discMaskAndAngle(dir, moon_disc_dir, uMoonRadius, moon_ang);
     float moon_enable = (uMoonBrightness > 0.0 && uMoonRadius > 0.0) ? 1.0 : 0.0;
-    vec3 moon_contrib = moon_body_color * (moon_brightness * moon_disk * moon_enable);
+    // 云也遮月盘（同一套强指数；夜里唯一的天体光源）。
+    float moon_cloud_block = (uCloudOn != 0) ? cloudLightBlock(moon_dir) : 1.0;
+    vec3 moon_contrib =
+        moon_body_color * (moon_brightness * moon_disk * moon_enable * moon_cloud_block);
 
     // ── 月晕（本 PR 重点：**宽度受 turbidity 影响**）──
     // 物理依据：月晕/华是月光经大气中水汽/气溶胶的散射（日晕同理）。浊度越大（水汽/
@@ -486,14 +498,42 @@ void main() {
     float moon_glow_width = mix(2.0, 4.0, clamp((uTurbidity - 2.0) / 6.0, 0.0, 1.0));
     float moon_glow = (uMoonGlow > 0.0 && moon_enable > 0.0)
         ? discGlow(moon_ang, uMoonRadius, uMoonGlow, moon_glow_width) : 0.0;
-    vec3 moon_glow_contrib = moon_body_color * (moon_glow * moon_enable);
+    vec3 moon_glow_contrib =
+        moon_body_color * (moon_glow * moon_enable * moon_cloud_block);
 
+
+    // 云的环境色（cloud_bg）= 天光散射，**不含**日月盘/光晕（盘是 1e5 量级，
+    // 混进来会把云色直接打爆）。只在 uCloudOn 时被使用。
+    vec3 cloud_bg = vec3(0.0);
 
     vec3 sky;
+
+    // ── 地平线霾带（只在云开着时启用；uCloudOn==0 时整个分支不存在 ⇒ 零回归）──
+    //
+    // 没有它的话，天空在 dir.y=0 处**一整行跳变**到地色（实测一次跳 ~100 LSB），
+    // 那就是"地平线附近的云像被刀切/贴墙"的最大来源：云带被一条硬边截断。
+    // 物理上这里是视线路径最长的一段大气 ⇒ 散射把对比压平、颜色趋向"亮而不饱和"。
+    vec3 horizon_haze = vec3(0.0);
+    if (uCloudOn != 0) {
+        vec3 hz_dir = normalize(vec3(dir.x, 0.02, dir.z));
+        vec3 hz = preethamSky(hz_dir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
+        hz = mix(vec3(0.0), hz, daylight) * uDaylightSeason * uIntensity;
+        hz += nightSkyColor(0.0) * uIntensity * (1.0 - daylight);
+        // 霾 = 亮的但**去饱和**：这正是长路径多次散射的观感
+        float hz_lum = dot(hz, vec3(0.2126, 0.7152, 0.0722));
+        horizon_haze = mix(hz, vec3(hz_lum) * 1.15, 0.45);
+    }
+
     if (dir.y < 0.0) {
         // ── 地平线以下：纯色地色（避免天空倒影感），不采样大气模型 ──
         // 地色既非散射日光也非月亮，不受任何 season 乘子。
+        // 但最后 ~1.4° 要跟地平线霾带**渐变**，否则地平线是一刀切（见上）。
         sky = uGroundColor;
+        if (uCloudOn != 0) {
+            // 注意方向：smoothstep(-0.025, 0, y) 在 y→0⁻ 时为 1（地平线处最浓），
+            // 越往下越小 —— 之前写成 1-smoothstep 正好反了（霾全跑到最下面去了）。
+            sky = mix(sky, horizon_haze, 0.85 * smoothstep(-0.030, 0.0, dir.y));
+        }
     } else {
         // ── 太阳能通道：Preetham 白天散射 + 日盘 + 日晕，统一乘 daylight_season ──
         // 这里**不做 tone map** —— 天空输出保持 HDR 原始亮度（可 >1.0），
@@ -504,6 +544,8 @@ void main() {
         // 太阳落山后白天项→黑，"夜空"由本 shader 末尾的夜色双色加法叠加
         //（night_zenith_color / night_horizon_color）。
         solar = mix(vec3(0.0), solar, daylight);
+        // 云的「环境色」：散射光 × 季节乘子 × 天光亮度（与最终 sky 同单位）
+        cloud_bg = solar * uDaylightSeason * uIntensity;
 
         // 叠太阳盘/日晕（加法，和天空散射色在同一 HDR 域）。日盘是自发光天体，
         // 但同属"太阳能通道"，与散射天光一起受 daylight_season 染。
@@ -531,6 +573,36 @@ void main() {
     // 地平线以下不加：下半球由 ground_color 独占。夜色两色设为 0 时本行恒为 +0.0。
     if (dir.y >= 0.0) {
         sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
+        // 地平线以上 ~3.4° 的霾带：压对比、压饱和，让远云"溶"进去而不是被截断。
+        if (uCloudOn != 0) {
+            sky = mix(sky, horizon_haze, 0.55 * (1.0 - smoothstep(0.0, 0.06, dir.y)));
+        }
+    }
+
+    // ── 云（解析、只在天球上；uCloudOn == 0 时整段跳过 ⇒ 逐字节零回归）──
+    //
+    // 合成 = alpha over：云自然盖住背景（含日盘，盘已先乘 cloudLightBlock）。
+    // 云体色由「天光散射色 + 太阳/月亮直射」推导，所以 intensity / 季节 / 浊度
+    // 改的时候云跟着走，不需要第二套常数。
+    if (uCloudOn != 0 && dir.y > 0.0) {
+        vec3 cbg = cloud_bg +
+                   nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
+        // 主光：白天=太阳，夜里=月亮（同一个 daylight 时间轴，与主平行光的切换一致）
+        vec3 light_dir = normalize(sun_dir * daylight + moon_dir * (1.0 - daylight) +
+                                   vec3(0.0, 1.0e-4, 0.0));
+        vec3 light_col = (sun_body_color * daylight +
+                          moon_body_color * uMoonSeason * vec3(0.70, 0.82, 1.0) *
+                          (1.0 - daylight) * 0.075) *
+                         uIntensity;
+        // 低仰角时直射光穿过的大气质量暴增 ⇒ 蓝被散射掉；云才会"烧"成橙红。
+        light_col *= cloudSunExtinction(light_dir);
+        // 云的暗部由**整个上半球**照亮：天顶色（一次 Preetham，成本相对云可忽略）
+        // 与本地天色混合。夕阳时天顶深蓝 ⇒ 背光面偏紫，正是照片里的冷暖对比。
+        vec3 sky_up = preethamSky(vec3(0.0, 1.0, 0.0), sun_dir, uTurbidity) *
+                      SKY_LUMINANCE_SCALE * daylight * uDaylightSeason * uIntensity;
+        vec4 c = cloudSample(dir, uCamPos, cbg, sky_up, light_col, light_dir);
+        c.a *= smoothstep(0.0, 0.04, dir.y);   // 地平线淡出（避免与地色/水面接缝）
+        sky = mix(sky, c.rgb, c.a);
     }
 
     // 环境探针上半球用的**大气色** = **地平线方向**的天空色（只含大气/夜色，不含日月盘与光晕）。
@@ -544,6 +616,21 @@ void main() {
         vec3 solar_a = preethamSky(da, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
         sky_atmo = mix(vec3(0.0), solar_a, daylight) * uDaylightSeason * uIntensity;
         sky_atmo += nightSkyColor(clamp(da.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
+        // 云也进环境探针：否则镜面里是「没有云的天空」，与背景对不上。
+        if (uCloudOn != 0 && da.y > 0.0) {
+            vec3 light_dir = normalize(sun_dir * daylight + moon_dir * (1.0 - daylight) +
+                                       vec3(0.0, 1.0e-4, 0.0));
+            vec3 light_col = (sun_body_color * daylight +
+                              moon_body_color * uMoonSeason * vec3(0.70, 0.82, 1.0) *
+                          (1.0 - daylight) * 0.075) *
+                             uIntensity;
+            light_col *= cloudSunExtinction(light_dir);
+            vec3 sky_up_p = preethamSky(vec3(0.0, 1.0, 0.0), sun_dir, uTurbidity) *
+                            SKY_LUMINANCE_SCALE * daylight * uDaylightSeason * uIntensity;
+            vec4 c = cloudSample(da, uCamPos, sky_atmo, sky_up_p, light_col, light_dir);
+            c.a *= smoothstep(0.0, 0.04, da.y);
+            sky_atmo = mix(sky_atmo, c.rgb, c.a);
+        }
     }
     // 环境反射探针：上半球用大气色（不含日月盘），下半球用**地色**（乘以 intensity，
     //   与完整天空路径里 `sky *= uIntensity` 对地色的缩放一致）——金属球下半部

@@ -181,6 +181,20 @@ public:
     // 排除方块遮挡与受光干扰，只留天光背景。
     void SetShowScene(bool show) { show_scene_ = show; }
 
+    // **云高标尺场景**（2026-11-23，Danis 要求"加个大地方便视觉感受云的高度"）：
+    //   12 km 大地 + 远处 3 座"台地"（放大的方块，600~900 m 高，3.5~7 km 远）
+    //   + 近处一个 1 m 方块。三个距离档给出透视/尺度线索，云底 2400 m 才"看得出有多高"。
+    //   没有大气透视（远景雾已删），远处台地会是深色剪影 —— 这反而让"高度"更好读。
+    // 云层漂移时间：交互模式下按 frame_count 前进；**拍摄要关掉**（capture 自己定 t）。
+    void SetCloudTimeFromFrames(bool on) { cloud_time_from_frames_ = on; }
+
+    void SetCloudScaleScene(bool on) {
+        cloud_scale_scene_ = on;
+        // ⚠️ 相机远平面默认 1000 m —— 12 km 的大地与 5 km 外的台地会被**整段裁掉**，
+        //    于是"地面"看起来像一块无限延伸的死灰板（实测踩过）。标尺场景要放开。
+        scene_far_m_ = on ? 40000.0f : 1000.0f;
+    }
+
     // ── 场景下拉（见面板“场景”）────────────────────────────────────────────
     //   0 = 标定场：灰地面 + 三方块 + 桌子/橡树 + 蓝人（原有）
     //   1 = **镜面地板 + 随机模型**：SSR 的验收场景（地表大镜子，上方随机摆方块/模型）
@@ -468,7 +482,12 @@ public:
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
-        cmds->camera.far      = 1000.0f;
+        cmds->camera.far      = scene_far_m_;
+
+        // 云层漂移：交互模式按帧号推进（拍摄模式由 capture 显式给 cloud_time_s）。
+        if (cloud_time_from_frames_) {
+            deg_.cloud_time_s = static_cast<float>(frame_count) / 60.0f;
+        }
 
         // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
@@ -478,7 +497,25 @@ public:
         jpov::SkyCommand sky = nl.sky;
         // 地平线以下的填充色与探针下半球**不在这里配**：Renderer 在有水面时统一按
         // 「深海渐近色 + 水面 Fresnel」自动填（单一出处，见 renderer.cc 的天空段）。
-        cmds->sky     = sky;
+        // ── 云的交互期降档（软件光栅上的可用性）──
+        //
+        // 云的着色量 = 像素数 × 步数 × 3D 噪声查询。1280×720 / 32 步约 3×10^10 次运算
+        // ⇒ llvmpipe 上 ~3 fps，面板滑条根本拖不动。按住鼠标（拖视角 / 拖滑条）、
+        // 滚轮、或点击的那一帧降到 kCloudDraftSteps 步 + 关像素细节，**松手后的下一帧
+        // 自动回到全质量**（不做时间收敛，避免"永远回不去"的坑）。
+        //
+        // 只认鼠标：这个查看器的视角与面板都是鼠标操作；键盘没有绑云相关操作。
+        constexpr int kCloudDraftSteps = 8;
+        const bool interacting =
+            input.left.IsHold() || input.left.IsDrag() || input.left.IsClick() ||
+            input.right.IsHold() || input.right.IsDrag() || input.right.IsClick() ||
+            input.middle.IsHold() || input.middle.IsDrag() || input.middle.IsClick() ||
+            input.scroll_delta != 0.0f;
+        if (sky.cloud.enabled && interacting) {
+            sky.cloud.step_limit = kCloudDraftSteps;
+            sky.cloud.fine_detail = false;
+        }
+        cmds->sky = sky;
         // 天球折射不再由场景配置：Renderer 在「有水面 + 相机在水下」时自动填
         // （折射率取 WaterCommand::ior，与水体/水皮同一份配置）。
         cmds->sun     = nl.dir_light;
@@ -619,6 +656,35 @@ public:
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
             }
+        } else if (draw_scene && cloud_scale_scene_) {
+            // 12 km 大地（40×40 quad × 300）+ 远景台地 + 近景 1 m 方块。
+            cmds->DrawObject3D(ground_mesh_, mat_ground_,
+                               /*center*/ {0.0f, 0.0f, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  300.0f);
+            struct Landmark {
+                float x, z, size;
+            };
+            const Landmark kLandmarks[] = {
+                {-2600.0f, -5200.0f, 620.0f},
+                { 2100.0f, -6100.0f, 780.0f},
+                {-900.0f,  -7600.0f, 900.0f},
+                { 4200.0f, -3800.0f, 460.0f},
+            };
+            for (const Landmark& l : kLandmarks) {
+                cmds->DrawObject3D(box_mesh_, mat_clutter_,
+                                   /*center*/ {l.x, l.size * 0.5f, l.z},
+                                   /*up*/     {0.0f, 1.0f, 0.0f},
+                                   /*front*/  {0.0f, 0.0f, 1.0f},
+                                   /*scale*/  l.size);
+            }
+            // 近景 1 m 方块（人/车尺度参照）
+            cmds->DrawObject3D(box_mesh_, mat_low_,
+                               /*center*/ {2.5f, 0.5f, 6.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  1.0f);
         } else if (draw_scene) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
@@ -880,6 +946,35 @@ private:
         // 尤其是还要牵涉透明物体的各类合成）。需要地平线发白时，摆一个大薄板 PointFog；
         // 见 render_command.h 的 PointFog 头注释（注意它吃光照、占每 tile 预算）。
 
+        // ══ 云（左上角独立一块；不进底部主面板，避免把主面板撑到 84% 屏高）══
+        //
+        // 只有 4 个自由度：方案 / 云量（密度）/ 层底高度 / 风向 + 风速。
+        // 风速决定循环周期 = 19.2 km / 风速（任何风速都无缝，见 kCloudDriftM）。
+        {
+            const float kCloudX = 0.025f * w;
+            const float kCloudW = 0.30f * w;
+            const float kCloudTop = 0.03f * h;
+            auto crow = [&](int i) {
+                return jpov::UiRect{{kCloudX, kCloudTop + static_cast<float>(i) * (kRowH + kSpacing)},
+                                    {kCloudW, kRowH}};
+            };
+            const std::vector<const char*> schemes = {
+                "云 关", "云 s1 fbm（基准）", "云 s2 Worley（花椰菜）",
+                "云 s3 各向异性（层云）", "云 s4 域扭曲（湍流）",
+                "云 s7 域扭曲+高空卷云"};
+            // 每次从 deg_ 反推索引：capture 直接改 deg_.cloud_scheme 时下拉也能显示对
+            int sel = jpov_skylight::CloudUiIndexFromScheme(deg_.cloud_scheme);
+            cloud_ui_index_ = sel;
+            if (ui_.Combo("云方案", &sel, schemes, crow(0))) {
+                cloud_ui_index_ = sel;
+                deg_.cloud_scheme = jpov_skylight::CloudSchemeFromUiIndex(sel);
+            }
+            ui_.SliderFloat("云量 / 密度", &deg_.cloud_coverage, crow(1), 0.0f, 0.95f, 2);
+            ui_.SliderFloat("云层底高 m", &deg_.cloud_height_m, crow(2), 600.0f, 6000.0f, 0);
+            ui_.SliderFloat("风向 °", &deg_.cloud_wind_azim_deg, crow(3), 0.0f, 360.0f, 0);
+            ui_.SliderFloat("风速 m/s", &deg_.cloud_wind_speed_ms, crow(4), 0.0f, 60.0f, 1);
+        }
+
         // ── 右列 0..2：掠射淡出（2026-11-13）──
         // 放在列首：不受 SSR 总闸影响也能看见（关掉 SSR 时它不生效，但不会"找不到"）。
         // 掠射淡出：只有两个阈值（end <= start 即关闭）。
@@ -941,6 +1036,11 @@ private:
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    bool cloud_scale_scene_ = false;
+    bool cloud_time_from_frames_ = true;
+    // 面板「云方案」下拉的选中项（0 = 关，1..5 见 CloudSchemeFromUiIndex）。
+    int cloud_ui_index_ = 0;
+    float scene_far_m_ = 1000.0f;   // 远平面（云高标尺场景要放到 40 km）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     // 调试用光照覆盖（仅拍摄；见 SetAmbientOverride 的注释）。未设 = 用天际推导的默认值。
     std::optional<jpov::AmbientLight> ambient_override_;

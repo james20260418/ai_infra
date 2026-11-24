@@ -1366,6 +1366,63 @@ struct CascadeFBO {
     int size = 0;
 };
 
+// 云（已实现的解析方案，预实验用）—— **只作用于天球**，不进任何 3D pass。
+//
+// 云是**方向函数** d(dir)（不是世界空间体积）：相机平移不产生视差，也不需要求交。
+// 因此它只改两处：天空背景像素 + 环境探针 cubemap（同一个 shader 画 6 面，云自动
+// 进反射，镜面里看到的云与背景一致）。
+//
+// 不参与的东西（必须明确，别指望调云量能改光照）：
+//   · DirectionalLight 直射强度 / CSM 阴影 —— 云不投影到地面；
+//   · AmbientLight —— 天光推导不读云。
+// 唯一可选的耦合在**调用方**：`cloud::CoverageAtDirection()`（src/skydome/cloud_shader.h）
+// 给出太阳/月亮方向上的云量，调用方可据此把直射光衰减、把能量还给 ambient。
+//
+// 默认 `enabled = false` ⇒ 天空 shader 走原路径，**逐字节零回归**。
+enum class CloudScheme : int {
+    // 1..4 = **同一个 3D 体积链路**，只换密度场（对比用）；5 = 2D 多层（保留作为光照参考）
+    kPlaneFbm = 1,  // 体积 + fbm 积云（基准）
+    kWorley   = 2,  // 体积 + Worley 花椰菜（最像积云）
+    kCirrus   = 3,  // 体积 + 各向异性（层云/卷云丝缕）
+    kPlanes   = 4,  // 体积 + 域扭曲（湍流、边缘不规则）
+    kLayered  = 5,  // 2D 多层视差（非体积，保留作光照对照）
+    kVolume   = 6,  // 真 3D 密度场 + 固定高度层 + 光线步进
+    kVolumeHi = 7,  // 同上 + 高空卷云层（天空更有高度）
+};
+
+struct CloudCommand {
+    bool enabled = false;
+    CloudScheme scheme = CloudScheme::kPlaneFbm;
+
+    // 云量（0..1）：密度阈值偏置。0.3 ≈ 晴间多云，0.55 ≈ 多云，0.8 ≈ 阴。
+    float coverage = 0.45f;
+    // 云块大小（1/rad 量级）：越大云块越小。与 shader 的 uCloudScale 同义。
+    float scale = 1.0f;
+    // 云最厚处不透明度 [0,1]。
+    float opacity = 0.95f;
+    // 边缘过渡宽度（0..1）：越小边缘越硬（碎积云的锐利边界），越大越柔（层云）。
+    float softness = 0.35f;
+    // 确定性漂移偏移（CPU 累积，**不要**用 uTime 直接乘噪声 —— 帧率无关且 gold 可重放）。
+    Vec2f wind_offset = {0.0f, 0.0f};
+    // 云层高度 / 厚度（米，预留给真·体积方案；当前 kPlanes 不读）。
+    float layer_height_m = 1500.0f;
+    float layer_thickness_m = 900.0f;
+    // 太阳/月亮盘的遮挡强度 [0,1]。1 = 完全遮挡（被云盖住的日盘不该透出 2e4 的亮斑）。
+    float sun_occlusion = 1.0f;
+    // 云亮度倍数（艺术旋钮；1.0 = 与天光同源推导的默认亮度）。
+    float brightness = 1.0f;
+
+    // ── 交互期降档（llvmpipe 上的可用性开关）──
+    //
+    // 云的着色量是「像素数 × 步数 × 3D 噪声」，1280×720 下 32 步约 3×10^10 次运算/帧
+    // （见 docs/jpov_analytic_clouds_exp.md 第八轮）。拖动/连续输入时把步数降下来，
+    // 松手后自动回到全质量，是唯一能在软件光栅上保住可交互帧率的办法。
+    // 0 = 用 shader 默认（32 步）。
+    int step_limit = 0;
+    // 是否启用"像素锁定细节层"（关掉省约 12%）。降档时一起关。
+    bool fine_detail = true;
+};
+
 // 天空（Sky）指令 —— 程序化 Preetham 白天天空 + 夜空底色（SkyCommand）
 //
 // 用解析式大气模型（Preetham-Shirley-Smits 1999，见 box3d preetham.glsl）
@@ -2031,6 +2088,12 @@ struct SkyCommand {
         return {zenith, horizon, ground};
     }
 
+
+    // ── 云（默认关闭；见上方 CloudCommand）──
+    // 只影响天球背景 + 环境探针，不改任何光照（光照耦合由调用方决定）。
+    // ⚠️ 必须放在**最后**：本结构在很多地方用位置初始化（`SkyCommand{太阳方向, 浊度, …}`），
+    //    在前面插字段会静默改掉所有调用点的语义。
+    CloudCommand cloud;
 };
 
 // ── 天光构造参数（全部字段，带默认值）──

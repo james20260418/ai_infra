@@ -33,6 +33,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <string>
 
@@ -1839,6 +1840,338 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 用法：jpov_skylight_viewer --capture-clouds <out_dir>
+//
+// 解析云预实验：**5 个方案 × 3 个时相 = 15 张图**（s1_noon ... s5_night）。
+//
+// 为什么只拍天空（SetShowScene(false)）：云是方向函数，方块/地面只会分散审美判断；
+// 需要看「云对光照的影响」时另有 A/B（见 cloud_light_*）。
+//
+// 机位：φ = −0.22（仰视 12.6°）、R = 10 ⇒ 地平线落在画面下 ~1/3，2/3 是天。
+// 方位对准当天的天体（云在光源那一侧才有银边；月亮同理）。
+int RunCaptureClouds(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 解析云预实验（headless capture）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetCloudTimeFromFrames(false);   // 时间由本函数逐张给（循环验收要精确的 t）
+    app.SetShowScene(false);      // 只天空
+    app.SetSmaa(true, 0.08f);     // 云边缘的锯齿在 1280×720 上很明显
+    app.Init();
+    InstallScene(app);            // 只为保证材质/网格就绪（不画）
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 三个时相。天光自由度沿用查看器那套（云量按每张调）。
+    //   太阳仰角 / 方位 / 浊度 / 云量
+    struct Scene {
+        const char* tag;
+        float elev;
+        float azim;
+        float turb;
+        float coverage;
+        float cam_theta;   // 相机水平方位（正对天体方位）
+        float cam_phi;     // 负 = 抬头
+    };
+    // 月 45° 夜晚：sun_elev = −45 ⇒ 月亮在 +45°，方位 = sun_azim + 180。
+    const Scene scenes[3] = {
+        {"noon",   55.0f, 200.0f, 2.5f, 0.46f, 200.0f - 180.0f, -0.22f},
+        {"sunset",  7.0f, 214.0f, 4.0f, 0.52f, 214.0f - 180.0f, -0.20f},
+        {"night", -45.0f,  34.0f, 2.5f, 0.50f, 214.0f - 180.0f, -0.22f},
+    };
+
+    for (int scheme : {1, 2, 3, 4, 5, 7}) {
+        for (const Scene& sc : scenes) {
+            app.deg_.turbidity      = sc.turb;
+            app.deg_.daylight_season = 0.0f;
+            app.deg_.sun_elev_deg   = sc.elev;
+            app.deg_.sun_azim_deg   = sc.azim;
+            app.deg_.cloud_scheme   = scheme;
+            app.deg_.cloud_coverage = sc.coverage;
+            app.view_ = jpov_viewer::DefaultView();
+            app.view_.phi   = sc.cam_phi;
+            app.view_.theta = static_cast<double>(sc.cam_theta) * 3.14159265358979323846 / 180.0;
+            app.view_.R     = 10.0;
+            const std::string name =
+                "s" + std::to_string(scheme) + "_" + sc.tag;
+            const std::string path = out_dir + "/" + name + ".png";
+            app.RunOnce(input, winfo, path.c_str());
+            LOG(INFO) << "capture: " << path;
+        }
+    }
+
+    // s6（3D 体积）额外给一张"抬头 30°"：专门看**层底平面 + 厚度**（贴纸方案在这里必露馅）。
+    app.deg_.cloud_scheme = 6;
+    app.deg_.cloud_coverage = 0.50f;
+    app.deg_.turbidity = 2.5f;
+    app.deg_.sun_elev_deg = 55.0f;
+    app.deg_.sun_azim_deg = 200.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = -0.55;      // 仰视 ~31°
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R = 10.0;
+    app.RunOnce(input, winfo, (out_dir + "/s6_noon_lookup.png").c_str());
+
+    // ── 云高标尺：12 km 大地 + 远景台地，肉眼看云底（2400 m）到底有多高 ──
+    app.SetCloudScaleScene(true);
+    app.SetShowScene(true);
+    app.deg_.cloud_coverage = 0.52f;
+    app.deg_.turbidity = 2.5f;
+    app.deg_.sun_elev_deg = 55.0f;
+    // 太阳放到相机**背后**（方位 30°）：否则台地全是背光剪影，读不出轮廓，
+    // 反而像地平线上一个黑洞（实测）。
+    app.deg_.sun_azim_deg = 30.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    // ⚠️ φ 必须 ≥ 0：相机在天球填色的地面以下时，看到的"地面"其实是没有几何的
+    //    sky ground_color（一块死平的深灰板），台地也会被裁掉（实测踩过）。
+    app.view_.phi = 0.012;
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R = 42.0;
+    for (int scheme : {5, 6, 7, 2}) {
+        app.deg_.cloud_scheme = scheme;
+        app.RunOnce(input, winfo,
+                    (out_dir + "/scale_s" + std::to_string(scheme) + ".png").c_str());
+    }
+    app.SetCloudScaleScene(false);
+
+    // ── 循环动画：一个周期内 6 帧 + 回到起点的第 7 帧（必须与第 0 帧**逐字节相同**）──
+    app.deg_.cloud_scheme = 7;
+    app.deg_.cloud_coverage = 0.52f;
+    app.deg_.turbidity = 2.5f;
+    app.deg_.sun_elev_deg = 55.0f;
+    app.deg_.sun_azim_deg = 200.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = -0.28;
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R = 10.0;
+    for (int f = 0; f <= 6; ++f) {
+        // 一圈 = kCloudDriftM / 风速（默认 20 m/s ⇒ 960 s）；取 6 等分 + 回到起点
+        const float loop_s = jpov_skylight::kCloudDriftM / 20.0f;
+        app.deg_.cloud_time_s = loop_s * static_cast<float>(f) / 6.0f;
+        const std::string name = "loop_" + std::to_string(f);
+        app.RunOnce(input, winfo, (out_dir + "/" + name + ".png").c_str());
+    }
+
+    // ── 光照耦合 A/B（同一张图，只切「云量 → 直射光衰减」）──
+    // 目的：验证「太阳被云遮 → DirectionalLight 衰减成一个 ambient」到底有没有必要、
+    // 差别多大。左 = 不耦合（原推导），右 = 耦合。scene 用方块场（有影子才看得出来）。
+    app.SetShowScene(true);
+    app.deg_.cloud_scheme = 1;
+    app.deg_.cloud_coverage = 0.80f;    // 阴天：太阳基本在云后面
+    app.deg_.turbidity = 4.0f;
+    app.deg_.sun_elev_deg = 30.0f;
+    app.deg_.sun_azim_deg = 200.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = 0.28;
+    app.view_.theta = 200.0f * 3.14159265358979323846 / 180.0 - 3.14159265358979323846;
+    app.view_.R = 12.0;
+    {
+        // 先跑一次拿推导值，再手工关掉耦合做对照。
+        const jpov_skylight::SkyLighting lit =
+            jpov_skylight::MakeSkyLighting(app.deg_, false);
+        jpov::DirectionalLight raw = lit.dir_light;
+        jpov::AmbientLight raw_amb = lit.ambient;
+        // 还原「不耦合」的强度：MakeSkyLighting 已经乘过 (1−0.85·c)，这里除回去。
+        const float cov = jpov::cloud::CoverageAtDirection(
+            lit.sky.cloud, lit.sky.sun_dir);
+        if (cov > 0.0f) {
+            raw.intensity /= std::max(1.0f - 0.85f * cov, 1e-3f);
+            raw_amb.intensity /= (1.0f + 0.35f * cov);
+        }
+        app.SetSunOverride(raw);
+        app.SetAmbientOverride(raw_amb);
+        app.RunOnce(input, winfo,
+                    (out_dir + "/cloud_light_off.png").c_str());
+        app.ClearSunOverride();
+        app.ClearAmbientOverride();
+        app.RunOnce(input, winfo,
+                    (out_dir + "/cloud_light_on.png").c_str());
+    }
+
+    LOG(INFO) << "analytic clouds captured to " << out_dir
+              << " (5 schemes x 3 scenes + 2 light A/B)";
+    return 0;
+}
+
+// 用法：jpov_skylight_viewer --capture-cloud-ui <out_dir>
+//
+// 只出一张：**带面板**的云场景，用来核对「云方案 / 云量 / 层高 / 风向 / 风速」这五个
+// 控件的排版是否可用（capture 默认不出面板，见 SetShowPanel）。
+int RunCaptureCloudUi(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 解析云（面板核对）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(true);
+    app.SetShowScene(true);
+    app.SetCloudScaleScene(true);
+    app.SetCloudTimeFromFrames(false);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.cloud_scheme = 7;
+    app.deg_.cloud_coverage = 0.52f;
+    app.deg_.cloud_height_m = 2400.0f;
+    app.deg_.cloud_wind_azim_deg = 34.0f;
+    app.deg_.cloud_wind_speed_ms = 20.0f;
+    app.deg_.cloud_time_s = 120.0f;
+    app.deg_.turbidity = 2.5f;
+    app.deg_.sun_elev_deg = 55.0f;
+    app.deg_.sun_azim_deg = 30.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = 0.012;
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R = 42.0;
+    app.RunOnce(input, winfo, (out_dir + "/cloud_ui.png").c_str());
+    LOG(INFO) << "cloud UI captured to " << out_dir;
+    return 0;
+}
+
+
+// 用法：jpov_skylight_viewer --bench-clouds <out_dir>
+//
+// 回答一个问题的工具：**每帧到底花在哪、云占多少**。
+// 依次跑「关云(0) / s1 / s7」各 kBenchFrames 帧，打印 ms/帧：
+//   scheme=0 那档 = 固定开销（场景 + 面板 + SMAA + RunOnce 末尾整帧 glReadPixels + PNG 编码）
+//   差值 = 云的着色成本
+// 优化前后比这个差值即可（固定开销与分辨率/场景无关，不必重测）。
+int RunBenchClouds(const std::string& out_dir) {
+    constexpr int kBenchFrames = 4;   // 预热 1 帧之后的有效帧数
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 解析云性能（headless bench）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    // 诊断开关（临时）：BENCH_NO_SMAA / BENCH_NO_PANEL 用于把固定开销拆开
+    const bool no_smaa = std::getenv("BENCH_NO_SMAA") != nullptr;
+    const bool no_panel = std::getenv("BENCH_NO_PANEL") != nullptr;
+    app.SetShowPanel(!no_panel);       // 与交互模式一致（面板也要画）
+    app.SetShowScene(true);
+    app.SetSmaa(!no_smaa, 0.1f);
+    if (std::getenv("BENCH_NO_ENV") != nullptr) {
+        app.SetEnvSpecular(false);
+    }
+    app.SetCloudTimeFromFrames(false);  // 固定时间，避免每帧风偏移变化干扰计时
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.cloud_coverage = 0.52f;
+    app.deg_.cloud_height_m = 2400.0f;
+    app.deg_.cloud_wind_azim_deg = 34.0f;
+    app.deg_.cloud_wind_speed_ms = 20.0f;
+    app.deg_.cloud_time_s = 120.0f;
+    app.deg_.turbidity = 2.5f;
+    app.deg_.sun_elev_deg = 55.0f;
+    app.deg_.sun_azim_deg = 30.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi = -0.22;             // 抬头看云（云占屏比例最大）
+    app.view_.theta = 20.0 * 3.14159265358979323846 / 180.0;
+    app.view_.R = 10.0;
+
+    // BENCH_DRAFT=1：模拟「按住鼠标」（input.left = Hold），测交互期降档后的帧率。
+    // App 侧的降档判据就是 input.left.IsHold()（见 skylight_viewer_app.h）。
+    if (std::getenv("BENCH_DRAFT") != nullptr) {
+        input.left.raw = -2;   // MouseState: -2 = Hold
+    }
+
+    const std::string path = out_dir + "/bench.png";
+    for (int scheme : {1, 0, 7}) {
+        app.deg_.cloud_scheme = scheme;
+        // 预热：首帧有 shader 编译 / 纹理上传 / mip 生成
+        app.RunOnce(input, winfo, path.c_str());
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kBenchFrames; ++i) {
+            app.RunOnce(input, winfo, path.c_str());
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() /
+                          static_cast<double>(kBenchFrames);
+        LOG(INFO) << "bench scheme=" << scheme << ": " << ms << " ms/frame";
+    }
+    LOG(INFO) << "bench done（含整帧回读 + PNG 编码的固定开销）";
+    return 0;
+}
+
+
+// 用法：jpov_skylight_viewer --capture-sunset-ladder <out_dir>
+//
+// 只回答一个问题：**太阳越低，云越红到什么程度**。
+// 同一机位、同一云参数，只改太阳仰角 7/4/2/1°，看受光面的红蓝比怎么走
+//（配合 airmass 的讨论：照片那种橙红对应 AM≈15~40 的太阳高度，不是 7°）。
+int RunCaptureSunsetLadder(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 火烧云梯级（headless capture）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(false);
+    app.SetCloudTimeFromFrames(false);
+    app.Init();
+    InstallScene(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.deg_.cloud_scheme = 7;
+    app.deg_.cloud_coverage = 0.52f;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_azim_deg = 214.0f;
+    app.deg_.turbidity = 4.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = -0.20;
+    app.view_.theta = (214.0 - 180.0) * 3.14159265358979323846 / 180.0;
+    app.view_.R     = 10.0;
+
+    for (float elev : {7.0f, 4.0f, 2.0f, 1.0f}) {
+        app.deg_.sun_elev_deg = elev;
+        const std::string name = "sunset_elev_" +
+            std::to_string(static_cast<int>(elev * 10.0f)) + ".png";
+        app.RunOnce(input, winfo, (out_dir + "/" + name).c_str());
+    }
+    LOG(INFO) << "sunset ladder captured to " << out_dir;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -1862,6 +2195,10 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string clouds_out_dir;
+    std::string cloud_ui_out_dir;
+    std::string bench_clouds_out_dir;
+    std::string sunset_ladder_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -1904,9 +2241,29 @@ int main(int argc, char** argv) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
             sky_refract_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-clouds") == 0 && i + 1 < argc) {
+            clouds_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-cloud-ui") == 0 && i + 1 < argc) {
+            cloud_ui_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-sunset-ladder") == 0 && i + 1 < argc) {
+            sunset_ladder_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--bench-clouds") == 0 && i + 1 < argc) {
+            bench_clouds_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!sunset_ladder_out_dir.empty()) {
+        return RunCaptureSunsetLadder(sunset_ladder_out_dir);
+    }
+    if (!bench_clouds_out_dir.empty()) {
+        return RunBenchClouds(bench_clouds_out_dir);
+    }
+    if (!cloud_ui_out_dir.empty()) {
+        return RunCaptureCloudUi(cloud_ui_out_dir);
+    }
+    if (!clouds_out_dir.empty()) {
+        return RunCaptureClouds(clouds_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);

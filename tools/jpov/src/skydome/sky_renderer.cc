@@ -7,10 +7,13 @@
 
 #include "tools/jpov/src/skydome/sky_renderer.h"
 
+#include "tools/jpov/src/skydome/cloud_shader.h"     // kCloudGlsl（解析云）
 #include "tools/jpov/src/water/water_wave_math.h"     // kWaveGravity / 谱参数
 #include "tools/jpov/src/water/water_wave_shader.h"   // kWaterWaveGlsl（折射用其法线）
 
+#include <algorithm>
 #include <cmath>
+#include <string>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
 // 注：cube map / FBO 的枚举值（GL_TEXTURE_CUBE_MAP* / GL_FRAMEBUFFER /
@@ -178,12 +181,14 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
 
     // ---- 渲染（全屏三角形，画当前绑定 FBO 的整张背景）----
     // 波浪片段必须拼进天空 FS（天球折射要用法线）。一次性构造、静态缓存。
+    // 拼接顺序：云 → 波浪（两者都只用 GLSL 内建，互不依赖）。
     static const std::string kSkyFsWithWaves = [] {
         std::string s(kSkyFs);
         const std::string ver = "#version 330 core\n";
         const size_t pos = s.find(ver);
         if (pos != std::string::npos) {
-            s.insert(pos + ver.size(), water::kWaterWaveGlsl);
+            s.insert(pos + ver.size(),
+                     std::string(cloud::kCloudGlsl) + water::kWaterWaveGlsl);
         }
         return s;
     }();
@@ -232,6 +237,34 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform1f(shader_mgr.GetUniform(prog, "uMoonSetAngleRatio"),
                 sky_cmd.moon_set_angle_ratio);
     glUniform1i(shader_mgr.GetUniform(prog, "uSkyOutput"), static_cast<int>(output));
+
+    // ── 解析云（默认关；见 interface/render_command.h 的 CloudCommand）──
+    const CloudCommand& cl = sky_cmd.cloud;
+    glUniform1i(shader_mgr.GetUniform(prog, "uCloudOn"), cl.enabled ? 1 : 0);
+    glUniform1i(shader_mgr.GetUniform(prog, "uCloudScheme"),
+                static_cast<int>(cl.scheme));
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudCoverage"), cl.coverage);
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudScale"),
+                cl.scale > 0.0f ? cl.scale : 1.0f);
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudOpacity"),
+                std::clamp(cl.opacity, 0.0f, 1.0f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudSoftness"),
+                std::clamp(cl.softness, 0.001f, 1.0f));
+    glUniform2f(shader_mgr.GetUniform(prog, "uCloudWind"),
+                cl.wind_offset.x(), cl.wind_offset.y());
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudHeight"),
+                std::max(cl.layer_height_m, 1.0f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudThickness"),
+                std::max(cl.layer_thickness_m, 1.0f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudSunOcc"),
+                std::clamp(cl.sun_occlusion, 0.0f, 1.0f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uCloudBrightness"),
+                std::max(cl.brightness, 0.0f));
+    // 交互期降档：step_limit 越小越快（0 = shader 默认 32 步）。
+    glUniform1i(shader_mgr.GetUniform(prog, "uCloudStepLimit"),
+                std::max(cl.step_limit, 0));
+    glUniform1i(shader_mgr.GetUniform(prog, "uCloudFine"),
+                cl.fine_detail ? 1 : 0);
 
     // 天球折射：由 Renderer 按「有水面 + 相机在水下」自动填；0 ⇒ 关闭（逐字节零回归）。
     int bend_on = 0;

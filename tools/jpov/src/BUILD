@@ -268,7 +268,7 @@ cc_library(
 cc_library(
     name = "sky_renderer",
     srcs = ["skydome/sky_renderer.cc"],
-    hdrs = ["skydome/sky_renderer.h"],
+    hdrs = ["skydome/sky_renderer.h", "skydome/cloud_shader.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":shader_manager",

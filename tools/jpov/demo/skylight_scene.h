@@ -34,6 +34,7 @@
 #include <cmath>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/src/skydome/cloud_shader.h"   // 解析云 + CPU 同源云量
 
 namespace jpov_skylight {
 
@@ -302,6 +303,84 @@ inline jpov::Vec3f DirFromAngles(float elev_deg, float azim_deg) {
     return {ce * std::sin(a), std::sin(e), ce * std::cos(a)};
 }
 
+// ── 解析云（预实验）──
+//
+// 5 个方案共用一套旋钮，差异只在 shader 里的密度场（见 src/skydome/cloud_shader.h）。
+// 预设值是我看图调出来的起点，不是物理常数：
+//   · scale 越大云块越小（噪声域 = 平面坐标 × scale）
+//   · softness 小 ⇒ 边缘锐利（碎积云），大 ⇒ 柔和（层云/卷云）
+// 云层漂移：一圈循环的**世界行程** = period × 特征尺度 = 16 × 1200 m = 19.2 km。
+// 取 600 s 一圈 ⇒ 32 m/s（真实高空气流 ~20–40 m/s，等价于一段不加剪辑的延时）。
+// 关键是：噪声是**周期化**的（period 个胞元），所以 t=t0+T 时云场逐像素回到原状，
+// 循环播放没有跳变。
+// 一圈 = 噪声周期 × 特征尺度 = 16 × 1200 m = 19.2 km。给定风速就定了循环周期
+// （风越大转得越快，但**任何风速都无缝**——因为偏移量是按 modulo period 给的）。
+inline constexpr float kCloudNoisePeriod = 16.0f;        // 必须与 shader 一致
+inline constexpr float kCloudFeatureM = 1200.0f;         // 必须与 shader 一致
+inline constexpr float kCloudDriftM = kCloudNoisePeriod * kCloudFeatureM;
+
+// 时间 → 确定性风偏移（0..period）。**不要**在 shader 里用 uTime 直接乘噪声：
+// 帧率无关、gold 可重放，而且能保证循环点严格对齐。
+inline jpov::Vec2f CloudWindOffsetAt(float time_s, float speed_ms, float azim_rad) {
+    const float loop_s = kCloudDriftM / std::max(speed_ms, 0.5f);
+    float phase = std::fmod(time_s / loop_s, 1.0f);
+    if (phase < 0.0f) phase += 1.0f;
+    const float d = phase * kCloudNoisePeriod;
+    return {std::cos(azim_rad) * d, std::sin(azim_rad) * d};
+}
+
+// 面板里的方案下拉：索引 → CloudScheme（0 = 关）。s5（老 2D）不进面板。
+inline int CloudSchemeFromUiIndex(int i) {
+    static const int kMap[] = {0, 1, 2, 3, 4, 7};
+    if (i < 0 || i > 5) return 0;
+    return kMap[i];
+}
+
+// 反向映射（scheme → 下拉索引）：用于「代码里直接设了 cloud_scheme 时面板也同步显示」。
+inline int CloudUiIndexFromScheme(int scheme) {
+    static const int kMap[] = {0, 1, 2, 3, 4, 7};
+    for (int i = 0; i <= 5; ++i) {
+        if (kMap[i] == scheme) return i;
+    }
+    return 0;
+}
+
+inline jpov::CloudCommand CloudPreset(int scheme, float coverage, float time_s,
+                                      float height_m = 2400.0f,
+                                      float wind_azim_deg = 34.0f,
+                                      float wind_speed_ms = 20.0f) {
+    jpov::CloudCommand c;
+    c.enabled = true;
+    c.scheme = static_cast<jpov::CloudScheme>(scheme);
+    c.coverage = coverage;
+    c.wind_offset = CloudWindOffsetAt(time_s, wind_speed_ms,
+                                      wind_azim_deg * 3.14159265358979323846f / 180.0f);
+    c.layer_height_m = height_m;
+    switch (scheme) {
+        // 1..4 = **同一个体积链路**，只换密度场（fbm / Worley / 各向异性 / 域扭曲）。
+        // 层参数与 s6 一致：抬到 2400 m，云才不"压在头上"。
+        case 1:   // fbm 积云（基准）
+        case 2:   // Worley 花椰菜
+        case 3:   // 各向异性（层云/卷云）
+        case 4:   // 域扭曲（湍流）
+            c.scale = 1.0f; c.opacity = 0.95f; c.softness = 0.20f;
+            c.layer_thickness_m = 1800.0f;
+            break;
+        case 6:   // 3D 体积积云：2400–4200 m（抬高层 ⇒ 不再"压在头上"）
+            c.scale = 1.0f; c.opacity = 0.95f; c.softness = 0.20f;
+            c.layer_thickness_m = 1800.0f;
+            break;
+        case 7:   // 3D 体积 + 高空卷云（8200 m 附近）
+            c.scale = 1.0f; c.opacity = 0.95f; c.softness = 0.20f;
+            c.layer_thickness_m = 1800.0f;
+            break;
+        default:  // 5 = 卷云 + 积云两层
+            c.scale = 6.0f; c.opacity = 0.96f; c.softness = 0.14f;
+            break;
+    }
+    return c;
+}
+
 // ── 天光装配：由查看器自由度构造 SkyCommand，并**由它推导**全部光照 ──
 //
 // 场景另加两个模型（桌子 / 高模橡树）供夜色标定时观察物体受光；模型加载与
@@ -351,6 +430,12 @@ struct SkyDegrees {
     float sun_azim_deg = 45.0f;        // ③ 天体方位角 [0,360)
     float moon_red = 0.0f;             // ④ 月色变红 [0,1] → moon_season（1=血月）
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
+    int   cloud_scheme = 0;            // ⑥ 云方案（0 = 关，见 CloudScheme）
+    float cloud_coverage = 0.45f;      // ⑥ 云量 [0,1]
+    float cloud_time_s = 0.0f;         // ⑥ 云层漂移时间（秒）→ 风偏移（周期由风速定）
+    float cloud_height_m = 2400.0f;    // ⑥ 云层底高（米）
+    float cloud_wind_azim_deg = 34.0f; // ⑥ 风向（水平方位角）
+    float cloud_wind_speed_ms = 20.0f; // ⑥ 风速（m/s）→ 循环周期 = 19200 m / 风速
 };
 
 inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {
@@ -397,6 +482,32 @@ inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {
         // shader 按片元法线仰角在 [天, 天际线, 地] 间插值，替代单色 color；intensity 不变。
         out.ambient.tricolor = sky.AmbientTricolor();
     }
+
+    // ── 解析云（可选）──
+    if (d.cloud_scheme != 0) {
+        sky.cloud = CloudPreset(d.cloud_scheme, d.cloud_coverage, d.cloud_time_s,
+                                d.cloud_height_m, d.cloud_wind_azim_deg,
+                                d.cloud_wind_speed_ms);
+    }
+
+    // ── 云 → 光照的**唯一**耦合：太阳/月亮被遮住时，直射光衰减、能量转成 ambient ──
+    //
+    // 为什么需要它：天光推导（SunDirectionalIntensity / AmbientIntensity）完全不知道
+    // 云的存在 —— 于是一朵云遮住太阳时，背景暗了、地上的影子却还在、物体依旧被
+    // 直射光打亮，观感立刻穿帮（这是「云只进 sky shader」的**隐式代价**）。
+    //
+    // 口径（本预实验的选择，不是唯一答案）：
+    //   · 直射光乘 (1 − 0.85·c)，c = 光源方向上的云量；
+    //   · ambient 乘 (1 + 0.35·c)：直射被云散射掉的那部分回到天光里（能量守恒的粗近似；
+    //     真实散射是各向异性的，这里只保证「阴天更暗但不会整片发黑」）。
+    // 云量用 CPU 同源的噪声（cloud::CoverageAtDirection），与 shader 看到的是同一个场。
+    if (sky.cloud.enabled) {
+        const jpov::Vec3f light_dir = (sun_dir.y() >= 0.0f) ? sky.sun_dir : sky.moon_dir;
+        const float cov = jpov::cloud::CoverageAtDirection(sky.cloud, light_dir);
+        out.dir_light.intensity *= (1.0f - 0.85f * cov);
+        out.ambient.intensity *= (1.0f + 0.35f * cov);
+    }
+
     out.sky = sky;
     return out;
 }
