@@ -141,13 +141,10 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
     Vec3f normal{0.0f, 1.0f, 0.0f};
     float footprint = 0.0f;   // 像素足迹（供 F_eff 用；着色器同一公式）
     if (waves != nullptr && waves->enabled && waves->num_waves > 0) {
-        // 像素在水面上覆盖的世界尺寸（与着色器同一公式：掠射按 |rd.y| 放大）。
+        // 像素在水面上覆盖的世界尺寸：**调同一个口径函数**（WaveFootprintM），
+        // 不在这里再写一遍公式（护栏改了只改一处）。
         const float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
-        if (pixel_angle_rad > 0.0f && t_plane > 0.0f) {
-            const float rdy = (std::fabs(ray_dir.y()) < 0.15f) ? 0.15f
-                                                              : std::fabs(ray_dir.y());
-            footprint = t_plane * pixel_angle_rad / rdy;
-        }
+        footprint = WaveFootprintM(t_plane, ray_dir.y(), pixel_angle_rad);
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
                                   time_s, footprint, &wh, depth_m)) {
@@ -193,11 +190,7 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         out->reflectance = FresnelDielectric(out->cos_i, 1.0f, ior);   // 空气→水
         // ③ 反射率/透射率随粗糙度重分配（与着色器同一条）：投影到入射面后取角度平均菲涅尔。
         if (waves != nullptr && waves->enabled && waves->num_waves > 0 && t > 0.0f) {
-            const float dx = ray_dir.x() * t;
-            const float dz = ray_dir.z() * t;
-            const float hdist = std::sqrt(dx * dx + dz * dz);
-            const SlopeVariance v =
-                WaveFilteredVariance(*waves, footprint, WaveFadeFactor(*waves, hdist));
+            const SlopeVariance v = WaveFilteredVariance(*waves, footprint);
             const float rl = std::sqrt(ray_dir.x() * ray_dir.x() + ray_dir.z() * ray_dir.z());
             const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
             const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;

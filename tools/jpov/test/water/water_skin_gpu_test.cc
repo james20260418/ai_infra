@@ -646,8 +646,6 @@ jpov::WaterWaves MakeTestWaves() {
     w.waves[0] = jpov::WaterWave{1.0f, 0.0f, 9.0f, 0.35f, 0.2f};
     w.waves[1] = jpov::WaterWave{0.4f, 0.9f, 5.0f, 0.18f, 1.4f};
     w.waves[2] = jpov::WaterWave{-0.7f, 0.7f, 3.0f, 0.08f, 2.2f};
-    w.fade_start_m = 0.0f;
-    w.fade_end_m = 0.0f;   // 不淡出：整屏都在波里
     return w;
 }
 
@@ -892,8 +890,6 @@ TEST(WaterSkinGpu, FarFieldKeepsDetailNormals) {
     jpov::WaterWaves waves;
     waves.enabled = true;
     waves.displacement = true;
-    waves.fade_start_m = 0.0f;
-    waves.fade_end_m = 0.0f;   // 不淡出：差异只来自足迹截断
     waves.num_waves = 1;
     waves.waves[0] = jpov::WaterWave{1.0f, 0.0f, 0.5f, 0.02f, 0.0f};   // 唯一的位移波
     waves.num_detail_waves = 2;
@@ -922,9 +918,9 @@ TEST(WaterSkinGpu, FarFieldKeepsDetailNormals) {
                 continue;
             }
             const float t_plane = (level - cam.position.y()) / rd.y();
-            const float rdy = (std::fabs(rd.y()) < 0.15f) ? 0.15f : std::fabs(rd.y());
-            const float footprint = t_plane * pixel_angle / rdy;
-            if (jpov::water::WaveAmplitudeSum(waves, 0.0f, 0.0f, 1.0f, footprint) != 0.0f) {
+            const float footprint =
+                jpov::water::WaveFootprintM(t_plane, rd.y(), pixel_angle);
+            if (jpov::water::WaveAmplitudeSum(waves, 0.0f, 0.0f, footprint) != 0.0f) {
                 continue;   // 这条像素的位移波还活着 ⇒ 测的不是兜底分支
             }
             WaterPixel px;

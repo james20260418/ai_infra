@@ -988,7 +988,6 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 //   exposure <倍率>                         # tone map 之前的线性增益
 //   turbidity <值>                          # 大气浊度（2 清澈…8 霾）
 //   debug   <0|1|...>                       # 水皮 debug 档（0 = 正常）
-//   fade    <start_m> <end_m>               # 远处淡出
 //   speed   <倍率>                          # 色散时间倍率
 //   stokes  <0|1>                           # 二阶 Stokes 谐波
 //   warp    <amp_m> <lam0> <dx0> <dz0> <lam1> <dx1> <dz1>   # 域扭曲
@@ -1050,8 +1049,6 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
             ss >> out->turbidity;
         } else if (tag == "debug") {
             ss >> out->debug;
-        } else if (tag == "fade") {
-            ss >> out->waves.fade_start_m >> out->waves.fade_end_m;
         } else if (tag == "speed") {
             ss >> out->time_speed;
         } else if (tag == "stokes") {

@@ -293,8 +293,6 @@ public:
         w.waves[1] = jpov::WaterWave{0.6f, 0.8f, 13.0f, 0.14f, 1.7f};
         w.waves[2] = jpov::WaterWave{-0.8f, 0.6f, 7.0f, 0.07f, 0.4f};
         w.waves[3] = jpov::WaterWave{0.3f, -0.95f, 3.5f, 0.03f, 2.6f};
-        w.fade_start_m = 120.0f;
-        w.fade_end_m = 700.0f;
         w.flow_align = 0.6f;
         w.flow_wind_gain = 0.6f;
         w.flow_uv_scale = 1.0f / 220.0f;
@@ -1062,10 +1060,6 @@ private:
                 // 时间倍率改成"调用方对 time 的缩放"，不再是波谱里的字段。
                 ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_time_speed_,
                                 row(0, 10), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
-                                row(0, 11), 0.0f, 2000.0f, 0);
-                ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
-                                row(0, 12), 0.0f, 3000.0f, 0);
                 ui_.Checkbox("波浪 真位移 (关=只改法线)", &water_waves_.displacement,
                              row(0, 13));
                 // 左列最后一格：水皮开关（与 row(0,1) 的「水体介质」正交）。
