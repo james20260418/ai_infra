@@ -968,9 +968,13 @@ struct WaterCommand {
     // **不用 σ=0 表示"关"**（那会把"忘了填参数"当成合法行为）。
     bool medium_enabled = false;
 
-    // 水皮 debug 档（0 = 正常；1 = 法线色；2 = 法线方差；11 = 探针 LOD …）。
+    // 水皮 debug 档（0 = 正常；1 = 法线色；2 = 法线方差；11 = 探针 LOD；20..27 见 shader）。
     // 不属于产品配置，只给定位问题用；面板不暴露。
     int wave_debug = 0;
+
+    // 逐成分开关 + 单波隔离（诊断，见 WaterWaves::components 的位定义）。
+    uint32_t wave_components = 0xFFFFFFFFu;
+    int wave_solo = -1;
 
     // 唯一的水面时钟（秒）。水皮 / 天球折射 / （将来的）泡沫与粒子都用它。
     // 用 double：应用侧的时间累加/回放不丢精度（GLSL 的 uniform 是 float，

@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -1228,6 +1229,12 @@ int RunCaptureWaterRepro(const std::string& out_dir) {
     app.SetWaterWaveTime(0.0f);          // 冻结在 0 s
     if (const char* dbg = std::getenv("JPOV_WAVE_DEBUG")) {
         app.SetWaterWaveDebug(std::atoi(dbg));
+    }
+    if (const char* comp = std::getenv("JPOV_WAVE_COMPONENTS")) {
+        app.SetWaterWaveComponents(static_cast<uint32_t>(std::strtoul(comp, nullptr, 0)));
+    }
+    if (const char* solo = std::getenv("JPOV_WAVE_SOLO")) {
+        app.SetWaterWaveSolo(std::atoi(solo));
     }
     app.SetWaterSkin(std::getenv("JPOV_NO_SKIN") == nullptr);
     app.view_.phi = 30.5 * kPi / 180.0;  // CAM pos (8.18, 7.07, 9.12) -> 原点

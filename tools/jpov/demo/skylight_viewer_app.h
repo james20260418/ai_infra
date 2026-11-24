@@ -303,6 +303,11 @@ public:
     // 时间倍率（0 = 冻结）：调用方对 time 的缩放。
     void SetWaterTimeSpeed(float s) { ocean_time_speed_ = s; }
     int water_wave_debug_ = 0;   // 0 正常 / 1 法线颜色（capture 用，非产品配置）
+    // 诊断：逐成分开关 + 单波隔离（见 WaterWaves::components 的位定义）
+    uint32_t water_wave_components_ = 0xFFFFFFFFu;
+    int water_wave_solo_ = -1;
+    void SetWaterWaveComponents(uint32_t mask) { water_wave_components_ = mask; }
+    void SetWaterWaveSolo(int idx) { water_wave_solo_ = idx; }
     void SetWaterWaveDebug(int mode) { water_wave_debug_ = mode; }
     // 曝光（tone map 之前的线性增益）。1.0 = 物理锚点（默认）。
     float exposure_ = 1.0f;
@@ -764,6 +769,8 @@ public:
                 sa.x() > 0.0f || sa.y() > 0.0f || sa.z() > 0.0f || w.config.sigma_s > 0.0f;
             w.medium_enabled = water_medium_on_ && sigma_nonzero;
             w.wave_debug = water_wave_debug_;
+            w.wave_components = water_wave_components_;
+            w.wave_solo = water_wave_solo_;
             // 水面时钟：**唯一出处**（WaterCommand::time_s）。
             // 选型场走真实时钟（"动态的海"）；冻结时用滑条秒数（可复现对帧）。
             // 时间倍率对「冻结 / 实时」**都生效**（冻结时=慢动作到同一相位）。

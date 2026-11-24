@@ -34,6 +34,9 @@ uniform float uWaveWarpAmp;        // 每条载波的位移幅度（米）
 uniform vec4  uWaveWarp[4];        // 每条载波 (k, dir_x, dir_z, phase)
 // 二阶 Stokes 谐波（尖峰平谷）。0 ⇒ 关。
 uniform int   uWaveStokes2;
+// 诊断：逐成分开关（位定义见 WaterWaves::components）+ 单波隔离。
+uniform int   uWaveComponents;
+uniform int   uWaveSolo;
 // 细节短波（只进法线，不进几何）：(k, amplitude, phase, omega) + 方向。
 // omega 由 CPU 按有限水深算好传上来（与主波同一个 DispersionOmega）：GPU 不重算 ⇒
 // 每像素省 64 次 sqrt，且 CPU 参考与 GPU 逐位同源（"同源"不能只写在注释里）。
@@ -54,7 +57,7 @@ const int kWaveFirstHitMaxSteps = 64;
 //（2026-11-23「低风速海面硬边」= 2~4 px 的细节波在反射里走样）。
 // ⚠️ 与 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax 同值（GPU 对拍测试兜底）。
 const float kWaveLodPxMin = 3.0;
-const float kWaveLodPxMax = 8.0;
+const float kWaveLodPxMax = 24.0;   // 与 CPU 的 kWaveLodPxMax 同值（3->24 px 淡出带）
 // 掠射护栏（＝ CPU 的 water::kGrazeFloorSin，**只是除零护栏**）：|rd.y| 更小时
 // 足迹按这个下限算，再被 kWaveMaxFootprintM 钳住。2026-11-24 之前这里是 0.15（≈8.6°），
 // 那会把足迹系统性算小 3 倍（远处"看起来很细"其实是亚像素波没被杀）。
@@ -179,7 +182,7 @@ void WaveSlopeTensor(float footprint, out float sxx, out float sxz, out float sz
             szz += w * d.y * d.y;
         }
     }
-    if (uShortWaveMss > 0.0) {
+    if (uShortWaveMss > 0.0 && (uWaveComponents & 32) != 0) {   // bit5：短波 MSS
         vec2 d = uShortWaveDir;
         float dl = length(d);
         if (dl > 1.0e-6) {
@@ -250,13 +253,20 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
+        if (uWaveSolo >= 0 && i != uWaveSolo) {
+            continue;   // 诊断：单波隔离
+        }
+        bool use_h = ((uWaveComponents & 1) != 0);
+        bool use_n = ((uWaveComponents & 2) != 0);
+        bool use_warp = ((uWaveComponents & 8) != 0);
+        bool use_stokes = (uWaveStokes2 != 0) && ((uWaveComponents & 16) != 0);
         float amp = L.z * amp_gain * lod_amp;
         if (amp == 0.0) {
             continue;   // 亚像素（足迹截断）整条消失：省掉下面的 sin/cos
         }
-        float warp_scale = (warp_u_slope > 0.0)
+        float warp_scale = (use_warp && warp_u_slope > 0.0)
                                ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope))
-                               : 1.0;
+                               : 0.0;
         float wk = k * warp_scale;
         float wx = wk * dot(wdux, d);
         float wz = wk * dot(wduz, d);
@@ -264,13 +274,13 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
         float sin_p = sin(phase);
         float cos_p = need_grad ? cos(phase) : 0.0;
         vec2 g = vec2(k * d.x + wx, k * d.y + wz);
-        h += amp * sin_p;
-        grad += amp * g * cos_p;
-        if (uWaveStokes2 != 0) {
+        if (use_h) { h += amp * sin_p; }
+        if (use_n) { grad += amp * g * cos_p; }
+        if (use_stokes) {
             // −½kA²cos2θ：尖峰平谷。cos2θ = 1−2sin²θ，sin2θ = 2sinθcosθ。
             float sin2 = 2.0 * sin_p * cos_p;
-            h += -0.5 * k * amp * amp * (1.0 - 2.0 * sin_p * sin_p);
-            grad += k * amp * amp * sin2 * g;
+            if (use_h) { h += -0.5 * k * amp * amp * (1.0 - 2.0 * sin_p * sin_p); }
+            if (use_n) { grad += k * amp * amp * sin2 * g; }
         }
     }
 }
@@ -279,8 +289,8 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
 void WaveDetailGrad(vec2 p, float t, float footprint,
                     vec2 wu, vec2 wdux, vec2 wduz, out vec2 grad) {
     grad = vec2(0.0);
-    if (uWaveDetailCount <= 0) {
-        return;
+    if (uWaveDetailCount <= 0 || (uWaveComponents & 4) == 0) {
+        return;   // 诊断：bit2 关 ⇒ 细节波不进法线
     }
     float warp_u_slope_d = WaveWarpSlopeBound();
     for (int i = 0; i < 64; ++i) {

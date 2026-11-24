@@ -97,6 +97,12 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         glUniform4f(warp_loc + j, kTwoPi / w->warp_wavelength_m[j], dx, dz,
                     w->warp_phase_rad[j]);
     }
+    // 逐成分开关 + 单波隔离（诊断用；默认全开/-1 ⇒ 产品行为不变）
+    // ⚠️ 没有谱（w==nullptr / 关波）时必须是"全开"，否则 bit6/7/8 会把反射/太阳/F_eff 一起关掉
+    //    ⇒ 纯平面场景直接变黑（GPU 对拍用例立刻抓到）。
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveComponents"),
+                on ? static_cast<int>(w->components) : 0x7FFFFFFF);
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveSolo"), on ? w->solo_wave : -1);
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveStokes2"),
                 (on && w->stokes_second_order) ? 1 : 0);
 

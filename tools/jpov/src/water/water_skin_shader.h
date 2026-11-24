@@ -254,14 +254,14 @@ void main() {
                     : FresnelDielectric(cos_i, 1.0, uWaterIor);
     // ③ 角度平均菲涅尔：粗糙界面的方向反照率。反射↓、透射↑（两边一起动）。
     //    没有开关 —— 这是正确算法（掠射 2° 平面 0.80 → 0.36@MSS0.017）。
-    if (!under) {
+    if (!under && (uWaveComponents & 256) != 0) {   // bit8：F_eff（关掉=平面菲涅尔）
         F = RoughFresnelAlbedo(cos_i, var_p_mean, uWaterIor);
     }
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
     vec3 sun_spec = vec3(0.0);
     float NoV = dot(Vw, N);
-    if (uHasSun != 0) {
+    if (uHasSun != 0 && (uWaveComponents & 128) != 0) {   // bit7：太阳的像
         // ⚠️ **不能**用 `if (NoV>0 && NoL>0)` 硬门（2026-11-24 修）：
         //    掠射时大波倾角会让 NoL/NoV 在某一行跨过 0 ⇒ 高光从"有限值"**跳**到 0 ⇒
         //    一条亮度硬边（实测 y=103 处 37.8 LSB）。GGX 的 G1(NoL) 本身就 ∝ NoL ⇒
@@ -355,7 +355,9 @@ void main() {
         float env_lod_cap = 6.0;
         float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
         env_lod_debug = env_lod;
-        vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
+        vec3 refl = ((uWaveComponents & 64) != 0)   // bit6：探针反射
+                        ? textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale
+                        : vec3(0.0);
         // 环境反射 + 太阳的像。
         // ⚠️ 太阳项是**加法**：探针不含日月盘（kEnvProbe），SSR 也不负责它 ——
         //    将来接 SSR 时写成 F*(A*SSR + (1-A)*sky) + sun_spec，

@@ -1567,6 +1567,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             water_has_waves = water_readout.hs_total_m > 0.0f;
             water_spectrum.enabled = water_has_waves;
             water_spectrum.debug = wc.wave_debug;
+            water_spectrum.components = wc.wave_components;
+            water_spectrum.solo_wave = wc.wave_solo;
         }
 
         // 水体介质样本：视线侧（合成趟）、水皮的「深海积分反射」、镜面环境项共用这一份。
