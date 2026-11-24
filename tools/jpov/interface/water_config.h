@@ -172,6 +172,21 @@ inline float OceanCoxMunkMss(float wind_ms) {
     return 0.00512f * u + 0.003f + 0.00192f * u;
 }
 
+// ── 低风速外插修正（2026-11-24 修 Danis 报障）───────────────────────────
+// SMB 只在「已经起浪」的风速（约 ≥2 m/s）上成立。直接外插到 0.2 m/s 会得到
+// 「λp = 3.7 cm、Hs = 1.2 mm」——位移肉眼看不见，但陡度 kA 仍是 ~0.07（SMB 自相似），
+// 于是法线以 ω = √(gk) ≈ 41 rad/s（6.5 Hz）抖动 ⇒ 观感是「水面很快地在动」。
+// 真实海面在这个风速下几乎没有波动能量（黏性/表面张力主导），所以按 (u/u_min)²
+// 衰减振幅（能量 ∝ u⁴）；u ≥ u_min 时恒 1 ⇒ 默认 8 m/s 逐像素不变。
+inline float WindEnergyGate(float wind_ms) {
+    constexpr float kMinSeaWindMs = 2.0f;
+    if (!(wind_ms < kMinSeaWindMs)) {
+        return 1.0f;
+    }
+    const float t = std::max(wind_ms, 0.0f) / kMinSeaWindMs;
+    return t * t;
+}
+
 // ── 风 → (Hs, Tp)：SMB 经验式（U 取 10 m 高处风速）────────────────────
 // 充分成长：Hs∞ = 0.283·U²/g，Tp∞ = 7.54·U/g。
 // 风区受限：Hs = Hs∞·tanh[0.0125·(gF/U²)^0.42]，Tp = Tp∞·tanh[0.077·(gF/U²)^0.25]。
@@ -226,6 +241,8 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
     const float u = cfg.WindSpeedMs();
     float hs_w = 0.0f, tp_w = 0.0f;
     WindSeaHsTp(u, cfg.fetch_km, cfg.duration_h, &hs_w, &tp_w);
+    // 低风速外插修正（见 WindEnergyGate）：0.2 m/s 应该是"几乎不动"，不是"6 Hz 抖动"。
+    hs_w *= WindEnergyGate(u);
     const float two_pi = 6.28318530717958647692f;
     const float lam_p = (tp_w > 0.0f) ? 1.56f * tp_w * tp_w : 0.0f;
 
@@ -293,10 +310,19 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
     // 细节短波：λ 0.3–8 m，等陡度 kA=0.07，方向均匀（各向同性）。
     // 只进法线、不进求交 ⇒ 便宜的"碎光/粗糙度"。
     const int nd = quality.detail_waves;
-    // 细节短波的陡度 = 0.07 × sqrt(mss(U)/mss(8))：无风 ⇒ 没有碎波（镜面），
-    // 大风 ⇒ 更糙。把它写成固定常数会让"平静"预设也长满碎浪（实测 rms 坡度不变）。
-    const float kRefMss = OceanCoxMunkMss(8.0f);
-    const float steep = 0.07f * std::sqrt(OceanCoxMunkMss(u) / kRefMss);
+    // 细节短波的陡度 ∝ **波高**（能量），不是 ∝ √MSS：
+    //   · √(mss(U)/mss(8)) 在 U=0.2 仍有 √(0.0044/0.0594)=0.27 ⇒ 1.9% 坡度；
+    //     而 mss 里那个 +0.003 是 Cox–Munk 的拟合常数，只在 U=0 **恰好**归零，
+    //     于是 0.2 m/s 与 0 m/s 之间有一道悬崖（"微风也有碎浪、还抖得很快"）。
+    //   · 改成 0.07 · min(Hs/Hs(8 m/s, 同风区/风时), 1)：U=8 时**精确 0.07**（默认逐位不变），
+    //     微风下随能量平滑归零 —— 与"静水是玻璃"的物理一致。
+    //     归一化基准用**同一风区/风时**下的 8 m/s，而不是充分成长值（否则默认的
+    //     fetch-limited 工况会平白降 22% 细节 —— 那是改物理，不是修 bug）。
+    float hs_ref = 0.0f;
+    float tp_ref = 0.0f;
+    WindSeaHsTp(8.0f, cfg.fetch_km, cfg.duration_h, &hs_ref, &tp_ref);
+    const float detail_ratio = (hs_ref > 1.0e-6f) ? std::min(hs_w / hs_ref, 1.0f) : 0.0f;
+    const float steep = 0.07f * detail_ratio;
     for (int i = 0; i < nd; ++i) {
         const float t0 = OceanRand01(cfg.seed, 1000u + i);
         const float t1 = OceanRand01(cfg.seed, 2000u + i);
