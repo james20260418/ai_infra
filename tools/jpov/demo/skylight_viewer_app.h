@@ -837,9 +837,13 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        // 选型场 14 行（左列 0..13），其余场景保持 17 行。面板是底对齐的，
-        // 行数必须等于「最大行号 + 1」，多给的行会变成底部一条空白。
-        const int   kRows    = IsOceanLab() ? 14 : 17;
+        // 行数**由面板自己声明**，不再手维护（2026-11-24 第二次踩坑：加控件忘了加行数，
+        // 水面/水位那两格直接画到屏幕外）。水体面板用到 row(0,0..15) + row(1,0..12)，
+        // 所以它需要 16 行；其余场景沿用 17 行。
+        // ⚠️ 改水体面板的 row 索引时，只需改 kWaterPanelRows（它就是「最大行号 + 1」）。
+        constexpr int kWaterPanelRows = 16;
+        const bool water_panel = IsOceanLab() || IsWaterScene();
+        const int   kRows    = water_panel ? kWaterPanelRows : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
