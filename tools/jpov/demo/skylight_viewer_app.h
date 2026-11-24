@@ -1037,6 +1037,19 @@ private:
                                       std::atan(lab_readout_.rms_slope) * 57.29577951308232));
                     ui_.Text(buf, row(1, 10));
                 }
+                // ⑧ 时间：冻结 + 精确秒数（**报障/截图必须**：波浪是时变的，
+                //    不冻结就没法把"有问题的那一帧"对齐）。
+                ui_.Checkbox("时间 冻结", &water_wave_time_freeze_, row(1, 13));
+                ui_.SliderFloat("时间 s", &water_wave_time_s_, row(1, 14), 0.0f, 120.0f, 2);
+                // 场景 3 才有岩板（场景几何，不是水参数）
+                if (!ocean_lab) {
+                    ui_.SliderFloat("岩板顶面深度 m", &slab_top_depth_m_, row(1, 12), 0.5f,
+                                    20.0f, 2);
+                }
+            };
+
+            if (IsOceanLab()) {
+                draw_water(/*ocean_lab=*/true);
                 return;
             }
             if (IsWaterScene()) {
