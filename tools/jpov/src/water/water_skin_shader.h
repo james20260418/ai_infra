@@ -262,11 +262,8 @@ void main() {
     vec3 sun_spec = vec3(0.0);
     float NoV = dot(Vw, N);
     if (uHasSun != 0 && (uWaveComponents & 128) != 0) {   // bit7：太阳的像
-        // ⚠️ **不能**用 `if (NoV>0 && NoL>0)` 硬门（2026-11-24 修）：
-        //    掠射时大波倾角会让 NoL/NoV 在某一行跨过 0 ⇒ 高光从"有限值"**跳**到 0 ⇒
-        //    一条亮度硬边（实测 y=103 处 37.8 LSB）。GGX 的 G1(NoL) 本身就 ∝ NoL ⇒
-        //    取 max(·,0) 后项会**自然平滑地**趋于 0，不需要分支。
         float NoL = dot(uSunToward, N);
+        // A/B: 去掉硬门，改用 max(·,0)（G1 自然收敛到 0）
         NoV = max(NoV, 1.0e-4);
         NoL = max(NoL, 0.0);
         {
@@ -288,8 +285,8 @@ void main() {
             // 若 var_p 不进来，太阳的 lobe 会退化成一个 1 px 的亮线（实测 43 LSB 单行尖峰）。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
-                           + 2.0 * normal_var_px
-                           + 2.0 * var_p,
+                           + normal_var_px
+                           + 2.0 * var_p,   // A/B: M1（被截断的谱方差进 lobe）
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
@@ -328,12 +325,17 @@ void main() {
     } else {
         // 水面以上：天光探针沿镜像方向（方向必须夹到地平线以上 —— 探针下半球是“地色”）。
         vec3 rdir = reflect(rd, N);
-        // 反射方向落到地平线以下 ⇒ 关于地平线**镜像**（rdir.y = |rdir.y|）。
-        // 为什么不是"硬钳到 3°"（旧写法）：钳位在"开始钳"的那一行造 48 LSB 台阶；
-        // 为什么不是"直接采下半球"：探针下半球是**地色**（给金属球用的），会跳变。
-        // |y| 在 0 处连续 ⇒ 无台阶；且永远采地平线**以上**的天空（物理上波谷反射的
-        // 其实是水面另一侧的天空，比地色合理）。
-        rdir = normalize(vec3(rdir.x, abs(rdir.y), rdir.z));
+        float xz = sqrt(rdir.x * rdir.x + rdir.z * rdir.z);
+        if (rdir.y < uHorizonClampSin) {
+            if (xz > 1.0e-6) {
+                float scale = sqrt(1.0 - uHorizonClampSin * uHorizonClampSin) / xz;
+                rdir = vec3(rdir.x * scale, uHorizonClampSin, rdir.z * scale);
+            } else {
+                rdir = vec3(0.0, 1.0, 0.0);
+            }
+        } else {
+            rdir = normalize(rdir);
+        }
         // ── 探针 LOD（拉糊）：把「像素足迹内**未解析**的斜率方差」折成模糊角 ──
         // 两个来源相加（方差可加）：
         //   · var_p          谱侧：被足迹/淡出截掉的那部分波 + 短波 MSS。它们不在几何里，
@@ -350,9 +352,7 @@ void main() {
         const float kEnvTexelAngle = 1.5707963268 / 128.0;   // 常量表达式（GLSL const 限制）
         float refl_sigma = sqrt(max(var_p, 0.0) + max(normal_var_px, 0.0));
         float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
-        // 上限：探针下半球已改成"镜像天空"（不再有地色可卷），所以可以按需糊到 6 级
-        // （探针 2²/面 ≈ 45°）；实际值由 env_lod_need 决定，通常到不了。
-        float env_lod_cap = 6.0;
+        float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, rdir.y));
         float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
         env_lod_debug = env_lod;
         vec3 refl = ((uWaveComponents & 64) != 0)   // bit6：探针反射

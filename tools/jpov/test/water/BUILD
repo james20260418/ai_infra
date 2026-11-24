@@ -88,3 +88,4 @@ cc_test(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+

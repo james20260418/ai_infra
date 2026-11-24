@@ -56,7 +56,7 @@ inline float DispersionOmega(float k, float depth_m) {
 //（实测该工况带状对比度 32 → 9.6/255，其余机位几乎不变）。
 // ⚠️ 必须与 water_wave_shader.h 的 kWaveLodPxMin / kWaveLodPxMax 同值（有 GPU 对拍测试兜底）。
 inline constexpr float kWaveLodPxMin = 3.0f;
-inline constexpr float kWaveLodPxMax = 24.0f;
+inline constexpr float kWaveLodPxMax = 8.0f;
 // 淡出带宽 = 3→24 px（2026-11-24 从 3→8 改）：掠射时 footprint 与 1/|rd.y|^2 成正比，
 // 8 px 的窗口在屏幕上只占 2~3 行 => 短波几乎"瞬间消失" => 亮度硬边（实测 48 LSB 台阶）。
 // 24 px 让过渡跨 ~10 行（实测该带台阶 24.8 -> 7.8 LSB）；32 px 只再降到 6.6，收益递减。

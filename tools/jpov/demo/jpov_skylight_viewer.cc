@@ -1223,6 +1223,12 @@ int RunCaptureWaterRepro(const std::string& out_dir) {
     app.water_cfg_.depth_m = 3.5f;
     app.water_cfg_.level_y = 0.0f;
     app.deg_.sun_elev_deg = 9.0f;
+    if (const char* e = std::getenv("JPOV_SUN_ELEV")) {
+        app.deg_.sun_elev_deg = std::strtof(e, nullptr);
+    }
+    if (const char* a = std::getenv("JPOV_SUN_AZIM")) {
+        app.deg_.sun_azim_deg = std::strtof(a, nullptr);
+    }
     app.deg_.sun_azim_deg = 214.0f;
     app.deg_.turbidity = 2.0f;
     app.exposure_ = 0.6f;

@@ -57,7 +57,7 @@ const int kWaveFirstHitMaxSteps = 64;
 //（2026-11-23「低风速海面硬边」= 2~4 px 的细节波在反射里走样）。
 // ⚠️ 与 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax 同值（GPU 对拍测试兜底）。
 const float kWaveLodPxMin = 3.0;
-const float kWaveLodPxMax = 24.0;   // 与 CPU 的 kWaveLodPxMax 同值（3->24 px 淡出带）
+const float kWaveLodPxMax = 8.0;
 // 掠射护栏（＝ CPU 的 water::kGrazeFloorSin，**只是除零护栏**）：|rd.y| 更小时
 // 足迹按这个下限算，再被 kWaveMaxFootprintM 钳住。2026-11-24 之前这里是 0.15（≈8.6°），
 // 那会把足迹系统性算小 3 倍（远处"看起来很细"其实是亚像素波没被杀）。
@@ -253,8 +253,8 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
-        if (uWaveSolo >= 0 && i != uWaveSolo) {
-            continue;   // 诊断：单波隔离
+        if (uWaveSolo >= 0 && ((uWaveSolo >> i) & 1) == 0) {
+            continue;   // 诊断：按位保留主波（bit i = 第 i 条）
         }
         bool use_h = ((uWaveComponents & 1) != 0);
         bool use_n = ((uWaveComponents & 2) != 0);
