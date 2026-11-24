@@ -1196,6 +1196,53 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     return 0;
 }
 
+// 临时：复现 Danis 2026-11-24 15:00 的截图配置（硬边报障）。不进 PR。
+int RunCaptureWaterRepro(const std::string& out_dir) {
+    constexpr float kPi = 3.14159265358979323846f;
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水体硬边复现（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(true);
+    app.Init();
+    InstallScene(app);
+    app.SetOceanLab(true);
+    // —— 截图里的配置 ——
+    app.water_cfg_.SetWind(8.0f, 34.0f * kPi / 180.0f);
+    app.water_cfg_.fetch_km = 0.394f;
+    app.water_cfg_.duration_h = std::numeric_limits<float>::infinity();
+    app.water_cfg_.SetSwell(4.92f, 4.3f, 86.0f * kPi / 180.0f);
+    app.water_cfg_.depth_m = 3.5f;
+    app.water_cfg_.level_y = 0.0f;
+    app.deg_.sun_elev_deg = 9.0f;
+    app.deg_.sun_azim_deg = 214.0f;
+    app.deg_.turbidity = 2.0f;
+    app.exposure_ = 0.6f;
+    app.SetWaterWaveTime(0.0f);          // 冻结在 0 s
+    if (const char* dbg = std::getenv("JPOV_WAVE_DEBUG")) {
+        app.SetWaterWaveDebug(std::atoi(dbg));
+    }
+    app.SetWaterSkin(std::getenv("JPOV_NO_SKIN") == nullptr);
+    app.view_.phi = 30.5 * kPi / 180.0;  // CAM pos (8.18, 7.07, 9.12) -> 原点
+    app.view_.theta = 0.732f;
+    app.view_.R = 13.9f;
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+    app.RunOnce(input, winfo, (out_dir + "/water_repro.png").c_str());
+    LOG(INFO) << "water repro captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_path) {
     const float kPi = 3.14159265358979323846f;
     OceanConfig oc;
@@ -2175,6 +2222,7 @@ int main(int argc, char** argv) {
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
+    std::string water_repro_out_dir;   // 临时：水体硬边复现
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2221,6 +2269,8 @@ int main(int argc, char** argv) {
             camera_cross_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-sky-refract") == 0 && i + 1 < argc) {
             sky_refract_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-repro") == 0 && i + 1 < argc) {
+            water_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-report") == 0 && i + 1 < argc) {
             ocean_report_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-lab") == 0) {
@@ -2249,6 +2299,9 @@ int main(int argc, char** argv) {
     if (!ocean_lab_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
                                   water_debug);
+    }
+    if (!water_repro_out_dir.empty()) {
+        return RunCaptureWaterRepro(water_repro_out_dir);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
