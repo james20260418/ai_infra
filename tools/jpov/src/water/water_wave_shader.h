@@ -47,7 +47,7 @@ uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
 const int kWaveBisectIters = 12;
 // 「首个交点」隔离（与 CPU 的 kFirstHitStepLambdaFrac / kFirstHitMaxSteps 同值）：
 // 二分只保证找到一个根，不保证找到**最先撞到**的那个；掠射区间跨多个波峰时必须先扫。
-const float kWaveFirstHitStepFrac = 0.25;
+const float kWaveFirstHitStepFrac = 0.25;   // 相位周期的 1/4（掠射相切不能更粗），与 CPU 同值
 const int kWaveFirstHitMaxSteps = 64;
 // 抗锯齿：一个波长占的像素数 ≤ kMin 就消失、≥ kMax 就全幅（当前 3 / 8）。
 // 2 px 是 Nyquist 的理论极限，但逐像素中心采样 + 双线性插值实际需要 ≥ 4 px 才不走样

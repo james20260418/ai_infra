@@ -90,7 +90,9 @@ inline constexpr int kWaveBisectIterations = 12;
 //
 // 做法：先按「相位周期」步进扫过区间，找到**第一个**变号子区间，再对它二分。
 //   沿射线走 dt 时水平位移 = |rd.xz|·dt ⇒ 最细的存活波（λ_min）的相位周期 = λ_min/|rd.xz|。
-//   步长取周期的 1/4（Nyquist ×2 的再保守），步数上限 kFirstHitMaxSteps（超了退化为二分）。
+//   步长取周期的 **1/4**（不是 1/2）：掠射视线会**贴着波峰切过去**，此时"进入/离开"两点
+//   可以任意靠近（近似相切），半周期步长会整对跳过 —— 实测 λ=24 m 的用例用 0.5 就丢了
+//   39 m 处的首个交点（返回 83 m）。所以必须更细；上限 kFirstHitMaxSteps 兜住成本。
 inline constexpr float kFirstHitStepLambdaFrac = 0.25f;
 inline constexpr int kFirstHitMaxSteps = 64;
 
