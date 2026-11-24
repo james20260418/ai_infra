@@ -1537,7 +1537,7 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 两个开关互相独立（2026-11-19 Danis：要把水皮 / 介质 / 天球拆开看对齐）。
         const bool water_present = cmds.water.has_value();
         const bool water_skin_on = water_present && cmds.water->skin;
-        const bool water_medium_on = water_present && cmds.water->medium.enabled;
+        const bool water_medium_on = water_present && cmds.water->medium_enabled;
 
         // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
         //   直射 = cmds.sun，环境 = cmds.ambient —— 与 object3d 的 PBR 是同一份数据。
@@ -1555,34 +1555,46 @@ void Renderer::Render(const RenderCommandList& cmds,
             ambient_intensity = cmds.ambient->intensity;
         }
 
+        // ── 水面谱：由 WaterConfig **每帧纯函数展开**（2026-11-24 接口收口）──
+        // BuildWater 只做几十次 pow/sqrt（~1e2 flop），比加"配置版本号 + 失效逻辑"便宜。
+        // 无风无涌 ⇒ 谱全零 ⇒ 走纯平面路径（与旧版 waves.enabled=false 逐字节一致）。
+        WaterWaves water_spectrum;
+        water::WaterReadout water_readout;
+        bool water_has_waves = false;
+        if (cmds.water.has_value()) {
+            const WaterCommand& wc = *cmds.water;
+            water::BuildWater(wc.config, wc.quality, &water_spectrum, &water_readout);
+            water_has_waves = water_readout.hs_total_m > 0.0f;
+            water_spectrum.enabled = water_has_waves;
+            water_spectrum.debug = wc.wave_debug;
+        }
+
         // 水体介质样本：视线侧（合成趟）、水皮的「深海积分反射」、镜面环境项共用这一份。
-        // 不合法直接 crash（不静默退化）。
+        // 不合法直接 crash（不静默退化）。参数全部来自 WaterConfig（σs 是标量 = 逐通道同值）。
         water::WaterMediumSample water_medium;
         const water::WaterMediumSample* water_medium_ptr = nullptr;
         if (water_medium_on) {
-            const WaterMedium& wm = cmds.water->medium;
-            CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-            CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-            CHECK_GE(wm.sigma_a.z(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
-            CHECK_GE(wm.sigma_s.x(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-            CHECK_GE(wm.sigma_s.y(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-            CHECK_GE(wm.sigma_s.z(), 0.0f) << "WaterMedium::sigma_s 必须 >= 0";
-            CHECK_GE(wm.phase_g, 0.0f) << "WaterMedium::phase_g 必须 >= 0";
-            CHECK_LT(wm.phase_g, water::kMaxPhaseG)
-                << "WaterMedium::phase_g 必须 < kMaxPhaseG(0.95)：g→1 会让相位函数变成 δ";
+            const water::WaterConfig& wcfg = cmds.water->config;
+            CHECK_GE(wcfg.sigma_a.x(), 0.0f) << "WaterConfig::sigma_a 必须 >= 0";
+            CHECK_GE(wcfg.sigma_a.y(), 0.0f) << "WaterConfig::sigma_a 必须 >= 0";
+            CHECK_GE(wcfg.sigma_a.z(), 0.0f) << "WaterConfig::sigma_a 必须 >= 0";
+            CHECK_GE(wcfg.sigma_s, 0.0f) << "WaterConfig::sigma_s 必须 >= 0";
+            CHECK_GE(wcfg.phase_g, 0.0f) << "WaterConfig::phase_g 必须 >= 0";
+            CHECK_LT(wcfg.phase_g, water::kMaxPhaseG)
+                << "WaterConfig::phase_g 必须 < kMaxPhaseG(0.95)：g→1 会让相位函数变成 δ";
             // ior <= 1 在物理上不存在（水必须比空气密）；放行会让 sin²θw ≥ 1 ⇒
             // 没有折射解 ⇒ 增益 1/cosθw = inf 与 (1−R)=0 相乘得 NaN（known_issue §10 已记）。
-            CHECK_GE(cmds.water->ior, 1.0f)
-                << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
-            // σ 全 0 = 「忘了填参数」（enabled=false 才是「关」）：静默跑一趟恒等合成很误导。
-            CHECK(wm.sigma_a.x() > 0.0f || wm.sigma_a.y() > 0.0f || wm.sigma_a.z() > 0.0f ||
-                  wm.sigma_s.x() > 0.0f || wm.sigma_s.y() > 0.0f || wm.sigma_s.z() > 0.0f)
-                << "WaterMedium::enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 enabled=false";
-            water_medium.level_y = cmds.water->level_y;
-            water_medium.ior = cmds.water->ior;
-            water_medium.sigma_a = wm.sigma_a;
-            water_medium.sigma_s = wm.sigma_s;
-            water_medium.phase_g = wm.phase_g;
+            CHECK_GE(wcfg.ior, 1.0f)
+                << "WaterConfig::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
+            // σ 全 0 = 「忘了填参数」（medium_enabled=false 才是「关」）：静默跑一趟恒等合成很误导。
+            CHECK(wcfg.sigma_a.x() > 0.0f || wcfg.sigma_a.y() > 0.0f || wcfg.sigma_a.z() > 0.0f ||
+                  wcfg.sigma_s > 0.0f)
+                << "WaterCommand::medium_enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 medium_enabled=false";
+            water_medium.level_y = wcfg.level_y;
+            water_medium.ior = wcfg.ior;
+            water_medium.sigma_a = wcfg.sigma_a;
+            water_medium.sigma_s = {wcfg.sigma_s, wcfg.sigma_s, wcfg.sigma_s};
+            water_medium.phase_g = wcfg.phase_g;
             water_medium.ambient = {ambient_color.r * ambient_intensity,
                                     ambient_color.g * ambient_intensity,
                                     ambient_color.b * ambient_intensity};
@@ -1614,11 +1626,11 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 探针 cube 用**同一份**命令（它自己不弯，见契约 §3.3）。
             SkyCommand sky_cmd_for_draw = *cmds.sky;
             if (cmds.water.has_value() &&
-                cmds.camera.position.y() < cmds.water->level_y) {
-                CHECK_GE(cmds.water->ior, 1.0f)
+                cmds.camera.position.y() < cmds.water->config.level_y) {
+                CHECK_GE(cmds.water->config.ior, 1.0f)
                     << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
-                sky_cmd_for_draw.water_refract_ior = cmds.water->ior;
-                sky_cmd_for_draw.water_refract_level_y = cmds.water->level_y;
+                sky_cmd_for_draw.water_refract_ior = cmds.water->config.ior;
+                sky_cmd_for_draw.water_refract_level_y = cmds.water->config.level_y;
             } else {
                 sky_cmd_for_draw.water_refract_ior = 0.0f;
             }
@@ -1631,17 +1643,15 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // 水下时天球折射要消费水面波浪法线（Snell 窗边缘随波起伏）。
             // 相机在水上 / 没开波浪 ⇒ nullptr ⇒ 平面法线（逐字节零回归）。
-            const WaterWaves* sky_waves =
-                (cmds.water.has_value() && cmds.water->waves.enabled)
-                    ? &cmds.water->waves
-                    : nullptr;
+            const WaterWaves* sky_waves = water_has_waves ? &water_spectrum : nullptr;
             // 水面时钟与平底深度：**单一出处**是 WaterCommand（2026-11-20 从
             // WaterWaves 迁出）。天球折射与水皮必须用同一份，否则窗缘会错位。
             const float water_time_s = cmds.water.has_value()
                                            ? static_cast<float>(cmds.water->time_s)
                                            : 0.0f;
-            const float water_depth_m = cmds.water.has_value() ? cmds.water->depth_m
-                                                               : 300.0f;
+            const float water_depth_m = cmds.water.has_value()
+                                            ? cmds.water->config.depth_m
+                                            : 300.0f;
             SkyRenderer::DrawSky(sky_cmd_for_draw, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_, SkyRenderer::SkyOutput::kFull, sky_waves,
                                  water_time_s, water_depth_m);
@@ -2005,7 +2015,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR + MRT#1 场景深度）";
                 CHECK(cmds.sky.has_value())
                     << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
-                const bool cam_underwater = cmds.camera.position.y() < cmds.water->level_y;
+                const bool cam_underwater =
+                    cmds.camera.position.y() < cmds.water->config.level_y;
                 // 水下没有介质 ⇒ S_P(∞)=0 ⇒ 环外 α=1 会把画面盖成**黑环**（不是"暗水"）。
                 // 这个组合没有物理意义，直接拦。
                 CHECK(!cam_underwater || water_medium_ptr != nullptr)
@@ -2026,21 +2037,17 @@ void Renderer::Render(const RenderCommandList& cmds,
                 wsi.env_cube_tex = sky_env_tex_;
                 wsi.env_scale = cmds.env_specular.has_value()
                                     ? cmds.env_specular->sky_scale : 0.0f;
-                wsi.level_y = cmds.water->level_y;
-                wsi.ior = cmds.water->ior;
+                wsi.level_y = cmds.water->config.level_y;
+                wsi.ior = cmds.water->config.ior;
                 wsi.medium = water_medium_ptr;
-                // 波浪（法线扰动/高度置换）：enabled=false 或 num_waves=0 ⇒ 纯平面（零回归）。
-                wsi.waves = cmds.water->waves.enabled ? &cmds.water->waves : nullptr;
+                // 波浪（法线扰动/高度置换）：谱由 WaterConfig 展开 ⇒ 无风无涌时 nullptr（纯平面）。
+                // ⚠️ flow map 已不在调用接口里（WaterConfig 不表达"流向纹理"）—— BuildWater 把
+                //    三项 flow 系数置 0，等价于旧版"没绑纹理"；要恢复得在 WaterConfig 里补字段。
+                wsi.waves = water_has_waves ? &water_spectrum : nullptr;
                 wsi.wave_time_s = static_cast<float>(cmds.water->time_s);
-                wsi.wave_depth_m = cmds.water->depth_m;
-                wsi.wave_debug = cmds.water->waves.debug;
-                if (wsi.waves != nullptr && cmds.water->waves.flow_texture_id != 0) {
-                    const unsigned int flow_gl =
-                        texture_mgr_.GetGLTexture(cmds.water->waves.flow_texture_id);
-                    CHECK_NE(flow_gl, 0u)
-                        << "water.waves.flow_texture_id 未注册到 TextureManager";
-                    wsi.wave_flow_tex = flow_gl;
-                }
+                wsi.wave_depth_m = cmds.water->config.depth_m;
+                wsi.wave_debug = cmds.water->wave_debug;
+                wsi.wave_flow_tex = 0;
                 // 太阳的像：与介质分开传（介质可关，水面依然该有日盘像）。
                 if (eff_sun.has_value()) {
                     const Vec3f sd = eff_sun->direction;   // 传播方向

@@ -26,9 +26,16 @@
 #include <cstdint>
 #include <limits>
 
-#include "tools/jpov/interface/render_command.h"
+#include "geom/common/vec.h"
+
+#include "tools/jpov/interface/water_spectrum.h"
 
 namespace jpov {
+
+// 与 render_command.h 同一个别名（重复声明同一类型是合法的）：本头要能**单独**被 include
+// （配置/单测不需要拉进整个 RenderCommandList）。
+using Vec3f = geom::Vec3<float>;
+
 namespace water {
 
 // 深水判据用的厚度（米）。与 src/water/water_wave_math.h 的 kDeepWaterDepthM 同值

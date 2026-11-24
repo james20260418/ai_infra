@@ -34,6 +34,8 @@
 #include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/water_config.h"
+#include "tools/jpov/interface/water_spectrum.h"
 #include "tools/jpov/interface/flipbook.h"
 #include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/strip_types.h"
@@ -933,115 +935,19 @@ struct WaterMedium {
     float phase_g = 0.0f;
 };
 
-// ── 水面波浪（法线扰动 / 高度置换）──
+
+// 水体命令 = **物理/艺术配置**（WaterConfig）+ 两个 A/B 开关 + 时钟。
 //
-// 纯高度场 Gerstner 谱（**无水平位移/choppy** —— 求交必须是单值高度图）：
-//   h(p, t) = Σ A_i · sin(k_i·dot(dir_i, p.xz) − ω_i·t + φ_i)
-//   水面世界高度 = level_y + h；法线 = normalize(−∂h/∂x, 1, −∂h/∂z)。
-//   深水色散 ω = sqrt(g·k)（g = 9.81），所以「波长」决定传播速度，不另给周期。
-//
-// `enabled = false` 或 `num_waves = 0` ⇒ h ≡ 0 ⇒ 与旧的纯平面水皮**逐字节一致**。
-struct WaterWave {
-    // 传播方向（水平单位向量，xz 平面）。只取 xz，y 由调用方保证为 0。
-    float dir_x = 1.0f;
-    float dir_z = 0.0f;
-    // 波长（米，> 0）。决定波数 k = 2π/λ 与色散速度。
-    float wavelength_m = 10.0f;
-    // 振幅（米，>= 0）。
-    float amplitude_m = 0.1f;
-    // 初相（弧度）。
-    float phase_rad = 0.0f;
-};
-
-// 波浪谱 + 大尺度流向（flow map）配置。
-// 与 src/water/water_wave_math.h（CPU 参考 + GLSL 同源）一一对应。
-struct WaterWaves {
-    // false（默认）= 不启用：零回归。
-    bool enabled = false;
-
-    // 波数上限（与 GLSL uniform 数组长度一致）。
-    static constexpr int kMaxWaves = 8;
-
-    // 实际使用的波数 [0, kMaxWaves]。0 视同关闭。
-    int num_waves = 0;
-
-    // 波表。只有前 num_waves 项有效。
-    WaterWave waves[kMaxWaves];
-
-    // true（默认）= 真位移（求交沿高度场）；false = **法线 only**（求交仍用平面，
-    // 只把法线换成高度场的梯度）。后者物理上不一致，**只用于 debug 二分**：
-    // 用来判断「噪点」是求交引起的还是法线/着色引起的。
-    bool displacement = true;
-
-    // debug：0 = 正常；1 = 把交点法线编码成颜色输出（N*0.5+0.5）。
-    // 只用于定位「法线噪点」，不属于产品配置。
-    int debug = 0;
-
-    // ── 大尺度流向（flow map）──
-    // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。
-    // texture_id = 0 ⇒ 无 flow（各向同性谱）。
-    uint32_t flow_texture_id = 0;      // TextureManager id；0 = 无 flow
-    float flow_uv_scale = 1.0f / 200.0f;  // 世界米 → uv（默认一张纹理覆盖 200 m）
-    float flow_strength = 1.0f;        // flow 向量整体增益（|flow| ≤ strength）
-    // 波方向朝 flow 对齐的强度 [0,1]：0 = 不调方向，1 = 完全顺流。
-    float flow_align = 0.5f;
-    // flow 强度对振幅的增益：A *= (1 + flow_wind_gain·|flow|)。
-    float flow_wind_gain = 1.0f;
-
-    // 没有任何「按距离淡出」参数（2026-11-24 删除）：远处怎么变平由像素足迹的谱截断
-    // 决定（λ/footprint 落到 3 px 以下就消失，方差转进 BRDF）。距离上的硬性压平既没有
-    // 物理依据，也掩盖了「远场不该走求交」这个事实（见 docs/jpov_water_farfield_design.md）。
-
-    // ── 大尺度相位扭曲（domain warp）──
-    // 把整片波场按低频位移场 u(p) 平移：θ_i += k_i·dot(u, d_i)，u = Σ_j A_j·dir_j·sin(...)。
-    // 为什么要它：h 是**平面波之和**，每条波峰都是无限长直线，4 个平面波的干涉必然是
-    // 晶格（“周期性花纹”）。纯靠加波数只能把晶格变密，不能消掉。低频位移让波峰弯曲/
-    // 分叉/长度不一，这是**唯一**在不引入 choppy 的前提下打破平面波特性的手段。
-    // 仍然是解析、单值高度场：求交结构一行不用改，|h| ≤ ΣA 也不变。
-    // warp_amplitude_m = 0 ⇒ 关（默认，逐字节旧行为）。
-    float warp_amplitude_m = 0.0f;
-    // 低频载波（最多 4 条）：波长（米，> 0）与方向（xz，单位向量）。
-    // 4 条时波长取不可公比（37/64/112/197 m）⇒ 位移场本身接近噪声，不再是
-    // 「一个大格子掰弯小格子」（2 条载波时仍会看出单一尺度的起伏）。
-    static constexpr int kWarpCarriers = 4;
-    float warp_wavelength_m[kWarpCarriers] = {37.0f, 64.0f, 112.0f, 197.0f};
-    float warp_dir_x[kWarpCarriers] = {0.83f, -0.47f, 0.35f, -0.92f};
-    float warp_dir_z[kWarpCarriers] = {0.56f, 0.88f, 0.94f, -0.39f};
-    // 每条载波的初相（弧度）。不同场景给不同值即可错开图案。
-    float warp_phase_rad[kWarpCarriers] = {0.9f, 2.7f, 4.4f, 1.6f};
-
-    // ── 二阶 Stokes 谐波（深水，尖峰平谷）──
-    // h_i += −½·k_i·A_i²·cos(2θ_i)。真实风浪的非线性最低阶修正：峰更尖、谷更平，
-    // 且峰谷不再对称（线性叠加的偏度恒为 0）。解析、单值 ⇒ 求交结构不变；
-    // 用已有 sinθ/cosθ 的双角恒等式求值 ⇒ **0 次额外三角函数**。
-    // 代价：求交区间上界从 ΣA 变成 Σ(A + ½kA²)（陡度 0.07 时约 +3.5%）。
-    bool stokes_second_order = false;
-
-    // ── 细节短波（只进法线，不进几何）──
-    // 与 `short_wave`（只进 MSS→粗糙度）正交：这里的波**真的改法线**，
-    // 但**不参与高度/求交**（求交只走 waves[]，否则二分成本 ×N）。
-    // 用途：近场 0.3~2 m 的 chop —— 照片里的“棱角/碎光”主要来自这一档。
-    // 被像素足迹截断的部分照旧折进斜率方差（WaveFilteredVariance），不会丢能量。
-    static constexpr int kMaxDetailWaves = 64;
-    int num_detail_waves = 0;
-    WaterWave detail_waves[kMaxDetailWaves];
-
-    // ── 短波（毛细波/短重力波）────────────────────────────────────────
-    // 它们在任意可见距离上都被像素吞掉 ⇒ **不进几何**（不改 displacement / 法线 / 求交），
-    // 只贡献斜率方差。配置 = 2D 风向 + 风速（MSS 由 Cox–Munk 实测关系给出）。
-    // 本 PR 只有它参与产品逻辑：MSS → 反射率/透射率重分配（F_eff）。
-    struct ShortWave {
-        float dir_x = 1.0f;          // 风向（xz，单位）；0,0 ⇒ 退回各向同性
-        float dir_z = 0.0f;
-        float wind_speed_ms = 0.0f;  // 10 m 高处风速（m/s）；0 = 不加短波
-    };
-    ShortWave short_wave;
-};
-
-// 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。
+// 2026-11-24 收口（Danis）：这个结构**不再暴露波表（WaterWaves）**。
+// 调用方（场景 / UI / 配置文件）只需要说「风多大、吹哪边、风区多大、有没有涌、
+// 水有多深、水有多蓝」；波谱怎么离散、相位怎么随机、主波几条细节几条，全部由
+// `water::BuildWater(config, quality, ...)` 在渲染器里**每帧纯函数展开**。
+//   ⇒ 好处：① 接口只有物理量，换一个水体（海/湖/池塘/水洼）只是换参数；
+//            ② UI 与接口 1:1（面板上每一个控件都对应这里的一个字段，反之亦然）；
+//            ③ 不再有「UI 能调但接口没有」或「接口有但没人能调」的字段。
 //
 // 存在 ≠ 有水：`cmds.water` 有值 = **这个世界有水这份配置**；
-//   `skin`（默认 true）= **要画界面层**；`medium.enabled` = **要算体积**。
+//   `skin`（默认 true）= **要画界面层**；`medium_enabled` = **要算体积**。
 // 两者可以单独成立（只画界面 / 只算体积 / 都不画），前置条件各不相同。
 //
 // Pre-conditions（不满足时 Renderer 直接 CHECK，不静默降级）：
@@ -1049,45 +955,35 @@ struct WaterWaves {
 //   · 要有 `cmds.sky`：水下的 Snell 窗内容由天空 pass 的折射天球提供；
 //   · 相机在水面**以上**时还要有 `cmds.env_specular` 且 `sky_scale > 0`：
 //     水面唯一的反射源是天光探针（探针不含日月盘，太阳另走解析项）；
-//   · 相机在水面**以下**时必须 `medium.enabled`：否则 S_P(∞)=0，环外 α=1 会盖成黑环；
-//   · `ior >= 1`（水不得比空气疏：ior<1 会让折射无解 ⇒ 介质增益出现 0·inf = NaN）；
-//   · `medium.enabled` 时 σa/σs 不能全为 0（要关请用 enabled=false）。
+//   · 相机在水面**以下**时必须 `medium_enabled`：否则 S_P(∞)=0，环外 α=1 会盖成黑环；
+//   · `config.ior >= 1`（水不得比空气疏：ior<1 会让折射无解 ⇒ 介质增益出现 0·inf = NaN）；
+//   · `medium_enabled` 时 σa/σs 不能全为 0（要关请用 medium_enabled=false）。
 struct WaterCommand {
-    // 水面世界高度（米，y-up）。相机高于它 = 从上看；低于它 = 从下看。
-    // 没有「平面尺寸」这个参数：视线越接近水平，交点距离 → ∞，几何上必须解析求交。
-    float level_y = 0.0f;
-
     // 界面层（水皮 WBO）是否要画。false ⇒ 不产生那一层（反射/透射/水面高光全没有），
     // 水体介质仍可单独生效。默认 true（旧行为逐字节不变）。
     // 用途：把「水皮 / 介质 / 天球」拆开看对齐（地平线归谁、Snell 窗归谁）。
     bool skin = true;
 
-    // 水的折射率。用于菲涅尔、全内反射临界角、太阳折射方向、界面增益。
-    // 物理值：1.333（20°C 纯水）。取值必须 >= 1（1.0 = 无界面/调试值：不折弯、不反射）。
-    float ior = 1.333f;
+    // 水体介质（吸收/散射）是否要算。σ / 相位函数从 `config` 取 ——
+    // **不用 σ=0 表示"关"**（那会把"忘了填参数"当成合法行为）。
+    bool medium_enabled = false;
 
-    // ── 每帧时钟与水体厚度（2026-11-20 从 WaterWaves 迁出）──
-    // 唯一的水面时间：水皮 / 天球折射 / （将来的）泡沫与粒子都用它。
-    // **不放在 WaterWaves 里**：谱是静态配置，时间是帧状态。混在一起就没法缓存配置，
-    // 也没法让"冻结 / 回放 / 慢动作"变成调用方的一次参数替换。
-    // 用 double：**应用侧**的时间累加/回放不丢精度（几千秒后 float 的累加步长已经接近
-    // 一个帧间隔）。但注意 GLSL 的 uniform 是 float：上传时会被截断，所以真正可见的
-    // 相位误差上限由 float 决定（3600 s 时 ulp ≈ 0.24 ms、10^5 s 时 ≈ 8 ms ⇒ 相位 ~0.02 rad）。
-    // 要在"连续跑几天"的场景里彻底避开，调用方应自己减一个 session 起点（epoch），
-    // 别指望这里给 double 就能一路精确到微秒。
+    // 水皮 debug 档（0 = 正常；1 = 法线色；2 = 法线方差；11 = 探针 LOD …）。
+    // 不属于产品配置，只给定位问题用；面板不暴露。
+    int wave_debug = 0;
+
+    // 唯一的水面时钟（秒）。水皮 / 天球折射 / （将来的）泡沫与粒子都用它。
+    // 用 double：应用侧的时间累加/回放不丢精度（GLSL 的 uniform 是 float，
+    // 真正可见的相位误差上限由 float 决定：3600 s 时 ulp ≈ 0.24 ms）。
     double time_s = 0.0;
 
-    // 平底深度（米，> 0）。只影响深水色散 ω = √(g·k·tanh(k·d))（浅水变慢、变短）。
-    // 介质积分仍是 level_y 以下的半空间（known_issue §10.12）；海底几何属于场景。
-    float depth_m = 300.0f;
+    // ── 物理 / 艺术配置（**唯一**可调入口）──
+    // 风（速度/吹向/风区/风时）、涌、介质（σa/σs/g）、ior、水深、水位、seed。
+    // 见 interface/water_config.h；BuildWater 把它展开成谱。
+    water::WaterConfig config;
 
-    // 水体介质（吸收/散射）。enabled = true 时合成趟会把介质积分进画面。
-    WaterMedium medium;
-
-    // 水面波浪（法线扰动/高度置换）。enabled = false ⇒ 纯平面（零回归）。
-    // ⚠️ 波浪只改**界面几何**（水皮求交与法线）；水体介质仍按 level_y 的半空间积分
-    //    （波浪化介质见 known_issue §11.5，另 PR）。
-    WaterWaves waves;
+    // 谱的离散档（主波 4/8、细节 32/64）。属于"质量挡位"，不是水体外观参数。
+    water::WaterQuality quality;
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。

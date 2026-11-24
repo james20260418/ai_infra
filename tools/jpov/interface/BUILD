@@ -6,11 +6,19 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 # WaterConfig — 海面「人类可读」配置（艺术层：风/涌/介质）+ BuildWater() 展开成谱。
 # 纯 CPU、GL-free、只在配置变化时算一次（见 docs/ocean_api_design.md §8）。
 cc_library(
+    name = "water_spectrum",
+    hdrs = ["water_spectrum.h"],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
     name = "water_config",
     hdrs = ["water_config.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":render_command",
+        ":water_spectrum",
+        "//geom/common:vec",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
@@ -103,6 +111,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
+        ":water_config",
+        ":water_spectrum",
         ":gltf_object",
         ":pbr_material",
         ":particle_types",

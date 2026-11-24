@@ -1,5 +1,10 @@
 # 海面「人类可读」接口设计（OceanState → 谱 → 渲染）
 
+> **落地状态（2026-11-24 接口收口）**：分层已**全链路落地** ——
+> `RenderCommandList.water` 装的就是 `WaterConfig`（`WaterCommand{config, quality}`），
+> 谱由渲染器每帧 `BuildWater()` 展开；**调用方再也看不到波表/波幅倍率/淡出/护栏**。
+> UI 与命令 1:1（同一组字段）。旧的"手填 `WaterWaves` 塞进命令"的口子已删除。
+>
 > **落地状态（2026-11-23）**：v1 已按本文口径落地成 `interface/water_config.h`
 > （`WaterConfig` + `BuildWater` + `WaterQuality`/`WaterReadout`，测试在
 > `test/water/ocean_state_test.cc`）。文中出现的 `OceanState` / `OceanCondition` /

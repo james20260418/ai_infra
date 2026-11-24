@@ -439,8 +439,8 @@ TEST(WaterMediumMath, GlslConstantsMatchCpu) {
     EXPECT_NEAR(ParseGlslConst(glsl, "kWmAmbientT"),
                 jpov::water::kAmbientInterfaceTransmittance, 1e-6f);
     EXPECT_NEAR(ParseGlslConst(glsl, "kWmMaxG"), jpov::water::kMaxPhaseG, 1e-6f);
-    // 接口层的默认 ior 也不能另写一个数（WaterCommand 在 interface，常量在 src/water）。
-    EXPECT_FLOAT_EQ(jpov::WaterCommand{}.ior, jpov::water::kWaterIorDefault);
+    // 接口层的默认 ior 也不能另写一个数（WaterConfig 在 interface，常量在 src/water）。
+    EXPECT_FLOAT_EQ(jpov::water::WaterConfig{}.ior, jpov::water::kWaterIorDefault);
 }
 
 // Corner case：ior <= 1（比空气还疏）物理上不存在，但 `CHECK_GT(ior, 0)` 会放行。

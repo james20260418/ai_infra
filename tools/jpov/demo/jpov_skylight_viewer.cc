@@ -598,7 +598,7 @@ int RunCaptureHorizonRepro(const std::string& out_dir) {
     app.SetWaterMedium(true);
     app.SetSlabDepth(2.0f);
     app.SetWaterWaves(true);
-    app.SetWaterWaveAmplitudeScale(0.0f);
+    app.SetWaterWindSpeed(0.0f);   // 静水（= 风速 0）
 
     LOG(INFO) << "repro: default deg_ = elev " << app.deg_.sun_elev_deg
               << " azim " << app.deg_.sun_azim_deg
@@ -639,7 +639,7 @@ int RunCaptureHorizonRepro(const std::string& out_dir) {
         app.RunOnce(input, winfo, (out_dir + "/repro_his_waves_off.png").c_str());
         // debug：alpha / t（波幅 0 = 与关掉等价，但能让 debug 透传）
         app.SetWaterWaves(true);
-        app.SetWaterWaveAmplitudeScale(0.0f);
+        app.SetWaterWindSpeed(0.0f);   // 静水（= 风速 0）
         app.SetWaterWaveDebug(6);
         app.RunOnce(input, winfo, (out_dir + "/repro_dbg_cover.png").c_str());
         // 二分：关掉**水体介质**（保留水皮）——暗线还在=反射/探针；消失=介质合成
@@ -651,7 +651,7 @@ int RunCaptureHorizonRepro(const std::string& out_dir) {
         app.SetWaterWaveDebug(5);
         app.RunOnce(input, winfo, (out_dir + "/repro_dbg_t.png").c_str());
         app.SetWaterWaveDebug(0);
-        app.SetWaterWaveAmplitudeScale(1.0f);
+        app.SetWaterWindSpeed(jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     }
 
     // 对照：同一机位、**把水整个关掉**（没有 WaterCommand）。
@@ -676,10 +676,10 @@ int RunCaptureHorizonRepro(const std::string& out_dir) {
     app.SetWaterWaves(false);
     app.RunOnce(input, winfo, (out_dir + "/under_snell_waves_off.png").c_str());
     app.SetWaterWaves(true);
-    app.SetWaterWaveAmplitudeScale(2.0f);
+    app.SetWaterWindSpeed(1.5f * jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.RunOnce(input, winfo, (out_dir + "/under_snell_waves_on.png").c_str());
     // （水下不能关介质：renderer 有 CHECK，"水下必须开 medium"否则环外 α=1 会盖成黑环）
-    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterWindSpeed(jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.SetWaterLevel(0.0f);
 
     // ── Danis 报障机位：贴水面仰视（cam.y = -0.438，水面下 0.44 m），时间冻结 43.82 s ──
@@ -753,7 +753,7 @@ int RunCaptureWaterCoverage(const std::string& out_dir) {
     app.SetWaterMedium(true);
     app.SetWaterSkin(true);
     app.SetWaterWaves(true);
-    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterWindSpeed(jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.SetWaterLevel(0.0f);
 
     // 机位 A：太阳贴地平线（+4°）、远机位 —— 合成硬边就出在这里
@@ -818,7 +818,7 @@ int RunCaptureBoxCut(const std::string& out_dir) {
     app.SetWaterMedium(true);
     app.SetWaterSkin(true);
     app.SetWaterWaves(true);
-    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterWindSpeed(jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.SetWaterLevel(0.0f);
 
     // 他 16:41 截图：pos (-8.6907061, 0.40962684, -2.30289817) -> (0,0,0), fov 60
@@ -902,7 +902,7 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
     //   A = 交互启动默认（phi 0.25 / theta 45° / R 9.5）
     //   B = --water-waves 的机位（0.22 / 0.6 / 18）
     //   C = capture 默认（0.30 / 0.6 / 20）
-    app.SetWaterWaveAmplitudeScale(0.0f);
+    app.SetWaterWindSpeed(0.0f);   // 静水（= 风速 0）
     {
         struct Repro { const char* name; float phi; float theta; float radius; };
         const Repro kReps[3] = {
@@ -917,32 +917,27 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
             app.RunOnce(input, winfo, (out_dir + r.name).c_str());
         }
     }
-    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.SetWaterWindSpeed(jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.view_.phi = 0.30f;
     app.view_.R = 20.0f;
 
     // ── 二分 debug：法线 only vs 真位移（同一波幅、同一机位）──
     //   用来定位「浪坑里的法线噪点」：若 normal_only 干净、displaced 有噪 ⇒ 求交；
     //   两者都脏 ⇒ 法线/着色。
-    app.SetWaterWaveAmplitudeScale(3.0f);
-    app.SetWaterWaveDisplacement(false);
+    app.SetWaterWindSpeed(1.75f * jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.RunOnce(input, winfo, (out_dir + "/debug_normal_only.png").c_str());
-    app.SetWaterWaveDisplacement(true);
     app.RunOnce(input, winfo, (out_dir + "/debug_displaced.png").c_str());
     // 法线可视化：N*0.5+0.5。连续渐变 = 法线正常；彩色椒盐 = 法线场跳变。
     app.SetWaterWaveDebug(1);
-    app.SetWaterWaveDisplacement(false);
     app.RunOnce(input, winfo, (out_dir + "/debug_normal_color.png").c_str());
-    app.SetWaterWaveDisplacement(true);
     app.RunOnce(input, winfo, (out_dir + "/debug_displaced_color.png").c_str());
     app.SetWaterWaveDebug(2);
-    app.SetWaterWaveDisplacement(false);
     app.RunOnce(input, winfo, (out_dir + "/debug_normalvar.png").c_str());
     app.SetWaterWaveDebug(0);
 
-    // 四档波幅（0 / 1× / 3× / 6×）：3× 与 6× 是**夸张档**，专门让人一眼确认
-    // 「求交真的被推动了」，不是只改了法线。
-    const float kScales[4] = {0.0f, 1.0f, 3.0f, 6.0f};
+    // 四档海况（静水 / 8 / 14 / 20 m/s）：后两档是**夸张档**，专门让人一眼确认
+    // 「求交真的被推动了」，不是只改了法线。（2026-11-24：接口只有风速，没有"波幅倍率"。）
+    const float kScales[4] = {0.0f, 8.0f, 14.0f, 20.0f};
     const char* kNames[4] = {
         "/water_waves_off.png",
         "/water_waves_low.png",
@@ -950,7 +945,7 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
         "/water_waves_high.png",
     };
     for (int i = 0; i < 4; ++i) {
-        app.SetWaterWaveAmplitudeScale(kScales[i]);
+        app.SetWaterWindSpeed(kScales[i]);
         app.RunOnce(input, winfo, (out_dir + kNames[i]).c_str());
     }
 
@@ -959,14 +954,14 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
     app.view_.phi   = 0.05f;
     app.view_.theta = 0.6f;
     app.view_.R     = 24.0f;
-    app.SetWaterWaveAmplitudeScale(1.5f);
+    app.SetWaterWindSpeed(1.25f * jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.RunOnce(input, winfo, (out_dir + "/water_waves_grazing.png").c_str());
 
     // 贴近水面（R=8）：波峰剪影遮住远处物体 —— 几何置换的直接证据（不是 bump）。
     app.view_.phi   = 0.16f;
     app.view_.theta = 0.6f;
     app.view_.R     = 8.0f;
-    app.SetWaterWaveAmplitudeScale(2.0f);
+    app.SetWaterWindSpeed(1.5f * jpov_skylight::SkylightApp::kWaterDefaultWindMs);
     app.RunOnce(input, winfo, (out_dir + "/water_waves_close.png").c_str());
 
     LOG(INFO) << "water waves A/B captured to " << out_dir
@@ -984,15 +979,19 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 //   sun     <elev_deg> <azim_deg>          # 太阳方向
 //   sigma_a <r> <g> <b>                     # 水体吸收 1/m
 //   sigma_s <s>                             # 水体散射 1/m（demo 侧 σs 是标量）
-//   wind    <m/s>                           # 短波 MSS（Cox–Munk）
+//   wind    <m/s> [dir_deg]                 # 风：速度（可选吹向）
+//   fetch_m <米>                            # 风区（池塘 10~200 m；不写 = 充分成长）
+//   duration <h>                            # 风时（不写 = 充分成长）
+//   swell   <hs_m> <tp_s> <dir_deg>          # 涌（不写 = 无涌）
+//   depth   <米>                            # 水深（色散用）
+//   ior     <值>                            # 折射率
+//   level   <米>                            # 水位
+//   seed    <整数>                          # 波相位随机种子
 //   exposure <倍率>                         # tone map 之前的线性增益
 //   turbidity <值>                          # 大气浊度（2 清澈…8 霾）
 //   debug   <0|1|...>                       # 水皮 debug 档（0 = 正常）
 //   speed   <倍率>                          # 色散时间倍率
-//   stokes  <0|1>                           # 二阶 Stokes 谐波
-//   warp    <amp_m> <lam0> <dx0> <dz0> <lam1> <dx1> <dz1>   # 域扭曲
-//   wave    <dx> <dz> <lambda_m> <amp_m> <phase_rad>
-//   detail  <dx> <dz> <lambda_m> <amp_m> <phase_rad>         # 只进法线
+//   （stokes / warp / wave / detail / fade / farfield / graze_floor 已随接口收口删除）
 //
 // 四个机位（固定，不可配）：
 //   1) 45° 俯角 + 5 m 高（近场波纹/碎光）
@@ -1004,14 +1003,12 @@ namespace {
 struct OceanConfig {
     float sun_elev_deg = 25.0f;
     float sun_azim_deg = 214.0f;
-    float sigma_a[3] = {0.35f, 0.054f, 0.014f};
-    float sigma_s[3] = {0.02f, 0.02f, 0.02f};
-    float wind_ms = 8.0f;
     float turbidity = 2.0f;
     float exposure = 1.0f;
-    int debug = 0;   // 1 = 法线颜色可视化（诊断用）
-    float time_speed = 1.0f;   // 时间倍率（WaterWaves 里已经没有 speed_scale）
-    jpov::WaterWaves waves;
+    int debug = 0;            // 1 = 法线颜色可视化（诊断用）
+    float time_speed = 1.0f;  // 时间倍率
+    // 水体本身 = **就是 WaterConfig**（2026-11-24）：配置文件不再能拼波表。
+    jpov::water::WaterConfig water;
 };
 
 bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
@@ -1035,14 +1032,45 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
         if (tag == "sun") {
             ss >> out->sun_elev_deg >> out->sun_azim_deg;
         } else if (tag == "sigma_a") {
-            ss >> out->sigma_a[0] >> out->sigma_a[1] >> out->sigma_a[2];
+            float r = 0.0f;
+            float g = 0.0f;
+            float b = 0.0f;
+            ss >> r >> g >> b;
+            out->water.sigma_a = {r, g, b};
         } else if (tag == "sigma_s") {
             // demo 侧 σs 是标量（逐通道同值）：多写的 g/b 会被忽略，所以只读第一个。
-            ss >> out->sigma_s[0];
-            out->sigma_s[1] = out->sigma_s[0];
-            out->sigma_s[2] = out->sigma_s[0];
+            ss >> out->water.sigma_s;
         } else if (tag == "wind") {
-            ss >> out->wind_ms;
+            float speed = 0.0f;
+            ss >> speed;
+            float dir_deg = out->water.WindDirRad() * 180.0f / 3.14159265358979323846f;
+            if (!(ss >> dir_deg)) {
+                // 只写了速度：沿用当前吹向
+            }
+            out->water.SetWind(speed, dir_deg * 3.14159265358979323846f / 180.0f);
+        } else if (tag == "fetch_m") {
+            float m = 0.0f;
+            ss >> m;
+            out->water.fetch_km = (m > 0.0f) ? m * 0.001f
+                                             : std::numeric_limits<float>::infinity();
+        } else if (tag == "duration") {
+            float h = 0.0f;
+            ss >> h;
+            out->water.duration_h = (h > 0.0f) ? h : std::numeric_limits<float>::infinity();
+        } else if (tag == "swell") {
+            float hs = 0.0f;
+            float tp = 9.5f;
+            float dir_deg = 0.0f;
+            ss >> hs >> tp >> dir_deg;
+            out->water.SetSwell(hs, tp, dir_deg * 3.14159265358979323846f / 180.0f);
+        } else if (tag == "depth") {
+            ss >> out->water.depth_m;
+        } else if (tag == "ior") {
+            ss >> out->water.ior;
+        } else if (tag == "level") {
+            ss >> out->water.level_y;
+        } else if (tag == "seed") {
+            ss >> out->water.seed;
         } else if (tag == "exposure") {
             ss >> out->exposure;
         } else if (tag == "turbidity") {
@@ -1051,55 +1079,14 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
             ss >> out->debug;
         } else if (tag == "speed") {
             ss >> out->time_speed;
-        } else if (tag == "stokes") {
-            int v = 0;
-            ss >> v;
-            out->waves.stokes_second_order = (v != 0);
-        } else if (tag == "warp") {
-            ss >> out->waves.warp_amplitude_m;
-            // 没写满 4 条载波时，剩下的保持默认值（37/112/197 m 等）——**会继续参与位移**。
-            // 这不是"补零"，所以显式警告，别让调用方以为"只写了 1 条就只掰一层"。
-            int carriers_read = 0;
-            for (int j = 0; j < jpov::WaterWaves::kWarpCarriers; ++j) {
-                float lam = 0.0f;
-                float dx = 0.0f;
-                float dz = 0.0f;
-                if (!(ss >> lam >> dx >> dz)) {
-                    if (j == 0) {
-                        LOG(FATAL) << "warp 行至少需要 1 条载波: " << line;
-                    }
-                    break;
-                }
-                out->waves.warp_wavelength_m[j] = lam;
-                out->waves.warp_dir_x[j] = dx;
-                out->waves.warp_dir_z[j] = dz;
-                ++carriers_read;
-            }
-            if (carriers_read > 0 && carriers_read < jpov::WaterWaves::kWarpCarriers) {
-                LOG(WARNING) << "warp 只给了 " << carriers_read << "/"
-                             << jpov::WaterWaves::kWarpCarriers
-                             << " 条载波：其余沿用默认值（不是补零）";
-            }
-        } else if (tag == "wave" || tag == "detail") {
-            jpov::WaterWave w;
-            if (!(ss >> w.dir_x >> w.dir_z >> w.wavelength_m >> w.amplitude_m >>
-                  w.phase_rad)) {
-                LOG(FATAL) << tag << " 行格式错: " << line;
-            }
-            if (tag == "wave") {
-                CHECK_LT(out->waves.num_waves, jpov::WaterWaves::kMaxWaves)
-                    << "wave 行超过 kMaxWaves";
-                out->waves.waves[out->waves.num_waves++] = w;
-            } else {
-                CHECK_LT(out->waves.num_detail_waves, jpov::WaterWaves::kMaxDetailWaves)
-                    << "detail 行超过 kMaxDetailWaves";
-                out->waves.detail_waves[out->waves.num_detail_waves++] = w;
-            }
+        } else if (tag == "stokes" || tag == "warp" || tag == "wave" || tag == "detail" ||
+                   tag == "fade" || tag == "farfield" || tag == "graze_floor") {
+            // 2026-11-24 接口收口：波表/淡出/护栏都不再是调用方参数（谱由 BuildWater 展开）。
+            LOG(WARNING) << "配置项已废弃并被忽略: " << tag;
         } else {
             LOG(WARNING) << "未知海面配置项: " << tag;
         }
     }
-    out->waves.enabled = true;
     return true;
 }
 
@@ -1217,10 +1204,16 @@ int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_
             return 1;
         }
     }
-    LOG(INFO) << "ocean report: " << oc.waves.num_waves << " waves, "
-              << oc.waves.num_detail_waves << " detail, warp="
-              << oc.waves.warp_amplitude_m << " m, stokes="
-              << (oc.waves.stokes_second_order ? 1 : 0);
+    {
+        jpov::WaterWaves dbg_waves;
+        jpov::water::WaterReadout dbg_readout;
+        jpov::water::BuildWater(oc.water, jpov::water::WaterQuality{}, &dbg_waves,
+                                &dbg_readout);
+        LOG(INFO) << "ocean report: wind=" << oc.water.WindSpeedMs()
+                  << " m/s, Hs=" << dbg_readout.hs_total_m
+                  << " m, Tp=" << dbg_readout.period_s
+                  << " s, λp=" << dbg_readout.lambda_peak_m << " m";
+    }
 
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面报告（4 合 1，headless）";
@@ -1248,18 +1241,13 @@ int RunCaptureOceanReport(const std::string& out_dir, const std::string& config_
     app.deg_.sun_azim_deg    = oc.sun_azim_deg;
     app.deg_.turbidity       = oc.turbidity;
 
-    app.SetWaterLevel(0.0f);
+    // 水体 = 一份 WaterConfig（2026-11-24：配置文件不再能拼波表/波幅倍率）
+    app.SetWaterConfig(oc.water);
+    app.SetWaterLevel(oc.water.level_y);
     app.SetWaterSkin(true);
     app.SetWaterMedium(true);
-    app.water_sigma_a_r_ = oc.sigma_a[0];
-    app.water_sigma_a_g_ = oc.sigma_a[1];
-    app.water_sigma_a_b_ = oc.sigma_a[2];
-    app.water_sigma_s_   = oc.sigma_s[0];   // demo 侧 σs 是标量（逐通道同值）
-    app.water_wind_ms_   = oc.wind_ms;
-    app.SetWaterWavesConfig(oc.waves);
     app.SetWaterTimeSpeed(oc.time_speed);
     app.SetWaterWaves(true);
-    app.SetWaterWaveAmplitudeScale(1.0f);
     app.SetWaterWaveTime(7.0f);   // 冻结时间：4 张图的波场相位一致，可直接对比
     app.SetWaterWaveDebug(oc.debug);
     app.exposure_ = oc.exposure;
