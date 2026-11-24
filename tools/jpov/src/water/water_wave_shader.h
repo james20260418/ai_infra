@@ -350,6 +350,10 @@ float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
 //    而这个 t 会作为透明层深度喂给合成趟去切介质 ⇒ 介质段长度突变 ⇒ 硬边。
 float WaveAmplitudeSum(float footprint) {
     float s = 0.0;
+    // amp_gain 对 Stokes 项是**二次**的（½kA²），所以必须逐波乘进振幅，不能最后统一乘
+    // （与 CPU WaveAmplitudeSum 同口径；flow 关时两条写法等价）。
+    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
+    float gain = 1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0);
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
             break;
@@ -364,14 +368,13 @@ float WaveAmplitudeSum(float footprint) {
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
-        s += uWaveL[i].z * lod_amp;
+        float aa = uWaveL[i].z * lod_amp * gain;
+        s += aa;
         if (uWaveStokes2 != 0) {
-            float aa = uWaveL[i].z * lod_amp;
             s += 0.5 * uWaveL[i].x * aa * aa;
         }
     }
-    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
-    return s * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
+    return s;
 }
 
 // 视线 vs 高度场求交。
@@ -416,11 +419,12 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     if (t_hi <= t_lo) {
         t_hi = t_lo + 1.0e-4;
     }
+
+    // 两端必然异号（|h| ≤ amp_sum）⇒ 12 次二分。**不做首根扫描**（与 CPU 同一口径：
+    // 扫描栅格是像素间的非物理量 ⇒ 近切点处跳根 ⇒ 水平硬边）。
     float f_lo = WaveFAt(cam, ray_dir, level, footprint, t_lo);
     float f_hi = WaveFAt(cam, ray_dir, level, footprint, t_hi);
     if ((f_lo > 0.0) == (f_hi > 0.0)) {
-        // 数值兜底（极端参数）：t 回退平面解，但**法线照常按梯度求** ——
-        // 绝不返回平法线（否则远场变镜面 + 硬分界）。
         t = t_plane;
         pos = cam + ray_dir * t;
         normal = WaveNormalAt(cam, ray_dir, t, footprint);

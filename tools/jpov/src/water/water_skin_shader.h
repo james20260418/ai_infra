@@ -122,14 +122,19 @@ float LinearizeDepthNdc(float ndc_z, float near_plane, float far_plane) {
 
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
 //   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
-// 掠射时远低于平面菲涅尔：2° 仰角下 0.80 → 0.36（MSS≈0.017）/0.26（0.05）/0.17（0.15）。
+// 掠射时远低于平面菲涅尔：2° 仰角下 0.80 → 0.34（σ²≈0.017）/0.24（0.05）/0.15（0.15）。
 // 差额就是进了透射的那部分（T_eff = 1 − R_eff）→ 海面因此不会“水天一色”。
 //
+// ⚠️ **输入是斜率方差 σ²，不是 a2**（2026-11-24 修，与 water_optics.h 同源）：
+//    Beckmann ↔ GGX 的标准映射是 α² = 2σ²（GGX 自身方差 = α²/2）；旧版把 σ² 当 a2 用
+//    ⇒ 粗糙度少一半 ⇒ 远海反射率偏镜面/偏亮。
+//
 // 解析近似（对 12×6 的 Monte-Carlo 表拟合，平均误差 0.026，掠射段 <0.03）：
-//   R_eff ≈ mix( F(cos_i + 0.52·√a2^0.72), F(cos_i), smoothstep(0.05, 0.5, cos_i) )
+//   R_eff ≈ mix( F(cos_i + 0.52·α^0.72), F(cos_i), smoothstep(0.05, 0.5, cos_i) )
 //   前者负责掠射（粗面把掠射峰压下去），后者保证高仰角回到平面值。
-float RoughFresnelAlbedo(float cos_i, float a2, float ior) {
-    float s = sqrt(max(a2, 0.0));
+float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
+    float a2 = 2.0 * max(slope_var, 0.0);
+    float s = sqrt(a2);
     float shifted = FresnelDielectric(clamp(cos_i + 0.52 * pow(max(s, 1.0e-6), 0.72),
                                            1.0e-4, 0.999), 1.0, ior);
     float plain = FresnelDielectric(clamp(cos_i, 1.0e-4, 0.999), 1.0, ior);
@@ -156,11 +161,14 @@ void main() {
     // 平面法线恒定，H 的变化全来自视线 ⇒ 掠射时这一项自动变大，正好抵消投影压缩。
     float footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
 
-    // ── ③ 视线 ∩ 水面（无波浪 ⇒ 平面解析解；有波浪 ⇒ Newton 修正）──
-    float t = (uWaterLevelY - uCamPos.y) / rd.y;
-    if (t <= 0.0) {
-        discard;   // 交点在相机后方
-    }
+    // ── ③ 视线 ∩ 水面（无波浪 ⇒ 平面解析解；有波浪 ⇒ 二分求交）──
+    // ⚠️ 这里**不能 discard**（2026-11-24 修）：下面的 dFdx(N) 必须在整 quad 一致的控制流里求值；
+    //    地平线那一行的 quad 里一半像素 t<=0，一旦 discard，helper invocation 被杀死 ⇒
+    //    导数取到垃圾 ⇒ normal_var_px 整行爆掉 ⇒ a2 / env_lod 错 ⇒ 地平线上一条 1px 亮/暗线
+    //    （这正是历史上反复追的「地平线裂隙/暗带」的机器）。真正 discard 放到所有导数之后。
+    float t_raw = (uWaterLevelY - uCamPos.y) / rd.y;
+    bool has_hit = (t_raw > 0.0);
+    float t = max(t_raw, 1.0e-3);   // 不可见的像素用安全值，只为让导数有定义
     // 平面交点距离：**平滑**、与波浪无关。只用于深度测试（见 ④）——波浪求交的 t 在掠射时
     // 会因"先撞到哪个波峰"在相邻像素间跳几十米到几公里，用它比较会出单像素级的误剔/误留。
     float t_plane = t;
@@ -190,25 +198,33 @@ void main() {
     // 无波浪时恒 0 ⇒ 与旧版逐字节一致（LOD0、a2 不变）。
     vec3 dNdx = dFdx(N);
     vec3 dNdy = dFdy(N);
-    // 只用横向差分：水面/天空的边界是**水平**的，那一行的 2×2 quad 里上半是天空
-    // （fragment 已 discard、N 未参与求值）⇒ dFdy(N) 是垃圾值，会把方差顶到天上。
-    // 横向邻居始终是水面 ⇒ dFdx 安全。各向同性下 E|dN/dx|² = E|dN/dy|²，
-    // 所以 0.5·|dFdx|² 与原来的 0.25·(|dx|²+|dy|²) 期望相同。
+    // **只用横向差分**（这是设计选择，不是权宜）：水面/天空的边界是**水平**的，
+    // 那一行的 2×2 quad 里上半是天空（has_hit=false，N 没有意义）⇒ dFdy(N) 会把方差顶到
+    // 天上；横向邻居始终是水面 ⇒ dFdx 安全。各向同性下 E|dN/dx|² = E|dN/dy|²，
+    // 所以 0.5·|dFdx|² 与 0.25·(|dx|²+|dy|²) 期望相同。
+    // （2026-11-24：以前这里还有个更严重的毛病 —— 上面 ③ 的 discard 发生在求导之前，
+    //   整个 quad 的 helper invocation 被杀 ⇒ dFdx 本身也是垃圾；那条已修。）
     float normal_var_px = 0.5 * dot(dNdx, dNdx);
     // ── ③d 法线场过滤：把「看不见的波」折算成粗糙度 ─────────────────────────
-    //   mss = E|∇h|² = 被足迹截断的斜率方差 + 短波（毛细波/短重力波）。
-    //   各向同性下 GGX 的 a2 = 2σ² = mss ⇒ 可直接当 a2 用（与 normal_var_px 同量纲）。
-    //   本 PR 只有 F_eff 消费它；拉宽/拉糊见 known_issue §10.16。
+    //   σ² = E|∇h|² = 被足迹截断的斜率方差 + 短波（毛细波/短重力波）。
+    //   送进 BRDF 时要换成 α² = 2σ²（见 RoughFresnelAlbedo / a2 两处）。
     float sxx, sxz, szz;
     WaveSlopeTensor(footprint, sxx, sxz, szz);
-    // 投影到入射面方向（视线在 xz 上的投影）——这才是影响镜面波瓣的那一维。
+    // 两个投影，各有各的消费者（2026-11-24 修：以前只有一个"视线投影"被三个消费者共用）：
+    //   · var_p_slope：入射面方向（视线在 xz 的投影）—— 反射方向在该平面内摆动，
+    //     所以探针模糊（env_lod）用它是正确的；
+    //   · var_p_mean：张量各向同性的平均（(σx²+σz²)/2）—— 反射率 R_eff 是**对半球积分**，
+    //     不能用某一个方向的投影（8 条主波只沿风 ±20~30° 散布 ⇒ 张量是强各向异性的，
+    //     用视线方位会在侧风时高估/低估最多 2~4×）。
     vec2 td = rd.xz;
     float tdl = length(td);
     td = (tdl > 1.0e-6) ? (td / tdl) : vec2(1.0, 0.0);
     float var_p = td.x * td.x * sxx + 2.0 * td.x * td.y * sxz + td.y * td.y * szz;
-    // 本 PR 里 var_p 的消费者只有两个：F_eff（`:242`）与探针 LOD（`:329`）。
-    // **太阳的像（`:263` 的 a2）还不吃 var_p** ⇒ 远场是「粗糙面的反射率 + 镜面精度的 lobe」，
-    // BRDF 不自洽（远海因此过度变平；修法见 known_issue §10.16 M1/M2）。
+    float var_p_mean = 0.5 * (sxx + szz);
+    // 消费者：F_eff（用 var_p_mean）、探针 LOD（用 var_p）、太阳的像的 a2（用 normal_var_px）。
+    if (!has_hit) {
+        discard;   // 交点在相机后方（延迟到这里：见 ③ 的注释，导数必须先算完）
+    }
     if (!wave_ok) {
         discard;   // 求交失败 / 交点跑到相机后方
     }
@@ -239,7 +255,7 @@ void main() {
     // ③ 角度平均菲涅尔：粗糙界面的方向反照率。反射↓、透射↑（两边一起动）。
     //    没有开关 —— 这是正确算法（掠射 2° 平面 0.80 → 0.36@MSS0.017）。
     if (!under) {
-        F = RoughFresnelAlbedo(cos_i, var_p, uWaterIor);
+        F = RoughFresnelAlbedo(cos_i, var_p_mean, uWaterIor);
     }
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
@@ -260,9 +276,10 @@ void main() {
             // 带宽 = 盘角半径 + 视线像素足迹 + **像素内法线方差**。
             // 最后一项不能省：远处一条波只占几个像素时，逐像素法线各不相同但 GGX lobe
             // 仍按 θ 级窄带算 ⇒ 高光变成稀疏白点（llvmpipe 实测就是「波峰交界的麻点」）。
+            // 方差项 → α² 也要 ×2（α² = 2σ²，与 RoughFresnelAlbedo 同一口径）。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * footprint_a2
-                           + normal_var_px,
+                           + 2.0 * normal_var_px,
                            0.25);   // 0.25 = 数值兜底（见上）
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);

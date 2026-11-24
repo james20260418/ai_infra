@@ -70,12 +70,18 @@ inline float FresnelDielectric(float cos_i, float n1, float n2) {
 
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
 //   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
-// 掠射时远低于平面菲涅尔（2°、MSS=0.017 时 0.80 → 0.36）；差额进透射（T_eff = 1 − R_eff）。
+// 掠射时远低于平面菲涅尔（2°、σ²=0.017 时 0.80 → 0.34）；差额进透射（T_eff = 1 − R_eff）。
 // 解析近似（对 12×6 Monte-Carlo 表拟合，平均误差 0.026）：
-//   mix( F(cosθ + 0.52·√mss^0.72), F(cosθ), smoothstep(0.05, 0.5, cosθ) )
+//   mix( F(cosθ + 0.52·α^0.72), F(cosθ), smoothstep(0.05, 0.5, cosθ) )
+//
+// ⚠️ **输入是斜率方差 σ²，不是 a2**（2026-11-24 修）：Beckmann 坡度分布 ↔ GGX 的标准
+//    映射是 **α² = 2σ²**（GGX 自身方差 = α²/2）。旧版把 σ² 直接当 a2 用 ⇒ 粗糙度少一半、
+//    远海反射率偏"镜面/偏亮"（这正是「远海不够暗」的一个来源）。
+//    `WaveFilteredVariance` / `var_p` 都是 σ²（Σ½(kA)²），所以这里乘 2 一次，语义就正了。
 // ⚠️ 与 water_skin_shader.h 的 GLSL 版**同源**，改一处必须改另一处。
-inline float RoughFresnelAlbedo(float cos_i, float mss, float ior) {
-    const float s = std::sqrt(std::max(mss, 0.0f));
+inline float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
+    const float a2 = 2.0f * std::max(slope_var, 0.0f);
+    const float s = std::sqrt(a2);
     const float shifted_cos = std::min(std::max(cos_i + 0.52f * std::pow(std::max(s, 1.0e-6f), 0.72f),
                                                1.0e-4f), 0.999f);
     const float shifted = FresnelDielectric(shifted_cos, 1.0f, ior);

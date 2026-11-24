@@ -459,7 +459,9 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
                                        (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
-        const float a = waves.waves[i].amplitude_m * lod_amp;
+        // ⚠️ amp_gain 必须在**循环内**乘到振幅上：Stokes 项是 ½·k·A²，对增益是二次的
+        //    （旧版最后统一乘一次 ⇒ 该项少乘一个 amp_gain；flow 关时无影响，属潜在错）。
+        const float a = waves.waves[i].amplitude_m * lod_amp * amp_gain;
         sum += a;
         if (waves.stokes_second_order) {
             // 二阶谐波把峰值再抬高 ½·k·A²：二分区间必须覆盖它，否则端点不变号。
@@ -467,7 +469,7 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
             sum += 0.5f * k * a * a;
         }
     }
-    return sum * amp_gain;
+    return sum;
 }
 
 // 由梯度求法线（单位向量，y > 0）。h ≡ 0 ⇒ (0,1,0)。
@@ -587,11 +589,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     // 那里的二分本来就无意义 —— 下一版由 far 分支直接跳过求交（docs/jpov_water_farfield_design.md）。
     const float rdy = std::max(std::fabs(rd.y()), 1.0e-3f);
     const float span = amp_sum / rdy;
-    float t_lo = t_plane - span;
+    float t_lo = std::max(t_plane - span, 1.0e-4f);
     float t_hi = t_plane + span;
-    if (t_lo < 1.0e-4f) {
-        t_lo = 1.0e-4f;
-    }
     if (t_hi <= t_lo) {
         t_hi = t_lo + 1.0e-4f;
     }
@@ -601,11 +600,15 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
         return (p_y - level_y) - height_at(tt);
     };
 
+    // 区间 [t_plane−span, t_plane+span] 两端必然异号（|h| ≤ amp_sum = span·|rd.y|）
+    // ⇒ 二分一次收敛。**不做首根扫描**：扫描的栅格锚点与步长都是像素间的非物理量，
+    // 近切点处相邻像素会落在不同栅格上 ⇒ 找到不同的根 ⇒ 一条水平的笔直硬边
+    // （2026-11-24 Danis 报障，实锤：只留一条涌时该边 111 LSB，删掉扫描后 25 LSB
+    // 且 >30 的像素数 136 → 0）。多根属于远场，那里不该求交（见 farfield 设计文档）。
     const float f_lo = f_of_t(t_lo);
     const float f_hi = f_of_t(t_hi);
     if ((f_lo > 0.0f) == (f_hi > 0.0f)) {
-        // 区间没有变号（数值兜底：极端参数）。t 回退到平面解，
-        // 但**法线照常按梯度求** —— 绝不返回平法线（否则远场变镜面 + 硬分界）。
+        // 数值兜底（区间被 clamp / 极端参数）：t 回退平面解，法线照常按梯度求。
         return finish(t_plane);
     }
     bool lo_positive = (f_lo > 0.0f);
