@@ -988,10 +988,9 @@ struct WaterWaves {
     // flow 强度对振幅的增益：A *= (1 + flow_wind_gain·|flow|)。
     float flow_wind_gain = 1.0f;
 
-    // 远处淡出（按相机水平距离，米）：dist ≥ fade_end ⇒ 波消失（回纯平面）。
-    // fade_end <= fade_start ⇒ 不淡出（恒 1）。
-    float fade_start_m = 150.0f;
-    float fade_end_m = 900.0f;
+    // 没有任何「按距离淡出」参数（2026-11-24 删除）：远处怎么变平由像素足迹的谱截断
+    // 决定（λ/footprint 落到 3 px 以下就消失，方差转进 BRDF）。距离上的硬性压平既没有
+    // 物理依据，也掩盖了「远场不该走求交」这个事实（见 docs/jpov_water_farfield_design.md）。
 
     // ── 大尺度相位扭曲（domain warp）──
     // 把整片波场按低频位移场 u(p) 平移：θ_i += k_i·dot(u, d_i)，u = Σ_j A_j·dir_j·sin(...)。

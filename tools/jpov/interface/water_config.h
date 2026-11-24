@@ -210,8 +210,7 @@ inline void BuildWater(const WaterConfig& cfg, const WaterQuality& quality,
     w.enabled = true;
     w.displacement = true;
     w.stokes_second_order = true;
-    w.fade_start_m = 300.0f;
-    w.fade_end_m = 2000.0f;
+    // 没有距离淡出参数（2026-11-24 删除）：远处变平由足迹截断决定，见 WaterWaves 的注释。
     // 默认不启用 flow map（v1 uniform：均匀流在视觉上不可见，见 docs §8.4）。
     w.flow_align = 0.0f;
     w.flow_wind_gain = 0.0f;

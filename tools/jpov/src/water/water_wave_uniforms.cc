@@ -122,8 +122,6 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         glUniform2f(detail_dir_loc + i, dx, dz);
     }
 
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeStart"), on ? w->fade_start_m : 0.0f);
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeEnd"), on ? w->fade_end_m : 0.0f);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowAlign"), on ? w->flow_align : 0.0f);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowWindGain"),
                 on ? w->flow_wind_gain : 0.0f);

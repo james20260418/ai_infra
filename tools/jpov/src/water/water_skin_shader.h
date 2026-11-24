@@ -171,10 +171,10 @@ void main() {
     vec3 N = vec3(0.0, 1.0, 0.0);        // 无波浪 = 纯平面法线
     bool wave_ok = true;
     // 像素在水面上覆盖的世界尺寸（用平面 t 估；掠射时按 |rd.y| 放大）。
-    // ⚠️ `max(|rd.y|, 0.15)` 是人为地板：它让「距离 > 6.7×相机高度」以后的足迹被**低估**，
-    //    谱截断因此杀得不够（known_issue 已记）。修它之前不要指望 fade 能被删掉。
+    // 公式与护栏在 kWaterWaveGlsl::WaveFootprint（与 CPU water::WaveFootprintM 同源）：
+    // 护栏只是除零护栏（1e-4），不再有 0.15 的"遮丑地板"。
     float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
-    float footprint = t * pixel_angle / max(abs(rd.y), 0.15);
+    float footprint = WaveFootprint(uCamPos, rd, uWaterLevelY, pixel_angle);
     if (uWaveCount > 0) {
         vec3 pos_w = vec3(0.0);
         vec3 nrm_w = vec3(0.0, 1.0, 0.0);
@@ -199,9 +199,8 @@ void main() {
     //   mss = E|∇h|² = 被足迹截断的斜率方差 + 短波（毛细波/短重力波）。
     //   各向同性下 GGX 的 a2 = 2σ² = mss ⇒ 可直接当 a2 用（与 normal_var_px 同量纲）。
     //   本 PR 只有 F_eff 消费它；拉宽/拉糊见 known_issue §10.16。
-    float fade_at_p = WaveFadeFactor(length((uCamPos + rd * t).xz - uCamPos.xz));
     float sxx, sxz, szz;
-    WaveSlopeTensor(footprint, fade_at_p, sxx, sxz, szz);
+    WaveSlopeTensor(footprint, sxx, sxz, szz);
     // 投影到入射面方向（视线在 xz 上的投影）——这才是影响镜面波瓣的那一维。
     vec2 td = rd.xz;
     float tdl = length(td);
