@@ -1,9 +1,8 @@
 // JPOV 水面波浪 —— GLSL 片段（与 water_wave_math.h 同源）
 //
 // 提供：
-//   WaveFadeFactor(dist)          远处淡出
 //   WaveFlowAt(p_xz)              采样 flow map（无纹理时恒 0）
-//   WaveSampleAt(p_xz, t, fade, footprint, need_grad, out h, out grad_xz)
+//   WaveSampleAt(p_xz, t, footprint, need_grad, out h, out grad_xz)
 //   WaveNormalFromGrad(grad_xz)
 //   WaveSurfaceHit(cam, rd, level, inout t, out pos, out normal)
 //
@@ -23,8 +22,6 @@ uniform int   uWaveCount;          // 0 ⇒ 纯平面
 uniform vec4  uWaveL[8];           // (k, omega, amplitude, phase)
 uniform vec2  uWaveDir[8];         // 传播方向（单位，xz）
 uniform float uWaveTime;           // 秒
-uniform float uWaveFadeStart;      // 米（相机水平距离）
-uniform float uWaveFadeEnd;        // 米；<= start ⇒ 不淡出
 uniform float uWaveFlowAlign;      // [0,1]
 uniform float uWaveFlowWindGain;   // >= 0
 uniform int   uWaveHasFlow;        // 0 = 无 flow
@@ -54,23 +51,24 @@ const int kWaveBisectIters = 12;
 // ⚠️ 与 CPU 的 water::kWaveLodPxMin / kWaveLodPxMax 同值（GPU 对拍测试兜底）。
 const float kWaveLodPxMin = 3.0;
 const float kWaveLodPxMax = 8.0;
+// 掠射护栏（＝ CPU 的 water::kGrazeFloorSin，**只是除零护栏**）：|rd.y| 更小时
+// 足迹按这个下限算，再被 kWaveMaxFootprintM 钳住。2026-11-24 之前这里是 0.15（≈8.6°），
+// 那会把足迹系统性算小 3 倍（远处"看起来很细"其实是亚像素波没被杀）。
+const float kWaveGrazeFloorSin = 1.0e-4;
+const float kWaveMaxFootprintM = 1.0e6;
+
+// 像素在水面上覆盖的世界尺寸（米）—— 与 CPU 的 water::WaveFootprintM 同一公式。
+float WaveFootprint(vec3 cam_pos, vec3 ray_dir, float level_y, float pixel_angle) {
+    float t_plane = (level_y - cam_pos.y) / ray_dir.y;
+    if (t_plane <= 0.0) {
+        return 0.0;   // 交点在相机后方 ⇒ 不做截断（上层自己 discard）
+    }
+    float graze = max(abs(ray_dir.y), kWaveGrazeFloorSin);
+    return min(t_plane * pixel_angle / graze, kWaveMaxFootprintM);
+}
 // warp 限带：每条波的 warp 相位/梯度乘 min(1, kWarpSlopeLimit/(k·U))。
 // 与 CPU 的 water::kWarpSlopeLimit 同值（有测试锁一致性）。
 const float kWarpSlopeLimit = 0.25;
-
-float WaveFadeFactor(float dist) {
-    if (uWaveFadeEnd <= uWaveFadeStart) {
-        return 1.0;
-    }
-    if (dist <= uWaveFadeStart) {
-        return 1.0;
-    }
-    if (dist >= uWaveFadeEnd) {
-        return 0.0;
-    }
-    float x = (dist - uWaveFadeStart) / (uWaveFadeEnd - uWaveFadeStart);
-    return 1.0 - x * x * (3.0 - 2.0 * x);
-}
 
 vec2 WaveFlowAt(vec2 p) {
     if (uWaveHasFlow == 0) {
@@ -120,20 +118,19 @@ void WaveWarpAt(vec2 p, bool need_grad, out vec2 u, out vec2 du_dx, out vec2 du_
 // 与 CPU 的 WaveFilteredVariance 同源。输出 xz 平面的 2x2 张量：
 //   xx = E[(∂h/∂x)²]、xz = E[∂h/∂x·∂h/∂z]、zz = E[(∂h/∂z)²]
 // 来源 = 被足迹截断的 4 波（不再贡献几何的那部分）+ 短波（2.7:1 各向异性）。
-// ⚠️ 能量守恒（2026-11-20）：fade / 足迹截断只决定「这条波还剩多少在几何里」，
+// ⚠️ 能量守恒（2026-11-20）：足迹截断只决定「这条波还剩多少在几何里」，
 //    它**没进几何的那部分必须整份进 BRDF**，否则远处会退化成镜面（映灰色天空）。
-//    旧写法 `amp = A·fade; w = ½(kA·fade)²(1−lod²)` 把方差也乘了 fade ⇒ 远场归零。
-//    正确式：w = ½(kA)²·(1 − (fade·lod)²)。
-void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, out float szz) {
+//    旧写法把方差也乘了衰减系数 ⇒ 远场归零。
+//    正确式：w = ½(kA)²·(1 − lod²)。
+void WaveSlopeTensor(float footprint, out float sxx, out float sxz, out float szz) {
     sxx = 0.0; sxz = 0.0; szz = 0.0;
-    fade = clamp(fade, 0.0, 1.0);
     if (uWaveCount > 0) {
         for (int i = 0; i < 8; ++i) {
             if (i >= uWaveCount) {
                 break;
             }
             float k = uWaveL[i].x;
-            float amp = uWaveL[i].z;          // 完整振幅（不乘 fade）
+            float amp = uWaveL[i].z;          // 完整振幅（方差与几何无关）
             float lod_amp = 1.0;
             if (footprint > 1.0e-6) {
                 float wavelength_px = (6.283185307179586 / k) / footprint;
@@ -144,7 +141,7 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                     lod_amp = u * u * (3.0 - 2.0 * u);
                 }
             }
-            float geom = fade * lod_amp;      // 仍在几何里的比例
+            float geom = lod_amp;             // 仍在几何里的比例
             float a = amp * k;
             float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDir[i];
@@ -169,7 +166,7 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
                     lod_amp = uu * uu * (3.0 - 2.0 * uu);
                 }
             }
-            float geom = fade * lod_amp;
+            float geom = lod_amp;
             float a = amp * k;
             float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDetailDir[i];
@@ -199,11 +196,11 @@ void WaveSlopeTensor(float footprint, float fade, out float sxx, out float sxz, 
 // 高度 + 梯度。grad 的 x/y 分别对应 ∂h/∂x、∂h/∂z。
 // need_grad=false ⇒ 不调 cos（grad 输出恒 0）。二分求根只需要 h：
 // 每次 WaveSurfaceHit 要评估 14 次，其中一半的三角函数（cos）本来是白算的。
-void WaveSampleAt(vec2 p, float t, float fade, float footprint, bool need_grad,
+void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
                   out float h, out vec2 grad) {
     h = 0.0;
     grad = vec2(0.0);
-    if (uWaveCount <= 0 || fade <= 0.0) {
+    if (uWaveCount <= 0) {
         return;
     }
 
@@ -249,9 +246,9 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, bool need_grad,
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
-        float amp = L.z * amp_gain * fade * lod_amp;
+        float amp = L.z * amp_gain * lod_amp;
         if (amp == 0.0) {
-            continue;   // 远处（fade/足迹）整条消失：省掉下面的 sin/cos
+            continue;   // 亚像素（足迹截断）整条消失：省掉下面的 sin/cos
         }
         float warp_scale = (warp_u_slope > 0.0)
                                ? min(1.0, kWarpSlopeLimit / (k * warp_u_slope))
@@ -275,10 +272,10 @@ void WaveSampleAt(vec2 p, float t, float fade, float footprint, bool need_grad,
 }
 
 // 细节短波：**只改法线梯度，不改高度**（不参与求交）。
-void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
+void WaveDetailGrad(vec2 p, float t, float footprint,
                     vec2 wu, vec2 wdux, vec2 wduz, out vec2 grad) {
     grad = vec2(0.0);
-    if (uWaveDetailCount <= 0 || fade <= 0.0) {
+    if (uWaveDetailCount <= 0) {
         return;
     }
     float warp_u_slope_d = WaveWarpSlopeBound();
@@ -301,7 +298,7 @@ void WaveDetailGrad(vec2 p, float t, float fade, float footprint,
                 lod_amp = uu * uu * (3.0 - 2.0 * uu);
             }
         }
-        float amp = L.y * fade * lod_amp;
+        float amp = L.y * lod_amp;
         if (amp == 0.0) {
             continue;   // 亚像素（lod_amp=0）或已淡出：省掉下面的 cos
         }
@@ -326,36 +323,37 @@ vec3 WaveNormalFromGrad(vec2 grad) {
 //    （2026-11-23 报障的「波在固定距离硬消失」）。与 CPU 的 sample_at/finish 同口径。
 vec3 WaveNormalAt(vec3 cam, vec3 ray_dir, float tt, float footprint) {
     vec3 p = cam + ray_dir * tt;
-    float dist = length(p.xz - cam.xz);
-    float fade = WaveFadeFactor(dist);
     float h;
     vec2 grad;
-    WaveSampleAt(p.xz, uWaveTime, fade, footprint, /*need_grad=*/true, h, grad);
+    WaveSampleAt(p.xz, uWaveTime, footprint, /*need_grad=*/true, h, grad);
     vec2 wu, wdux, wduz;
     WaveWarpAt(p.xz, /*need_grad=*/true, wu, wdux, wduz);
     vec2 dgrad;
-    WaveDetailGrad(p.xz, uWaveTime, fade, footprint, wu, wdux, wduz, dgrad);
+    WaveDetailGrad(p.xz, uWaveTime, footprint, wu, wdux, wduz, dgrad);
     return WaveNormalFromGrad(grad + dgrad);
 }
 
 // f(t) = (cam.y + rd.y·t − level) − h(p.xz)
 float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
     vec3 p = cam + ray_dir * tt;
-    float dist = length(p.xz - cam.xz);
     float h;
     vec2 grad;
     // 只查高度（grad 丢掉）：省掉每条波一次 cos。
-    WaveSampleAt(p.xz, uWaveTime, WaveFadeFactor(dist), footprint, /*need_grad=*/false, h, grad);
+    WaveSampleAt(p.xz, uWaveTime, footprint, /*need_grad=*/false, h, grad);
     return (p.y - level) - h;
 }
 
 // 高度上界 ΣA·(1 + wind·|flow|)：二分区间半径的依据（|h| 永远不会超过它）。
-// 有效振幅上界 ΣA·fade·lod_amp（**必须和场本身同口径**）。
+// 有效振幅上界 ΣA·lod_amp（**必须和场本身同口径**）。
 // ⚠️ 旧版用不衰减的 ΣA：在远处谱已被截断成平面，区间却仍按 ΣA/|rd.y| 撑开，
 //    掠射时 span ~ km，12 次二分的量化步长就是几十~几百米 ⇒ 交点 t 在相邻像素间乱跳，
 //    而这个 t 会作为透明层深度喂给合成趟去切介质 ⇒ 介质段长度突变 ⇒ 硬边。
-float WaveAmplitudeSum(float fade, float footprint) {
+float WaveAmplitudeSum(float footprint) {
     float s = 0.0;
+    // amp_gain 对 Stokes 项是**二次**的（½kA²），所以必须逐波乘进振幅，不能最后统一乘
+    // （与 CPU WaveAmplitudeSum 同口径；flow 关时两条写法等价）。
+    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
+    float gain = 1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0);
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
             break;
@@ -370,14 +368,13 @@ float WaveAmplitudeSum(float fade, float footprint) {
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
-        s += uWaveL[i].z * lod_amp;
+        float aa = uWaveL[i].z * lod_amp * gain;
+        s += aa;
         if (uWaveStokes2 != 0) {
-            float aa = uWaveL[i].z * lod_amp;
             s += 0.5 * uWaveL[i].x * aa * aa;
         }
     }
-    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
-    return s * fade * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
+    return s;
 }
 
 // 视线 vs 高度场求交。
@@ -396,12 +393,14 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
         return true;
     }
 
+    // span 的上界护栏（1e-3，与足迹护栏**无关**）：|rd.y| 极小的行 span 会爆到公里级，
+    // 那里的二分本来就无意义 —— 下一版由 far 分支直接跳过求交（docs/jpov_water_farfield_design.md）。
     float rdy = max(abs(ray_dir.y), 1.0e-3);
     float t_plane = t;
-    // 区间半径用**平面交点处的有效振幅**（含 fade 与足迹截断）：
+    // 区间半径用**平面交点处的有效振幅**（含足迹截断）：
     // 远处谱已截断成平面 ⇒ span → 0 ⇒ t 连续，不会把量化噪声喂给合成趟的层深。
     vec3 p_plane = cam + ray_dir * t_plane;
-    float amp_sum = WaveAmplitudeSum(WaveFadeFactor(length(p_plane.xz - cam.xz)), footprint);
+    float amp_sum = WaveAmplitudeSum(footprint);
     // 位移波被足迹**全部**截断（浪被抗锯齿杀光）⇒ 曲面就是平面，没有高度修正。
     // 但法线仍必须由还解析得出来的细节波给：旧版在这里直接 return 平法线 (0,1,0)，
     // 等于把远场做成完美镜面，且断点随 kWaveLodPxMin 平移（2 px→80 m、3 px→63 m，
@@ -412,26 +411,20 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
         normal = WaveNormalAt(cam, ray_dir, t_plane, footprint);
         return true;
     }
+    // 振幅沿射线是常数（谱截断只看像素足迹），所以区间半宽一次算定 ——
+    // 旧版这里还有一段"按最近端点重估上界"，那是给 fade 用的，fade 已删。
     float span = amp_sum / rdy;
-    // 二分区间的振幅上界必须覆盖**整个区间**：fade 随距离单调不增 ⇒ 最近端点给的上界最大。
-    // span 依赖 amp_sum（循环依赖）⇒ 用平面点的 span 先估一次（无三角函数，成本可忽略）。
-    {
-        float t_probe = max(t_plane - span, 1.0e-4);
-        vec3 p_probe = cam + ray_dir * t_probe;
-        amp_sum = max(amp_sum,
-                      WaveAmplitudeSum(WaveFadeFactor(length(p_probe.xz - cam.xz)), footprint));
-        span = amp_sum / rdy;
-    }
     float t_lo = max(t_plane - span, 1.0e-4);
     float t_hi = t_plane + span;
     if (t_hi <= t_lo) {
         t_hi = t_lo + 1.0e-4;
     }
+
+    // 两端必然异号（|h| ≤ amp_sum）⇒ 12 次二分。**不做首根扫描**（与 CPU 同一口径：
+    // 扫描栅格是像素间的非物理量 ⇒ 近切点处跳根 ⇒ 水平硬边）。
     float f_lo = WaveFAt(cam, ray_dir, level, footprint, t_lo);
     float f_hi = WaveFAt(cam, ray_dir, level, footprint, t_hi);
     if ((f_lo > 0.0) == (f_hi > 0.0)) {
-        // 数值兜底（fade 边界/极端参数）：t 回退平面解，但**法线照常按梯度求** ——
-        // 绝不返回平法线（否则远场变镜面 + 硬分界）。
         t = t_plane;
         pos = cam + ray_dir * t;
         normal = WaveNormalAt(cam, ray_dir, t, footprint);

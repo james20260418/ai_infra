@@ -293,8 +293,6 @@ public:
         w.waves[1] = jpov::WaterWave{0.6f, 0.8f, 13.0f, 0.14f, 1.7f};
         w.waves[2] = jpov::WaterWave{-0.8f, 0.6f, 7.0f, 0.07f, 0.4f};
         w.waves[3] = jpov::WaterWave{0.3f, -0.95f, 3.5f, 0.03f, 2.6f};
-        w.fade_start_m = 120.0f;
-        w.fade_end_m = 700.0f;
         w.flow_align = 0.6f;
         w.flow_wind_gain = 0.6f;
         w.flow_uv_scale = 1.0f / 220.0f;
@@ -900,9 +898,15 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        // 选型场 14 行（左列 0..13），其余场景保持 17 行。面板是底对齐的，
-        // 行数必须等于「最大行号 + 1」，多给的行会变成底部一条空白。
-        const int   kRows    = IsOceanLab() ? 14 : 17;
+        // 行数**由面板自己声明**，不再手维护（2026-11-24 第二次踩坑：加控件忘了加行数，
+        // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
+        // 多给的行变成顶部一片空白。
+        // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
+        constexpr int kOceanLabPanelRows = 14;   // 场景4：row(0,0..13) + row(1,0..10)
+        constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
+        const int kRows = IsOceanLab()   ? kOceanLabPanelRows
+                        : IsWaterScene() ? kWaterPanelRows
+                                         : 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -1035,8 +1039,13 @@ private:
                                       std::atan(lab_readout_.rms_slope) * 57.29577951308232));
                     ui_.Text(buf, row(1, 10));
                 }
+                // 场景 4 的面板到这里就结束：**必须早退**，否则会继续画下面那套
+                // 「SSR / 天光自由度」通用面板，它们用的也是 row(0,1..15) / row(1,0..)，
+                // 两套控件叠在同一批行上 ⇒ 文字互相重叠、完全不可读
+                //（2026-11-24 Danis 报障：「场景4 UI 重叠，字都混在一起」）。
                 return;
             }
+
             if (IsWaterScene()) {
                 ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 1));
                 ui_.SliderFloat("吸收 R 1/m", &water_sigma_a_r_, row(0, 2), 0.0f, 1.0f, 3);
@@ -1062,10 +1071,6 @@ private:
                 // 时间倍率改成"调用方对 time 的缩放"，不再是波谱里的字段。
                 ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_time_speed_,
                                 row(0, 10), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
-                                row(0, 11), 0.0f, 2000.0f, 0);
-                ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
-                                row(0, 12), 0.0f, 3000.0f, 0);
                 ui_.Checkbox("波浪 真位移 (关=只改法线)", &water_waves_.displacement,
                              row(0, 13));
                 // 左列最后一格：水皮开关（与 row(0,1) 的「水体介质」正交）。

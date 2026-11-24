@@ -357,7 +357,9 @@ vec3 SkyBendDir(vec3 raw, out float gain) {
         float t_wave = t;
         vec3 pos_w;
         vec3 nrm_w;
-        float footprint = uSkyBendPixelAngle * t / max(abs(raw.y), 0.15);
+        // 与水皮同一个足迹公式（kWaterWaveGlsl::WaveFootprint）：护栏也是同一个常量，
+        // 否则窗缘与水皮的谱截断不同口径 ⇒ 「漏牙龈」那类错位。
+        float footprint = WaveFootprint(uCamPos, raw, uSkyBendLevelY, uSkyBendPixelAngle);
         if (WaveSurfaceHit(uCamPos, raw, uSkyBendLevelY, footprint, t_wave, pos_w, nrm_w)) {
             N = nrm_w;
         }
