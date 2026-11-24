@@ -45,6 +45,10 @@ uniform vec2  uShortWaveDir;         // 短波风向（xz，单位；0,0 = 各�
 uniform float uShortWaveMss;         // 短波总斜率方差（σ²）
 
 const int kWaveBisectIters = 12;
+// 「首个交点」隔离（与 CPU 的 kFirstHitStepLambdaFrac / kFirstHitMaxSteps 同值）：
+// 二分只保证找到一个根，不保证找到**最先撞到**的那个；掠射区间跨多个波峰时必须先扫。
+const float kWaveFirstHitStepFrac = 0.25;
+const int kWaveFirstHitMaxSteps = 64;
 // 抗锯齿：一个波长占的像素数 ≤ kMin 就消失、≥ kMax 就全幅（当前 3 / 8）。
 // 2 px 是 Nyquist 的理论极限，但逐像素中心采样 + 双线性插值实际需要 ≥ 4 px 才不走样
 //（2026-11-23「低风速海面硬边」= 2~4 px 的细节波在反射里走样）。
@@ -350,6 +354,10 @@ float WaveFAt(vec3 cam, vec3 ray_dir, float level, float footprint, float tt) {
 //    而这个 t 会作为透明层深度喂给合成趟去切介质 ⇒ 介质段长度突变 ⇒ 硬边。
 float WaveAmplitudeSum(float footprint) {
     float s = 0.0;
+    // amp_gain 对 Stokes 项是**二次**的（½kA²），所以必须逐波乘进振幅，不能最后统一乘
+    // （与 CPU WaveAmplitudeSum 同口径；flow 关时两条写法等价）。
+    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
+    float gain = 1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0);
     for (int i = 0; i < 8; ++i) {
         if (i >= uWaveCount) {
             break;
@@ -364,14 +372,13 @@ float WaveAmplitudeSum(float footprint) {
                 lod_amp = u * u * (3.0 - 2.0 * u);
             }
         }
-        s += uWaveL[i].z * lod_amp;
+        float aa = uWaveL[i].z * lod_amp * gain;
+        s += aa;
         if (uWaveStokes2 != 0) {
-            float aa = uWaveL[i].z * lod_amp;
             s += 0.5 * uWaveL[i].x * aa * aa;
         }
     }
-    float flow_len = (uWaveHasFlow != 0) ? uWaveFlowStrength : 0.0;
-    return s * (1.0 + uWaveFlowWindGain * clamp(flow_len, 0.0, 1.0));
+    return s;
 }
 
 // 视线 vs 高度场求交。
@@ -416,9 +423,46 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
     if (t_hi <= t_lo) {
         t_hi = t_lo + 1.0e-4;
     }
-    float f_lo = WaveFAt(cam, ray_dir, level, footprint, t_lo);
-    float f_hi = WaveFAt(cam, ray_dir, level, footprint, t_hi);
-    if ((f_lo > 0.0) == (f_hi > 0.0)) {
+
+    // 最细的**存活**主波（决定沿射线的相位周期）。没有则退化为整段二分。
+    float lam_min = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        if (i >= uWaveCount) {
+            break;
+        }
+        float lam = 6.283185307179586 / uWaveL[i].x;
+        bool alive = (footprint <= 1.0e-6) || (lam / footprint > kWaveLodPxMin);
+        if (alive && (lam_min <= 0.0 || lam < lam_min)) {
+            lam_min = lam;
+        }
+    }
+    float rdxz = length(ray_dir.xz);
+    float step = (lam_min > 0.0 && rdxz > 1.0e-3)
+                     ? kWaveFirstHitStepFrac * lam_min / rdxz
+                     : (t_hi - t_lo);
+    step = max(step, 1.0e-3);
+
+    // 扫：找**第一个**变号子区间（可见表面 = 最小 t 的根）。
+    float a = t_lo;
+    float fa = WaveFAt(cam, ray_dir, level, footprint, a);
+    float b = a;
+    float fb = fa;
+    bool found = false;
+    for (int i = 0; i < kWaveFirstHitMaxSteps && a < t_hi; ++i) {
+        b = min(a + step, t_hi);
+        fb = WaveFAt(cam, ray_dir, level, footprint, b);
+        if ((fa > 0.0) != (fb > 0.0)) {
+            found = true;
+            break;
+        }
+        if (i == 0 && fa <= 0.0) {
+            found = true;   // 起点就在水面之下（相机贴着波谷）
+            break;
+        }
+        a = b;
+        fa = fb;
+    }
+    if (!found) {
         // 数值兜底（极端参数）：t 回退平面解，但**法线照常按梯度求** ——
         // 绝不返回平法线（否则远场变镜面 + 硬分界）。
         t = t_plane;
@@ -426,17 +470,17 @@ bool WaveSurfaceHit(vec3 cam, vec3 ray_dir, float level, float footprint, inout 
         normal = WaveNormalAt(cam, ray_dir, t, footprint);
         return true;
     }
-    bool lo_positive = (f_lo > 0.0);
+    bool lo_positive = (fa > 0.0);
     for (int i = 0; i < kWaveBisectIters; ++i) {
-        float tm = 0.5 * (t_lo + t_hi);
+        float tm = 0.5 * (a + b);
         bool m_positive = (WaveFAt(cam, ray_dir, level, footprint, tm) > 0.0);
         if (m_positive == lo_positive) {
-            t_lo = tm;
+            a = tm;
         } else {
-            t_hi = tm;
+            b = tm;
         }
     }
-    t = 0.5 * (t_lo + t_hi);
+    t = 0.5 * (a + b);
     if (t <= 0.0) {
         return false;
     }

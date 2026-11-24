@@ -195,6 +195,58 @@ TEST(WaterWaveMath, FlowStrengthensAmplitude) {
     EXPECT_NEAR(with_flow.height_m, 1.0f, 1.0e-4f);   // 振幅 ×2
 }
 
+// 求交必须返回**首先**撞到的面（最小 t），不是"任意一个根"（2026-11-24 修）。
+//
+// 反例（修之前）：λ=24 m/A=1 m、相机 1.5 m、视线 2° ⇒ 二分区间里 7 个根，
+// 返回的是 +66 m 之后那一个 —— 着色点/法线全部取错，相邻像素跳根 ⇒ 远处麻点。
+TEST(WaterWaveMath, IntersectionFindsTheFirstHit) {
+    WaterWaves w;
+    w.enabled = true;
+    w.num_waves = 1;
+    w.waves[0] = WaterWave{1.0f, 0.0f, 24.0f, 1.0f, 0.0f};
+    w.stokes_second_order = false;
+    w.num_detail_waves = 0;
+
+    const Vec3f cam{0.0f, 1.5f, 0.0f};
+    // 沿 −x 看：波沿 +x 传播 ⇒ 相位随 t 变化（沿着波峰方向看是退化情形）。
+    const Vec3f rd_raw{-1.0f, -0.02f, 0.0f};
+    const float rl = rd_raw.Norm();
+    const Vec3f rd{rd_raw.x() / rl, rd_raw.y() / rl, rd_raw.z() / rl};
+
+    // 真值：细扫找第一个变号点，并统计根数（根数 <2 说明这个用例测不到东西）。
+    const float t_plane = (0.0f - cam.y()) / rd.y();
+    auto f = [&](float tt) {
+        const Vec3f p{cam.x() + rd.x() * tt, cam.y() + rd.y() * tt, cam.z() + rd.z() * tt};
+        return (p.y() - 0.0f) - SampleWaveField(w, p.x(), p.z(), 0.0f, 0.0f, 0.0f, 0.0f).height_m;
+    };
+    const float t_end = t_plane * 1.8f;
+    const int kSteps = 200000;
+    float prev = f(1.0e-4f);
+    float first = -1.0f;
+    int roots = 0;
+    for (int i = 1; i <= kSteps; ++i) {
+        const float tt = 1.0e-4f + (t_end - 1.0e-4f) * static_cast<float>(i) /
+                                      static_cast<float>(kSteps);
+        const float cur = f(tt);
+        if ((cur > 0.0f) != (prev > 0.0f)) {
+            ++roots;
+            if (first < 0.0f) {
+                first = tt;
+            }
+        }
+        prev = cur;
+    }
+    ASSERT_GT(roots, 1) << "该机位只有一个根，用例测不到「首个交点」这件事";
+    ASSERT_GT(first, 0.0f);
+
+    WaveSurfaceHit hit;
+    ASSERT_TRUE(IntersectWaveSurface(cam, rd, 0.0f, w, 0.0f, 0.0f, 0.0f, 0.0f, &hit));
+    // 允 1 cm 以内的数值差（二分 12 次的量化步长 << 波长的 1/1000）。
+    EXPECT_NEAR(hit.t, first, 0.02f)
+        << "返回的不是首个交点：first=" << first << " got=" << hit.t
+        << "（Δ 超过一个波长的量级就说明根没隔离）";
+}
+
 // ───────────────────────── 求交残差 ─────────────────────────
 
 // 交点必须落在曲面上：|P.y − level − h(P.xz)| < 1e-3。

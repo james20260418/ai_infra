@@ -191,11 +191,10 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         // ③ 反射率/透射率随粗糙度重分配（与着色器同一条）：投影到入射面后取角度平均菲涅尔。
         if (waves != nullptr && waves->enabled && waves->num_waves > 0 && t > 0.0f) {
             const SlopeVariance v = WaveFilteredVariance(*waves, footprint);
-            const float rl = std::sqrt(ray_dir.x() * ray_dir.x() + ray_dir.z() * ray_dir.z());
-            const float tx = (rl > 1.0e-6f) ? ray_dir.x() / rl : 1.0f;
-            const float tz = (rl > 1.0e-6f) ? ray_dir.z() / rl : 0.0f;
-            const float var_p = tx * tx * v.xx + 2.0f * tx * tz * v.xz + tz * tz * v.zz;
-            out->reflectance = RoughFresnelAlbedo(out->cos_i, var_p, ior);
+            // R_eff 是对半球的积分 ⇒ 用张量的平均（各向同性口径），不能用某个方向的投影
+            // （与 GLSL 的 var_p_mean 同源；2026-11-24 修）。
+            const float var_p_mean = 0.5f * (v.xx + v.zz);
+            out->reflectance = RoughFresnelAlbedo(out->cos_i, var_p_mean, ior);
         }
     }
     return true;

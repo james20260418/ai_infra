@@ -83,6 +83,17 @@ inline float WaveFootprintM(float t_plane_m, float ray_dir_y, float pixel_angle_
 // （Newton 在波谷/陡坡处 f'→0 会跳根，实测表现为法线噪点）。
 inline constexpr int kWaveBisectIterations = 12;
 
+// ── 「首个交点」隔离（2026-11-24 修，Danis 报障的根）─────────────────────
+// 二分的前提是**区间内只有一个变号点**。但 [t_plane−span, t_plane+span] 在掠射时跨多个波峰
+// （实测：单波 λ24 m/A1 m、相机 1.5 m、视线 2° ⇒ 区间内 7 个根，二分返回了 +66 m 之后的那一个）。
+// 二分只保证「找到一个根」，不保证「找到**最先**撞到的根」——而可见表面是**最小 t** 的那个根。
+//
+// 做法：先按「相位周期」步进扫过区间，找到**第一个**变号子区间，再对它二分。
+//   沿射线走 dt 时水平位移 = |rd.xz|·dt ⇒ 最细的存活波（λ_min）的相位周期 = λ_min/|rd.xz|。
+//   步长取周期的 1/4（Nyquist ×2 的再保守），步数上限 kFirstHitMaxSteps（超了退化为二分）。
+inline constexpr float kFirstHitStepLambdaFrac = 0.25f;
+inline constexpr int kFirstHitMaxSteps = 64;
+
 // 高度场采样结果：相对 level_y 的**高度偏移**（米）与梯度（无量纲）。
 struct WaterWaveSample {
     float height_m = 0.0f;   // h（米，相对 level_y；正 = 高出基准面）
@@ -459,7 +470,9 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
                                        (kWaveLodPxMax - kWaveLodPxMin));
             }
         }
-        const float a = waves.waves[i].amplitude_m * lod_amp;
+        // ⚠️ amp_gain 必须在**循环内**乘到振幅上：Stokes 项是 ½·k·A²，对增益是二次的
+        //    （旧版最后统一乘一次 ⇒ 该项少乘一个 amp_gain；flow 关时无影响，属潜在错）。
+        const float a = waves.waves[i].amplitude_m * lod_amp * amp_gain;
         sum += a;
         if (waves.stokes_second_order) {
             // 二阶谐波把峰值再抬高 ½·k·A²：二分区间必须覆盖它，否则端点不变号。
@@ -467,7 +480,7 @@ inline float WaveAmplitudeSum(const WaterWaves& waves, float flow_x, float flow_
             sum += 0.5f * k * a * a;
         }
     }
-    return sum * amp_gain;
+    return sum;
 }
 
 // 由梯度求法线（单位向量，y > 0）。h ≡ 0 ⇒ (0,1,0)。
@@ -587,11 +600,8 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
     // 那里的二分本来就无意义 —— 下一版由 far 分支直接跳过求交（docs/jpov_water_farfield_design.md）。
     const float rdy = std::max(std::fabs(rd.y()), 1.0e-3f);
     const float span = amp_sum / rdy;
-    float t_lo = t_plane - span;
+    float t_lo = std::max(t_plane - span, 1.0e-4f);
     float t_hi = t_plane + span;
-    if (t_lo < 1.0e-4f) {
-        t_lo = 1.0e-4f;
-    }
     if (t_hi <= t_lo) {
         t_hi = t_lo + 1.0e-4f;
     }
@@ -601,24 +611,62 @@ inline bool IntersectWaveSurface(const Vec3f& cam_pos, const Vec3f& rd, float le
         return (p_y - level_y) - height_at(tt);
     };
 
-    const float f_lo = f_of_t(t_lo);
-    const float f_hi = f_of_t(t_hi);
-    if ((f_lo > 0.0f) == (f_hi > 0.0f)) {
-        // 区间没有变号（数值兜底：极端参数）。t 回退到平面解，
-        // 但**法线照常按梯度求** —— 绝不返回平法线（否则远场变镜面 + 硬分界）。
-        return finish(t_plane);
-    }
-    bool lo_positive = (f_lo > 0.0f);
-    for (int i = 0; i < kWaveBisectIterations; ++i) {
-        const float tm = 0.5f * (t_lo + t_hi);
-        const bool m_positive = (f_of_t(tm) > 0.0f);
-        if (m_positive == lo_positive) {
-            t_lo = tm;
-        } else {
-            t_hi = tm;
+    // 最细的**存活**主波（决定沿射线的相位周期）；没有则退化为整段二分。
+    float lam_min = 0.0f;
+    {
+        const int n = std::min(waves.num_waves, WaterWaves::kMaxWaves);
+        for (int i = 0; i < n; ++i) {
+            const float lam = waves.waves[i].wavelength_m;
+            const bool alive =
+                !(pixel_footprint_m > 1.0e-6f) || (lam / pixel_footprint_m > kWaveLodPxMin);
+            if (alive && (lam_min <= 0.0f || lam < lam_min)) {
+                lam_min = lam;
+            }
         }
     }
-    t = 0.5f * (t_lo + t_hi);
+    const float rdxz = std::sqrt(rd.x() * rd.x() + rd.z() * rd.z());
+    float step = (lam_min > 0.0f && rdxz > 1.0e-3f)
+                     ? kFirstHitStepLambdaFrac * lam_min / rdxz
+                     : (t_hi - t_lo);
+    step = std::max(step, 1.0e-3f);
+
+    // 扫：从区间左端出发，找**第一个**变号子区间（可见表面 = 最小 t 的根）。
+    float a = t_lo;
+    float fa = f_of_t(a);
+    float b = a;
+    float fb = fa;
+    bool found = false;
+    for (int i = 0; i < kFirstHitMaxSteps && a < t_hi; ++i) {
+        b = std::min(a + step, t_hi);
+        fb = f_of_t(b);
+        if ((fa > 0.0f) != (fb > 0.0f)) {
+            found = true;
+            break;
+        }
+        // 起点就在水面之下（相机贴着波谷）：第一个子区间就是答案，直接二分它。
+        if (i == 0 && fa <= 0.0f) {
+            found = true;
+            break;
+        }
+        a = b;
+        fa = fb;
+    }
+    if (!found) {
+        // 一整个区间都没有变号（极端参数 / 相机在水下）：回退平面解。
+        // **法线照常按梯度求** —— 绝不返回平法线（否则远场变镜面 + 硬分界）。
+        return finish(t_plane);
+    }
+    bool lo_positive = (fa > 0.0f);
+    for (int i = 0; i < kWaveBisectIterations; ++i) {
+        const float tm = 0.5f * (a + b);
+        const bool m_positive = (f_of_t(tm) > 0.0f);
+        if (m_positive == lo_positive) {
+            a = tm;
+        } else {
+            b = tm;
+        }
+    }
+    t = 0.5f * (a + b);
     if (t <= 0.0f) {
         return false;
     }
