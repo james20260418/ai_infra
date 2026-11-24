@@ -478,51 +478,30 @@
 - **不做 choppy（水平位移）**：求交必须单值高度图；choppy 会把求交变成隐式方程。
   波峰尖锐度目前只靠多波叠加与陡度，不做 Gerstner 的 Q 参数。
 
-### 10.13 像素足迹里的 `max(|rd.y|, 0.15)` 地板（2026-11-19 记）——**2026-11-24 已解决**
+### 10.13 远处行为 = **三个正交旋钮**（2026-11-19 记诊断 → 2026-11-24 拆成正交滑条）
 
-> **结论（2026-11-24）**：Danis 定「用户不需要 fade」。已落地 `WaterWaves::far_field`
-> 二选一口径，**默认 `kFootprintTruncation`（去掉地板 + 去掉 fade）**，
-> `kLegacyFade` 只留作 A/B 对照（面板勾选框 / `--wave-legacy-fade` / 配置 `farfield 1`）。
-> 下面是当初的诊断原文（仍然成立，只是不再是现状）。
+**结论（2026-11-24，Danis 定）**：不做「模式」。远处的行为由三个**互不依赖**的旋钮分别控制：
 
-水皮的足迹公式是
+| 旋钮 | 字段 / uniform | 管什么 | 默认 |
+|---|---|---|---|
+| ① 掠射足迹护栏 | `WaterWaves::graze_floor` → `uWaveGrazeFloor` | **远处还剩多少细节**：`footprint = t·pa / max(\|rd.y\|, graze_floor)`。大 ⇒ 足迹被低估 ⇒ 远处的波留着（细节多、可能微抖）；小 ⇒ 真实足迹 ⇒ 远处**更早**按物理截断（画面变平/发糊） | **0.15**（≈8.6°，历史值 = 细节最多那档） |
+| ② 距离淡出 | `fade_start_m` / `fade_end_m` | 按相机水平距离 smoothstep 压到 0（和物理无关的固定距离）；`end <= start` ⇒ 恒 1 | **关**（0/0） |
+| ③ 谱截断窗口 | `WaveUniformParams::lod_px_min/max` → `uWaveLodPxMin/Max`（`--lod-px-min/max`） | 一个波长占多少像素时开始/完全失去几何（3→8 px 淡出），被截掉的方差进 `var_p` | 3 / 8 |
 
-```
-footprint = t · (2·tanHalfFov / viewport_h) / max(|rd.y|, 0.15)
-```
+- 护栏 clamp 到 `[1e-4, 0.5]`（`water::kGrazeFloorPhysical / kGrazeFloorMax`），CPU / GLSL 同区间；
+  足迹整体钳到 `kMaxFootprintM = 1e6`（极端掠射行 `t` 到几百公里时裸公式会溢出 `inf`，
+  `cam + rd·t` 里 `0·inf = NaN` 会顺着 sin/cos 污染法线）。
+- 单一足迹公式：CPU `water::WaveFootprintM` ↔ GLSL `kWaterWaveGlsl::WaveFootprint`
+  （水皮与天球折射调同一个，`uWaveGrazeFloor` 由 `UploadWaterWaveUniforms` 上传）。
 
-那个 **0.15 是人为地板**（当初为了“别让远处足迹无限大、整片海被谱截断成平面”）。
-代价很具体：视线一旦比 8.5° 更贴水面（`|rd.y| < 0.15`），真实足迹 ∝ 1/|rd.y| 会继续增长，
-但公式不再跟着涨 ⇒ **足迹被系统性低估** ⇒ 谱截断杀得不够 ⇒ 那一段可能出现
-法线/位移的亚像素抖动。
+**历史坑（2026-11-24，别重犯）**：曾经把①和②捆成一个二选一开关（`FarField{kFootprintTruncation,
+kLegacyFade}`），理由是「地板把截断推远 3×，所以 fade 是它的保险丝」。Danis 一关 fade 就发现
+**远处细节也一起没了** —— 因为关的其实是①。这个耦合是我的发明，不是物理。**三个旋钮必须分开暴露。**
 
-- 按当前相机高度 15.8 m 估：`|rd.y| = 0.15` 出现在 **≈ 105 m**；再远全靠 `max` 兜着。
-- 现在实际兜住这段的是 **fade（150..900 m）**，不是截断。实测（2026-11-19）：
-  关掉 fade 后逐像素时间差分 0.36→0.39（几乎不变）、波幅 ×3 也如此 ——
-  因为 24 m 的波被截断杀掉的时刻 ≈ 1125 m，和 fade_end 900 m 只差 200 m。
-- **所以 fade 曾是「足迹公式缺陷」的保险丝**。删它的顺序：先修足迹 → 让截断接管 →
-  最后删 fade（**三步已在同一次改动里落地**）。
-- 修好之后 fade 退化成纯 A/B 开关（“想让远处变平就开”），与物理无关。
-
-**2026-11-24 落地口径（`far_field`）**
-
-| | `kFootprintTruncation`（默认） | `kLegacyFade` |
-|---|---|---|
-| 掠射护栏 | `kGrazeFloorPhysical = 1e-4`（只防除零） | `kGrazeFloorLegacy = 0.15`（≈8.6°） |
-| 距离淡出 | 无（`WaveFadeFactor ≡ 1`） | `fade_start_m .. fade_end_m` |
-| 远处怎么变平 | 每条波长在自己 `λ/footprint < LOD 门限` 的距离上被截断；被截掉的斜率方差进 `var_p`（→ `F_eff` / 太阳 lobe / 探针 LOD） | 振幅按距离 smoothstep 压到 0（和物理无关的固定距离） |
-
-- 两个护栏**必须整体切**：地板留着又关 fade ⇒ 该杀的波没杀（亚像素抖动）；
-  只去地板不删 fade ⇒ 截断永远轮不到生效。所以对外只有一个 `far_field`，不是两个旋钮。
-- 共用一处：CPU `water::WaveFootprintM` / GLSL `kWaterWaveGlsl::WaveFootprint`（水皮与天球折射
-  调同一个），护栏由 `UploadWaterWaveUniforms` 按口径上传（`uWaveGrazeFloor`）。
-- 足迹上限 `kMaxFootprintM = 1e6`：极端掠射行的 `t` 到几百公里时裸公式会溢出到 `inf`，
-  `cam + rd·t` 里 `0·inf = NaN` 会污染法线；1e6 m 远大于任何波长的截断距离。
-- 实测（`--capture-water-waves` 掠射图，fade 120/700 对比）：地平线带（y≈330–355）
-  高频能量 **2.38 → 1.82**（-24%）、整体亮度 **191.5 → 204.2**；近场（<120 m）逐字节不变。
-- **剩下的「暗」不是 fade 造成的**：截断把能量从几何搬到 `var_p`，远场的观感由
-  M1（lobe 拉宽）/ M2（多散射）/ 短波 MSS 预算决定，见 §10.16 与 §10.15b。
-
+原始诊断（2026-11-19，仍然成立）：0.15 地板把有效掠射角钳在 8.6° ⇒ 足迹被系统性低估 ⇒
+24 m 的波本该 ≈300 m 死、被算成 ≈1080 m。所以「细节多」这件事**本来就是地板买来的**，
+代价是那一段的波已经亚像素（走样/微抖的隐患）。另外：关 fade、保地板时逐像素时间差分
+0.36→0.39（几乎不变）—— 也就是说 fade 单独看并不重要，重要的是①。
 
 ### 10.14 法线场过滤（远处亚像素波 → 粗糙度，2026-11-19 落地）的边界
 
@@ -615,7 +594,10 @@ footprint = t · (2·tanHalfFov / viewport_h) / max(|rd.y|, 0.15)
    另：§10.17-5（多散射补偿）优先级从第 5 提到与 M1 同级；§10.17-3（各向异性）在 M1 之后
    才变成可见问题（远场眩光是圆盘，而不是沿风向拉长的椭圆带）。
 
-**M1（lobe 拉宽）✅ 2026-11-23 已落地**（PR「M1+M2+M3：远场 lobe / 多散射 / glints」）：
+**M1（lobe 拉宽）✅ 2026-11-23 落地，2026-11-24 默认改为关**：Danis 定「M1 与『远处细节量』
+是两件事，别混着调」⇒ `WaterSkinRenderer::Inputs::lobe_var_p` 默认 **false**、面板移除
+（CLI `--lobe-var-p` 可开）。关掉之后远场就是本节描述的「暗 + 平」—— 这是**已知的正常状态**，
+不是 bug。原实现：
 `a2 = min(盘角² + footprint_a2 + normal_var_px + kGlintSmooth·var_p, 0.25)`，
 CPU / GLSL 同源（`var_p` 已按入射面投影，来自 `WaveFilteredVariance` 的张量）。
 默认就是正确算法，**不给关掉的开关**。`kGlintSmooth = 0.75`（见下 M3）。

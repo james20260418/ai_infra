@@ -177,8 +177,8 @@ void main() {
     bool wave_ok = true;
     // 像素在水面上覆盖的世界尺寸（用平面 t 估；掠射时按 |rd.y| 放大）。
     // 公式在 kWaterWaveGlsl::WaveFootprint（与 CPU 的 water::WaveFootprintM 同源）：
-    // 掠射护栏 uWaveGrazeFloor 由 WaterWaves::far_field 决定 —— 足迹口径 1e-4（只防除零，
-    // 剩下的发散由截断自己吃掉）/ 遗留口径 0.15（≈8.6°，当年给 fade 争取距离的地板）。
+    // 掠射护栏 uWaveGrazeFloor = WaterWaves::graze_floor（远处「细节量」的旋钮；
+    // 大 ⇒ 保细节，小 ⇒ 按真实足迹更早截断）。与 fade / 谱截断窗口互不依赖。
     float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
     float footprint = WaveFootprint(uCamPos, rd, uWaterLevelY, pixel_angle);
     if (uWaveCount > 0) {

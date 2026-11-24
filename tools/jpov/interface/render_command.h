@@ -988,27 +988,25 @@ struct WaterWaves {
     // flow 强度对振幅的增益：A *= (1 + flow_wind_gain·|flow|)。
     float flow_wind_gain = 1.0f;
 
-    // ── 远处怎么变平：两种口径，**整体二选一**（2026-11-24）──
-    // 远处的波必须变平（波长小于像素就会走样），能做这件事的只有两条路，而且它们
-    // **不是独立旋钮**：
-    //   · kFootprintTruncation：靠像素足迹截断谱 —— 每条波长在自己「波长 < LOD 门限」
-    //     的距离上被截断，被截掉的斜率方差转进 BRDF（反射率重分配 / 太阳 lobe 拉宽 /
-    //     探针模糊）。过渡宽度由波长与视线仰角自己算出来 ⇒ **没有任何距离参数**。
-    //   · kLegacyFade：靠距离淡出 —— 按相机水平距离把振幅 smoothstep 压到 0。
-    //     它当年是给「足迹地板」争取距离用的（地板把截断推远 3×），代价是波在一个
-    //     和物理无关的固定距离上「生硬消失」。
-    // ⚠️ 地板与 fade 必须**一起切**：留着地板又关 fade ⇒ 该杀的波没杀（亚像素抖动）；
-    //    只去地板不删 fade ⇒ 截断永远轮不到生效，fade 继续当兜底。
-    enum class FarField {
-        kFootprintTruncation = 0,   // 默认：只有物理（无 fade、足迹无地板）
-        kLegacyFade = 1,            // A/B 对照：足迹地板 0.15 + fade_start_m..fade_end_m
-    };
-    FarField far_field = FarField::kFootprintTruncation;
+    // ── 远处行为：**三个正交旋钮**（2026-11-24 Danis 定：不做「模式」）──
+    //  ① graze_floor（掠射足迹护栏）—— 控制远处的「细节量」；
+    //  ② fade_start_m / fade_end_m —— 距离淡出（end <= start ⇒ 关）；
+    //  ③ 谱截断窗口 lod_px_min/max —— 运行时 uniform（WaveUniformParams，不在本结构体）。
+    // 三者互不依赖，可任意组合。
+    //
+    // ① 掠射足迹护栏（米，即 `footprint = t·每像素弧度 / max(|rd.y|, graze_floor)` 里的那个下限）。
+    // 它钳住「有效掠射角」，直接决定远处还有多少波活着：
+    //   · 大（0.15 ≈ 8.6°）⇒ 足迹被低估 ⇒ **保细节**（亚像素波也留着；代价是可能微抖/走样）；
+    //   · 小（1e-4，只防除零）⇒ 真实足迹 ⇒ 远处的波**更早**按物理截断掉（画面变平、发糊）。
+    // 为什么需要这个旋钮而不是直接写真值：真实足迹在掠射时分母 1/|rd.y| 无上界，
+    // 当初就是靠它把远处从「全截断成镜面」里拉回来的。它和 fade 没有任何依赖 ——
+    // 历史上曾把两者捆成一个二选一开关，结果「关 fade 顺手把细节也关了」，所以拆开。
+    float graze_floor = 0.15f;
 
-    // 遗留口径的参数（**仅 kLegacyFade 生效**；按相机水平距离，米）。
-    // dist ≥ fade_end ⇒ 波消失（回纯平面）；fade_end <= fade_start ⇒ 不淡出（恒 1）。
-    float fade_start_m = 150.0f;
-    float fade_end_m = 900.0f;
+    // ② 距离淡出（按相机水平距离，米）：dist ≥ fade_end ⇒ 波消失（回纯平面）。
+    // fade_end <= fade_start ⇒ 不淡出（恒 1）。**默认 0/0 = 关**（Danis 2026-11-24：用户不需要 fade）。
+    float fade_start_m = 0.0f;
+    float fade_end_m = 0.0f;
 
     // ── 大尺度相位扭曲（domain warp）──
     // 把整片波场按低频位移场 u(p) 平移：θ_i += k_i·dot(u, d_i)，u = Σ_j A_j·dir_j·sin(...)。

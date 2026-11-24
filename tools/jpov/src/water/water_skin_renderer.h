@@ -57,8 +57,9 @@ public:
         unsigned int wave_flow_tex = 0;
         // debug：0 = 正常；1 = 把交点法线编码成颜色输出（定位法线噪点用）。
         int wave_debug = 0;
-        // 着色 A/B（默认全 true = 正确算法，见 WaterCommand::ShadingAb）。
-        bool lobe_var_p = true;
+        // 着色 A/B。**M1（太阳 lobe 吃 var_p）默认关**（Danis 2026-11-24：与「远处细节量」
+        // 是两件事，别混着调；关掉后远场就是 §10.16 说的「暗+平」）。要用 CLI --lobe-var-p 打开。
+        bool lobe_var_p = false;
         float lobe_var_scale = 1.0f;
         float lod_px_min = 3.0f;
         float lod_px_max = 8.0f;

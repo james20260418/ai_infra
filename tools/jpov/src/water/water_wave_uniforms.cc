@@ -128,18 +128,15 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         glUniform2f(detail_dir_loc + i, dx, dz);
     }
 
-    // 远处口径（WaterWaves::far_field）：两条路只能整体切，所以这两个 uniform 一起上传 ——
-    //   · kLegacyFade：fade_start/end 生效 + 掠射地板 0.15；
-    //   · kFootprintTruncation：fade 上传 0/0（GLSL 的 `end <= start ⇒ 恒 1` 就是「没有 fade」）
-    //     + 掠射护栏 1e-4（只防除零）。
-    // 上传 0/0 而不是删 uniform：fade 的两个字段还留着给 A/B 对照，字段与实现必须对得上。
-    const bool legacy_fade = on && (w->far_field == WaterWaves::FarField::kLegacyFade);
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeStart"),
-                legacy_fade ? w->fade_start_m : 0.0f);
-    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeEnd"),
-                legacy_fade ? w->fade_end_m : 0.0f);
+    // 远处的两个**正交**旋钮（互不依赖，任意组合）：
+    //   ① 掠射足迹护栏 graze_floor —— 控制远处「还有多少波活着」（大 = 保细节 / 小 = 早变平）；
+    //   ② 距离淡出 fade_start/end —— end <= start ⇒ GLSL 侧恒 1（= 关闭）。
+    // 护栏 clamp 到合法区间的责任在这里（CPU WaveFootprintM 里 clamp 同一区间 = 同口径）。
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeStart"), on ? w->fade_start_m : 0.0f);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveFadeEnd"), on ? w->fade_end_m : 0.0f);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveGrazeFloor"),
-                legacy_fade ? kGrazeFloorLegacy : kGrazeFloorPhysical);
+                on ? std::clamp(w->graze_floor, kGrazeFloorPhysical, kGrazeFloorMax)
+                   : kGrazeFloorPhysical);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowAlign"), on ? w->flow_align : 0.0f);
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveFlowWindGain"),
                 on ? w->flow_wind_gain : 0.0f);

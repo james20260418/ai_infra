@@ -1,7 +1,7 @@
 // JPOV 水面波浪 —— GLSL 片段（与 water_wave_math.h 同源）
 //
 // 提供：
-//   WaveFadeFactor(dist)          远处淡出
+//   WaveFadeFactor(dist)          远处淡出（与足迹护栏正交；end<=start ⇒ 恒 1）
 //   WaveFlowAt(p_xz)              采样 flow map（无纹理时恒 0）
 //   WaveSampleAt(p_xz, t, fade, footprint, need_grad, out h, out grad_xz)
 //   WaveNormalFromGrad(grad_xz)
@@ -23,10 +23,10 @@ uniform int   uWaveCount;          // 0 ⇒ 纯平面
 uniform vec4  uWaveL[8];           // (k, omega, amplitude, phase)
 uniform vec2  uWaveDir[8];         // 传播方向（单位，xz）
 uniform float uWaveTime;           // 秒
-uniform float uWaveFadeStart;      // 米（相机水平距离，**仅遗留口径**；= 0/0 ⇒ 恒 1）
+uniform float uWaveFadeStart;      // 米（相机水平距离）；= 0/0 ⇒ 不淡出
 uniform float uWaveFadeEnd;        // 米；<= start ⇒ 不淡出
-// 掠射护栏（＝ CPU 的 kGrazeFloorLegacy / kGrazeFloorPhysical，由 WaveUniformParams 上传）：
-// 遗留口径 0.15（≈8.6°，给 fade 争取距离）；足迹口径 1e-4（只防除零）。
+// 掠射足迹护栏（＝ CPU 的 WaterWaves::graze_floor，clamp 到 [1e-4, 0.5]）：
+// 大 ⇒ 足迹被低估 ⇒ 远处保细节；小 ⇒ 真实足迹 ⇒ 远处更早截断。
 // 与水皮、天球折射**共用**这一个值 ⇒ 两趟的谱截断永远同口径。
 uniform float uWaveGrazeFloor;
 uniform float uWaveFlowAlign;      // [0,1]

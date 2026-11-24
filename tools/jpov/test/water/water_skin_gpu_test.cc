@@ -302,7 +302,8 @@ struct Fixture {
                 float sun_footprint = 0.0f,
                 const jpov::WaterWaves* waves = nullptr,
                 unsigned int wave_flow_tex = 0, float wave_time_s = 0.0f,
-                float wave_depth_m = 300.0f, int wave_debug = 0) {
+                float wave_depth_m = 300.0f, int wave_debug = 0,
+                bool lobe_var_p = false) {
         WaterSkinRenderer::Inputs in;
         in.camera = cam;
         in.full_w = kWidth;
@@ -324,6 +325,8 @@ struct Fixture {
         in.wave_time_s = wave_time_s;
         in.wave_depth_m = wave_depth_m;
         in.wave_debug = wave_debug;   // 1 = 输出法线色（N*0.5+0.5），供回归用例直接读回
+        // M1（太阳 lobe 吃 var_p）默认关（产品口径，Danis 2026-11-24）；验 M1 的用例自己打开。
+        in.lobe_var_p = lobe_var_p;
         water.Begin(kWidth, kHeight);
         water.Draw(in);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -981,9 +984,7 @@ TEST(WaterSkinGpu, SunLobeWidensWithSlopeVariance) {
     const float time_s = 0.0f;
 
     jpov::WaterWaves waves = MakeTestWaves();       // λ 9/5/3 m、A 0.35/0.18/0.08
-    // 这条用例**故意**用 fade 把几何压平（与「远处口径」无关，只是为了 isolate var_p）：
-    // 必须显式选遗留口径，否则默认的足迹截断口径里没有 fade，20 m 外振幅不会归零。
-    waves.far_field = jpov::WaterWaves::FarField::kLegacyFade;
+    // 这条用例**故意**用 fade 把几何压平（与「掠射护栏」正交，只为了 isolate var_p）。
     waves.fade_start_m = 1.0f;                      // ⇒ 20 m 外振幅与梯度都是 0
     waves.fade_end_m = 2.0f;
     waves.num_detail_waves = 0;
@@ -1007,7 +1008,7 @@ TEST(WaterSkinGpu, SunLobeWidensWithSlopeVariance) {
                  // 有效的 specular AA 项，这里必须关掉才能隔离 M1。
                  sun_toward, irradiance, jpov::lighting::kSunAngularRadiusRad,
                  /*sun_footprint=*/0.0f, w, /*wave_flow_tex=*/0, time_s,
-                 /*wave_depth_m=*/300.0f, /*wave_debug=*/14);
+                 /*wave_depth_m=*/300.0f, /*wave_debug=*/14, /*lobe_var_p=*/true);
         const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
         // lobe 宽度的稳健量：**装下 90% 总能量所需的像素数**（与峰值缩放/绝对阈值无关）。
         //  δ lobe ⇒ 1~3 个像素；var_p 拉宽 ⇒ 几十个像素。
@@ -1065,8 +1066,7 @@ TEST(WaterSkinGpu, FadedWavesKeepFlatNormalsButFullVariance) {
     cam.far = kFar;
 
     jpov::WaterWaves waves = MakeTestWaves();
-    // 同上：用 fade 造出「法线平、var_p 满」，所以要遗留口径。
-    waves.far_field = jpov::WaterWaves::FarField::kLegacyFade;
+    // 同上：用 fade 造出「法线平、var_p 满」（fade 与护栏正交）。
     waves.fade_start_m = 1.0f;
     waves.fade_end_m = 2.0f;
     waves.num_detail_waves = 0;
@@ -1094,29 +1094,28 @@ TEST(WaterSkinGpu, FadedWavesKeepFlatNormalsButFullVariance) {
     EXPECT_GT(checked, 100) << "命中像素太少，用例没覆盖到水面";
 }
 
-// 远处口径开关必须真的到着色器里（2026-11-24）。
+// 掠射足迹护栏必须真的到着色器里，并且是**连续旋钮**（2026-11-24 改成正交滑条之后）。
 //
-// 两件事只有**同时**成立才叫「fade 被彻底移除」：
-//   ① uniform 路径：far_field 变了，GPU 必须跟着变（否则面板/CLI 是假开关）；
-//   ② 物理结果：足迹口径下，足迹大到「波长 < LOD 门限」的像素必须**真的是平面**
-//      （截断把位移/法线全杀干净），而遗留口径在同一个像素还有波。
+// 这是「远处细节量」的唯一旋钮：`footprint = t·pa / max(|rd.y|, graze_floor)`。
+//   大（0.15）⇒ 足迹被低估 ⇒ 远处的波留着（细节多，可能微抖）；
+//   小（1e-4）⇒ 真实足迹 ⇒ 同一个像素的波被截断成平面。
 //
-// 手法：把相机压到 2 m 高、平视远处（|rd.y| ≈ 0.02~0.13 的掠射行），λ=150 m 的长波。
-//   legacy：fp = t·pa/0.15  ⇒ 该行 λ/fp ≈ 6~17 px ⇒ 波活着；
-//   footprint：fp = t·pa/|rd.y| ⇒ λ/fp ≈ 0.7~2 px ⇒ 波被截断成平面。
-// 判据全部由 CPU 参考算出来（哪一像素「该平」由 WaveAmplitudeSum 决定），不写死像素坐标。
-TEST(WaterSkinGpu, FarFieldPolicyReachesShader) {
+// 手法：相机 2 m 高、严格平视（地平线在画面正中），λ=150 m 的长波，fade 关（保证差异只来自护栏）。
+// 判据全部由 CPU 参考算出来（哪一像素「该平」用 WaveAmplitudeSum 决定），不写死像素坐标。
+TEST(WaterSkinGpu, GrazeFloorSliderReachesShader) {
     Fixture f;
     f.SetUp();
     Camera cam;
     cam.position = {0.0f, 2.0f, 0.0f};
-    cam.target = {0.0f, 2.0f, 100.0f};   // 严格平视 ⇒ 地平线正好在画面正中
+    cam.target = {0.0f, 2.0f, 100.0f};   // 严格平视
     cam.fov = 60.0f;
     cam.near = kNear;
     cam.far = kFar;
     const float level = 0.0f;
     const float ior = 1.333f;
     const float time_s = 1.5f;
+    const float kFloorHigh = 0.15f;                  // 保细节
+    const float kFloorLow = jpov::water::kGrazeFloorPhysical;   // 真实足迹
 
     jpov::WaterWaves base;
     base.enabled = true;
@@ -1124,16 +1123,16 @@ TEST(WaterSkinGpu, FarFieldPolicyReachesShader) {
     base.num_waves = 1;
     base.waves[0] = jpov::WaterWave{1.0f, 0.0f, 150.0f, 1.0f, 0.0f};
     base.fade_start_m = 0.0f;
-    base.fade_end_m = 0.0f;   // fade 关：两种口径的差异**只来自掠射护栏**
+    base.fade_end_m = 0.0f;   // fade 关：差异只来自掠射护栏
 
     const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
     const unsigned int depth_tex = MakeDepthTexture(depth);
     const Reference ref = BuildReference(cam);
     const float pixel_angle = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
 
-    const auto render_mode = [&](jpov::WaterWaves::FarField mode) {
+    const auto render_floor = [&](float graze_floor) {
         jpov::WaterWaves wv = base;
-        wv.far_field = mode;
+        wv.graze_floor = graze_floor;
         f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
                  jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
                  jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &wv,
@@ -1141,15 +1140,14 @@ TEST(WaterSkinGpu, FarFieldPolicyReachesShader) {
         return ReadRgba(f.water.layer().accum_tex);
     };
 
-    const std::vector<float> gpu_new =
-        render_mode(jpov::WaterWaves::FarField::kFootprintTruncation);
-    const std::vector<float> gpu_legacy = render_mode(jpov::WaterWaves::FarField::kLegacyFade);
+    const std::vector<float> gpu_low = render_floor(kFloorLow);
+    const std::vector<float> gpu_high = render_floor(kFloorHigh);
 
-    int sensitive = 0;      // legacy 有波、足迹口径已完全截断的像素
-    int checked = 0;        // 参与对拍的像素
-    float worst_new = 0.0f; // 足迹口径：GPU vs CPU 法线最大偏差
-    float worst_legacy = 0.0f;
+    int sensitive = 0;     // 大护栏有波、小护栏已完全截断的像素
+    int checked = 0;       // 参与对拍的像素
     int flat_from_gpu = 0;
+    float worst_low = 0.0f;   // 小护栏：GPU vs CPU 法线最大偏差
+    float worst_high = 0.0f;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
             const Vec3f rd = RayAt(ref, x, y);
@@ -1159,75 +1157,73 @@ TEST(WaterSkinGpu, FarFieldPolicyReachesShader) {
             const size_t i = static_cast<size_t>(y) * kWidth + x;
             const float t_plane = (level - cam.position.y()) / rd.y();
 
-            jpov::WaterWaves w_new = base;
-            w_new.far_field = jpov::WaterWaves::FarField::kFootprintTruncation;
-            jpov::WaterWaves w_legacy = base;
-            w_legacy.far_field = jpov::WaterWaves::FarField::kLegacyFade;
-            const float fp_new = jpov::water::WaveFootprintM(w_new, t_plane, rd.y(), pixel_angle);
-            const float fp_legacy =
-                jpov::water::WaveFootprintM(w_legacy, t_plane, rd.y(), pixel_angle);
-            const float amp_new =
-                jpov::water::WaveAmplitudeSum(w_new, 0.0f, 0.0f, /*fade=*/1.0f, fp_new);
-            const float amp_legacy =
-                jpov::water::WaveAmplitudeSum(w_legacy, 0.0f, 0.0f, /*fade=*/1.0f, fp_legacy);
-            WaterPixel px_new;
-            WaterPixel px_legacy;
-            const bool ok_new = EvaluateWaterPixel(
-                cam.position, ref.fwd, rd, level, ior, 1.0f, cam.near, cam.far, &px_new,
-                &w_new, 0.0f, 0.0f, pixel_angle, time_s);
-            const bool ok_legacy = EvaluateWaterPixel(
-                cam.position, ref.fwd, rd, level, ior, 1.0f, cam.near, cam.far, &px_legacy,
-                &w_legacy, 0.0f, 0.0f, pixel_angle, time_s);
-            if (!ok_new || !ok_legacy) {
+            jpov::WaterWaves w_low = base;
+            w_low.graze_floor = kFloorLow;
+            jpov::WaterWaves w_high = base;
+            w_high.graze_floor = kFloorHigh;
+            const float fp_low = jpov::water::WaveFootprintM(w_low, t_plane, rd.y(), pixel_angle);
+            const float fp_high = jpov::water::WaveFootprintM(w_high, t_plane, rd.y(), pixel_angle);
+            const float amp_low =
+                jpov::water::WaveAmplitudeSum(w_low, 0.0f, 0.0f, /*fade=*/1.0f, fp_low);
+            const float amp_high =
+                jpov::water::WaveAmplitudeSum(w_high, 0.0f, 0.0f, /*fade=*/1.0f, fp_high);
+            WaterPixel px_low;
+            WaterPixel px_high;
+            const bool ok_low = EvaluateWaterPixel(
+                cam.position, ref.fwd, rd, level, ior, 1.0f, cam.near, cam.far, &px_low,
+                &w_low, 0.0f, 0.0f, pixel_angle, time_s);
+            const bool ok_high = EvaluateWaterPixel(
+                cam.position, ref.fwd, rd, level, ior, 1.0f, cam.near, cam.far, &px_high,
+                &w_high, 0.0f, 0.0f, pixel_angle, time_s);
+            if (!ok_low || !ok_high) {
                 continue;
             }
-            // 「敏感像素」= 足迹口径已把波杀干净（amp 恰好 0），且遗留口径下**肉眼可测**地还有波
-            //（法线倾角 > 0.01 ≈ 0.6°；数量级低于它的那些像素落在 LOD 淡出带里，倾斜量
-            // 会被 debug 输出的量化吃掉，测不出区别 —— 它们不是这条用例的靶子）。
-            const float tilt_legacy_cpu = std::sqrt(px_legacy.normal.x() * px_legacy.normal.x() +
-                                                    px_legacy.normal.z() * px_legacy.normal.z());
+            ++checked;
+            // 「敏感像素」= 小护栏已把波杀干净（amp 恰好 0），大护栏下**肉眼可测**地还有波
+            //（法线倾角 > 0.01 ≈ 0.6°；更小的落在 LOD 淡出带里，会被 debug 输出的量化吃掉）。
+            const float tilt_high_cpu = std::sqrt(px_high.normal.x() * px_high.normal.x() +
+                                                  px_high.normal.z() * px_high.normal.z());
             const bool is_sensitive =
-                (amp_new == 0.0f) && (amp_legacy > 0.0f) && (tilt_legacy_cpu > 0.01f);
+                (amp_low == 0.0f) && (amp_high > 0.0f) && (tilt_high_cpu > 0.01f);
             if (is_sensitive) {
                 ++sensitive;
             }
-            ++checked;
-            const float gx_new = gpu_new[i * 4 + 0] * 2.0f - 1.0f;
-            const float gy_new = gpu_new[i * 4 + 1] * 2.0f - 1.0f;
-            const float gz_new = gpu_new[i * 4 + 2] * 2.0f - 1.0f;
-            worst_new = std::max(worst_new, std::fabs(gx_new - px_new.normal.x()));
-            worst_new = std::max(worst_new, std::fabs(gy_new - px_new.normal.y()));
-            worst_new = std::max(worst_new, std::fabs(gz_new - px_new.normal.z()));
 
-            const float gx_old = gpu_legacy[i * 4 + 0] * 2.0f - 1.0f;
-            const float gy_old = gpu_legacy[i * 4 + 1] * 2.0f - 1.0f;
-            const float gz_old = gpu_legacy[i * 4 + 2] * 2.0f - 1.0f;
-            worst_legacy = std::max(worst_legacy, std::fabs(gx_old - px_legacy.normal.x()));
-            worst_legacy = std::max(worst_legacy, std::fabs(gy_old - px_legacy.normal.y()));
-            worst_legacy = std::max(worst_legacy, std::fabs(gz_old - px_legacy.normal.z()));
+            const float gx_low = gpu_low[i * 4 + 0] * 2.0f - 1.0f;
+            const float gy_low = gpu_low[i * 4 + 1] * 2.0f - 1.0f;
+            const float gz_low = gpu_low[i * 4 + 2] * 2.0f - 1.0f;
+            worst_low = std::max(worst_low, std::fabs(gx_low - px_low.normal.x()));
+            worst_low = std::max(worst_low, std::fabs(gy_low - px_low.normal.y()));
+            worst_low = std::max(worst_low, std::fabs(gz_low - px_low.normal.z()));
+
+            const float gx_high = gpu_high[i * 4 + 0] * 2.0f - 1.0f;
+            const float gy_high = gpu_high[i * 4 + 1] * 2.0f - 1.0f;
+            const float gz_high = gpu_high[i * 4 + 2] * 2.0f - 1.0f;
+            worst_high = std::max(worst_high, std::fabs(gx_high - px_high.normal.x()));
+            worst_high = std::max(worst_high, std::fabs(gy_high - px_high.normal.y()));
+            worst_high = std::max(worst_high, std::fabs(gz_high - px_high.normal.z()));
 
             if (is_sensitive) {
-                // 足迹口径下这些像素的几何必须真的是平面（截断到底，不是「变小」）。
-                if (std::fabs(gx_new) < 1.0e-3f && std::fabs(gz_new) < 1.0e-3f &&
-                    gy_new > 0.999f) {
+                // 小护栏下这些像素必须真的是平面（截断到底，不是「变小」）。
+                if (std::fabs(gx_low) < 1.0e-3f && std::fabs(gz_low) < 1.0e-3f &&
+                    gy_low > 0.999f) {
                     ++flat_from_gpu;
                 }
-                // 同像素在遗留口径下必须**确实还有波**（否则这条用例没有区分力）。
-                // 阈值 5e-3：debug 输出是 8 位编码，1 LSB ≈ 1/255 ≈ 4e-3（倾斜量的分辨率）。
-                EXPECT_GT(std::fabs(gx_old) + std::fabs(gz_old), 5.0e-3f)
-                    << "legacy 在该像素也是平面 ⇒ 掠射护栏没起作用，用例失效";
+                // 同像素在大护栏下必须**确实还有波**（否则这条用例没有区分力）。
+                // 阈值 5e-3：debug 输出 8 位编码，1 LSB ≈ 1/255 ≈ 4e-3。
+                EXPECT_GT(std::fabs(gx_high) + std::fabs(gz_high), 5.0e-3f)
+                    << "大护栏在该像素也是平面 ⇒ 护栏没起作用，用例失效";
             }
         }
     }
 
     EXPECT_GT(checked, 100) << "水面像素太少（相机没看向水面）";
     EXPECT_GT(sensitive, 20)
-        << "没有像素落在「legacy 有波 / 足迹口径已截断」的区间，用例测不到开关";
+        << "没有像素落在「大护栏有波 / 小护栏已截断」的区间，用例测不到旋钮";
     EXPECT_EQ(flat_from_gpu, sensitive)
-        << "足迹口径下仍有敏感像素带波 ⇒ 掠射护栏没随 far_field 切"
-        << "（或截断根本没接到着色器）";
-    EXPECT_LT(worst_new, 0.02f) << "足迹口径 GPU 与 CPU 参考不同口径";
-    EXPECT_LT(worst_legacy, 0.02f) << "遗留口径 GPU 与 CPU 参考不同口径";
+        << "小护栏下仍有敏感像素带波 ⇒ 护栏没随 uniform 变（或截断根本没接到着色器）";
+    EXPECT_LT(worst_low, 0.02f) << "小护栏 GPU 与 CPU 参考不同口径";
+    EXPECT_LT(worst_high, 0.02f) << "大护栏 GPU 与 CPU 参考不同口径";
 
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
@@ -1248,8 +1244,7 @@ TEST(WaterSkinGpu, ReflectanceIncludesMultiscatter) {
                               static_cast<float>(kHeight);
 
     jpov::WaterWaves waves = MakeTestWaves();
-    // 法线平、var_p 满（与 M1 用例同一手法）⇒ 必须显式选遗留 fade 口径。
-    waves.far_field = jpov::WaterWaves::FarField::kLegacyFade;
+    // 法线平、var_p 满（与 M1 用例同一手法）。
     waves.fade_start_m = 1.0f;
     waves.fade_end_m = 2.0f;
 

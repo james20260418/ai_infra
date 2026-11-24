@@ -284,7 +284,9 @@ public:
     // 方向自动取 4 波谱的主方向；量由 Cox–Munk 风速给出（面板滑条）。
     float water_wind_ms_ = 8.0f;
     // ── 着色 A/B 开关（默认 = 正确算法；只给「隔离对比」用）──
-    bool water_ab_lobe_var_p_ = true;      // M1：太阳 lobe 并入 var_p
+    // M1（太阳 lobe 吃 var_p）默认关：它与「远处细节量」是两件事，别混着调（Danis 2026-11-24）。
+    // 需要时用 CLI --lobe-var-p 打开（面板不给滑条，避免变量堆叠）。
+    bool water_ab_lobe_var_p_ = false;     // M1：太阳 lobe 并入 var_p
     bool water_ab_multiscatter_ = true;    // M2：多散射补偿
     bool water_ab_cull_normals_ = true;    // true = 亚像素法线按足迹截断（关 = 法线永不杀）
     float water_ab_lobe_var_scale_ = 1.0f;  // M1 强度 [0,1]（A/B 找平衡点）
@@ -302,16 +304,11 @@ public:
         water_lod_px_max_ = px_max;
     }
 
-    // 远处口径开关（面板 checkbox / CLI --wave-legacy-fade）：false（默认）= 足迹截断，
-    // 没有 fade 也没有 8.6° 掠射地板；true = 遗留 fade 口径（只用于 A/B 对比）。
-    // ⚠️ 映射到 WaterWaves::far_field 时**两个分支都要写**（选型场 / 手调谱各一份），
-    //    否则会有一个场景的勾选框不起作用。
-    bool water_legacy_fade_ = false;
-    void SetWaterLegacyFade(bool on) { water_legacy_fade_ = on; }
-    jpov::WaterWaves::FarField WaterFarField() const {
-        return water_legacy_fade_ ? jpov::WaterWaves::FarField::kLegacyFade
-                                  : jpov::WaterWaves::FarField::kFootprintTruncation;
-    }
+    // 掠射足迹护栏（远处「细节量」的旋钮；CLI --wave-graze-floor）。
+    // 0.15（≈8.6°，历史值）= 保细节；1e-4 = 真实足迹（远处更早截断 / 变平）。
+    // ⚠️ 帧内要**两个分支都写**（选型场 / 手调谱各一份），否则有一个场景的滑条不起作用。
+    float water_graze_floor_ = 0.15f;
+    void SetWaterGrazeFloor(float v) { water_graze_floor_ = v; }
 
     // ── 水面波浪（法线扰动 / 高度置换）──
     // 默认关（= 纯平面，零回归）。capture/UI 打开后按下面这份谱叠加。
@@ -322,8 +319,7 @@ public:
         w.waves[1] = jpov::WaterWave{0.6f, 0.8f, 13.0f, 0.14f, 1.7f};
         w.waves[2] = jpov::WaterWave{-0.8f, 0.6f, 7.0f, 0.07f, 0.4f};
         w.waves[3] = jpov::WaterWave{0.3f, -0.95f, 3.5f, 0.03f, 2.6f};
-        w.fade_start_m = 120.0f;
-        w.fade_end_m = 700.0f;
+        // 距离淡出默认关（0/0）；面板两条滑条可以随时打开做 A/B。
         w.flow_align = 0.6f;
         w.flow_wind_gain = 0.6f;
         w.flow_uv_scale = 1.0f / 220.0f;
@@ -340,9 +336,9 @@ public:
     void SetWaterWavesConfig(const jpov::WaterWaves& waves) {
         water_waves_ = waves;
         water_use_config_count_ = true;
-        // 远处口径也跟着配置走 —— 否则帧内重算 wv.far_field 时会把配置文件里的
-        // `farfield` 行静默覆盖掉（配置驱动的报告会拿到默认值）。
-        water_legacy_fade_ = (waves.far_field == jpov::WaterWaves::FarField::kLegacyFade);
+        // 护栏也跟着配置走 —— 否则帧内重写 wv.graze_floor 时会把配置文件里的
+        // `graze_floor` 行静默覆盖掉（配置驱动的报告会拿到默认值）。
+        water_graze_floor_ = waves.graze_floor;
     }
     void SetWaterWaveAmplitudeScale(float scale) { water_wave_amp_scale_ = scale; }
     void SetWaterFlowTexture(uint32_t id) { water_waves_.flow_texture_id = id; }
@@ -841,7 +837,7 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
-                wv.far_field = WaterFarField();
+                wv.graze_floor = water_graze_floor_;
                 w.waves = wv;
             } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
@@ -865,7 +861,7 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
-                wv.far_field = WaterFarField();
+                wv.graze_floor = water_graze_floor_;
                 // 短波：方向 = 4 波方向的矢量和（波谱主方向），斜率 RMS 由滑条给。
                 float sx = 0.0f;
                 float sz = 0.0f;
@@ -1057,10 +1053,7 @@ private:
                 ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 5),
                                 0.0f, 3.0f, 2);
                 ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 6), 0.0f, 3.0f, 2);
-                ui_.Checkbox("A/B · M1 太阳 lobe 吃 var_p", &water_ab_lobe_var_p_, row(1, 11));
                 ui_.Checkbox("A/B · M2 多散射补偿", &water_ab_multiscatter_, row(1, 12));
-                ui_.SliderFloat("A/B · M1 强度 (var_p 比例)", &water_ab_lobe_var_scale_,
-                                row(0, 14), 0.0f, 1.0f, 2);
                 ui_.Checkbox("A/B · 亚像素法线截断（关=永不杀）",
                              &water_ab_cull_normals_, row(1, 13));
                 // 「远处波纹消失太快」的主旋钮：min 越小波活得越远（会走样）；
@@ -1069,10 +1062,10 @@ private:
                                 1.5f, 6.0f, 2);
                 ui_.SliderFloat("谱截断 max (px，大=淡出更缓)", &water_lod_px_max_, row(1, 15),
                                 4.0f, 32.0f, 1);
-                // 远处口径（与场景 3 同一个开关）：关 = 只靠足迹截断，开 = 遗留 fade。
-                // 选型场的 fade 区间是 BuildWater 给的固定值（300/2000 m），不开放给用户。
-                ui_.Checkbox("波浪 远处淡出 fade (关=只靠足迹截断)", &water_legacy_fade_,
-                             row(1, 14));
+                // 远处「细节量」旋钮（与场景 3 同一个）：掠射足迹护栏。
+                // 左 = 真实足迹（远处更早变平）；右 = 保细节（可能微抖）。
+                ui_.SliderFloat("波浪 掠射足迹护栏 (大=远处保细节)", &water_graze_floor_,
+                                row(1, 11), jpov::water::kGrazeFloorPhysical, 0.5f, 4);
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 7), 0.0f, 120.0f, 2);
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
@@ -1120,17 +1113,16 @@ private:
                 // 时间倍率改成"调用方对 time 的缩放"，不再是波谱里的字段。
                 ui_.SliderFloat("波浪 时间速度 (0=冻结)", &ocean_time_speed_,
                                 row(0, 10), 0.0f, 3.0f, 2);
-                // 远处口径（2026-11-24）：默认「足迹截断」—— 没有 fade、足迹也没有 8.6° 地板，
-                // 远处的变平由每条波长自己的截断距离决定（波长得越短死得越近）。
-                // 勾上 = 遗留口径（足迹地板 0.15 + 下面两条 fade 滑条），只用于 A/B 对比。
-                ui_.Checkbox("波浪 远处淡出 fade (关=只靠足迹截断)", &water_legacy_fade_,
-                             row(0, 11));
-                if (water_legacy_fade_) {
-                    ui_.SliderFloat("波浪 淡出起点 m", &water_waves_.fade_start_m,
-                                    row(0, 12), 0.0f, 2000.0f, 0);
-                    ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
-                                    row(0, 13), 0.0f, 3000.0f, 0);
-                }
+                // 远处的**三个正交旋钮**（Danis 2026-11-24：不做「模式」，全部拆成滑条）：
+                //   ① 掠射足迹护栏 —— 控制远处「还有多少波活着」（大 = 保细节）；
+                //   ② 淡出起点 / 终点 —— 距离淡出，终点 ≤ 起点 = 关（默认关）；
+                //   ③ 谱截断 min/max px —— 见下面「谱截断」两条。
+                ui_.SliderFloat("波浪 掠射足迹护栏 (大=远处保细节)", &water_graze_floor_,
+                                row(0, 11), jpov::water::kGrazeFloorPhysical, 0.5f, 4);
+                ui_.SliderFloat("波浪 淡出起点 m (≤终点=关)", &water_waves_.fade_start_m,
+                                row(0, 12), 0.0f, 2000.0f, 0);
+                ui_.SliderFloat("波浪 淡出终点 m", &water_waves_.fade_end_m,
+                                row(0, 13), 0.0f, 3000.0f, 0);
                 ui_.Checkbox("波浪 真位移 (关=只改法线)", &water_waves_.displacement,
                              row(0, 14));
                 // 左列最后一格：水皮开关（与 row(0,1) 的「水体介质」正交）。
