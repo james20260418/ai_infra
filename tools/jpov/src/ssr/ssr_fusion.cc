@@ -69,6 +69,7 @@ uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = S
 uniform int   uBackfaceUseSsr;
 uniform float uBackfaceDim;      // [0,1]，1 = 不压暗
 uniform usampler2D uBackface;    // R8UI：bit0 = 背面命中（SSR 分辨率）
+uniform mat3  uWorldToView;      // 世界 → 视空间（列主序，旋转）；env 项用它的转置
 
 layout(location = 0) out vec4 FragColor;
 
@@ -283,7 +284,16 @@ void main() {
     vec3 weight = F0 * AB.x + AB.y;
     // env 项用**同一个逐像素 F0/roughness** 重算 ⇒ 被替换掉的那一份与被加上的那一份
     // 是同一套材质参数（这是"单调改进"的前提）。
-    vec3 env_term = EnvSpecularTermF0(n_hi, V, rough, F0);
+    //
+    // ⚠️ 坐标系同样是不变量（2026-11-24 修）：属性纹理的法线是**视空间**的，而 uEnvCube
+    //    是按**世界方向**渲染的天球探针。直接用视空间 (N, V) 去采样，等于在天球上查了
+    //    另一个方位（偏角 = 相机旋转）⇒ 减掉的不是 3D pass 加进去的那一份，差额（通常
+    //    是个大正值）就留在画面上：镜面地板里"暗物体的倒影"整块发亮/发白。
+    //    旋转矩阵正交 ⇒ transpose 就是逆变换；Fresnel 的 dot(N,V) 与坐标系无关，故
+    //    上面那行 weight 不用改。
+    vec3 n_world = transpose(uWorldToView) * n_hi;
+    vec3 V_world = transpose(uWorldToView) * V;
+    vec3 env_term = EnvSpecularTermF0(n_world, V_world, rough, F0);
 
     // 本式**不做**逐通道钳位（钳到 hdr 以下会改变能量、掩盖问题）。
     // 逐像素材质（2026-11-02）让"hdr − env_term"的两侧用了同一套参数，负通道已不再是
@@ -368,6 +378,13 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     CHECK_GE(in.scale, 1);
     CHECK_LE(in.scale, 4);
     CHECK_NE(in.env_cube_tex, 0u) << "融合需要环境 cubemap（与 3D pass 同一份）";
+    // 旋转矩阵：第一列长度必须 ≈ 1。忘记填 = 全 0 ⇒ 法线归零 ⇒ env 项恒 0 ⇒
+    // 天光一份都减不掉（静默变成"SSR 只加不减"，画面整体偏亮）。
+    const float w2v_col0_len2 = in.world_to_view[0] * in.world_to_view[0] +
+                                in.world_to_view[1] * in.world_to_view[1] +
+                                in.world_to_view[2] * in.world_to_view[2];
+    CHECK_GT(w2v_col0_len2, 0.5f)
+        << "缺 world_to_view（视空间法线转世界空间用，见 SsrFusionInputs）";
 
     GLint prev_fbo = 0;
     GLint prev_viewport[4] = {0, 0, 0, 0};
@@ -444,6 +461,8 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glUniform1f(shader_mgr_->GetUniform(prog_, "uFar"), in.far_plane);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uTanHalf"), in.tan_half_fov_y);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uAspect"), in.aspect);
+    glUniformMatrix3fv(shader_mgr_->GetUniform(prog_, "uWorldToView"), 1, GL_FALSE,
+                       in.world_to_view.data());
     glUniform1f(shader_mgr_->GetUniform(prog_, "uAo"), in.cfg.ao);
     glUniform1f(shader_mgr_->GetUniform(prog_, "uMipMaxLod"),
                 static_cast<float>(std::max(0, in.ssr_mip_levels - 1)));

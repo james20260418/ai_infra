@@ -1,4 +1,4 @@
-// JPOV SSR gold image generator（11 个固定组合：5 基础 + 6 能力）
+// JPOV SSR gold image generator（12 个固定组合：5 基础 + 6 能力 + 1 性质守护）
 //
 // 产物：tools/jpov/test/ssr/ssr_gold_<case>_1280x720.png
 // 供 jpov_ssr_gold_test 做端到端保护（组合定义见 jpov_ssr_gold_common.h）。

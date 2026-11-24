@@ -1,9 +1,11 @@
-// JPOV SSR gold test（11 个固定组合，端到端）
+// JPOV SSR gold test（12 个固定组合，端到端）
 //
 // 为什么需要它：SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并发粒度），
 // **没有任何整帧基线**。于是"数学等价但舍入不同"的改动（例如把 SSR 深度纹理从
 // 窗口深度换成 w = 1/z）没有验收手段 —— 它既不该让画面变，也无法证明没变。
-// 本测试用天光查看器的镜面场景拍 11 张（组合见 jpov_ssr_gold_common.h）：
+// 本测试用天光查看器的镜面场景拍 12 张（组合见 jpov_ssr_gold_common.h）；
+// 第 12 张 dark_reflection（2026-11-24）除 gold 外还跑一条 ROI 亮度性质断言
+// —— 它不依赖 gold 图，防止"盲目重定 gold"把 bug 一起固化：
 //   5 个基础（掠射 / 1:1 / 金属磨砂 / 四段拼接 / 低太阳 + 1:3）
 // + 6 个「单项能力」（三个 A 淡出 + 补洞 / 离群 / 小波），后者每个还断言
 //   「开关打开 vs 全关」必须有可观测差异（min_ab_ratio），防止 gold 变成空测。
@@ -91,6 +93,35 @@ int main() {
         for (int i = 0; i < w * h; ++i) {
             if (px[i * 4 + 3] > 0) {
                 ++opaque;
+            }
+        }
+
+        // 性质探针（2026-11-24）：见 SsrGoldCase::lum_cap —— gold 可被盲目重生成，
+        // 这条锁的是"这块地板必须是那个暗物体的倒影"这个性质本身。
+        if (c.lum_cap.w > 0 && c.lum_cap.h > 0) {
+            CHECK_LE(c.lum_cap.x + c.lum_cap.w, w) << "探针 ROI 越界: " << c.name;
+            CHECK_LE(c.lum_cap.y + c.lum_cap.h, h) << "探针 ROI 越界: " << c.name;
+            double sum = 0.0;
+            for (int yy = c.lum_cap.y; yy < c.lum_cap.y + c.lum_cap.h; ++yy) {
+                for (int xx = c.lum_cap.x; xx < c.lum_cap.x + c.lum_cap.w; ++xx) {
+                    const int i = (yy * w + xx) * 4;
+                    sum += (px[i] + px[i + 1] + px[i + 2]) / 3.0;
+                }
+            }
+            const double mean_lum = sum / (static_cast<double>(c.lum_cap.w) * c.lum_cap.h);
+            LOG(INFO) << "[" << c.name << "] 探针 ROI(" << c.lum_cap.x << "," << c.lum_cap.y
+                      << "," << c.lum_cap.w << "x" << c.lum_cap.h << ") 平均亮度 = "
+                      << mean_lum << " ∈ [" << c.lum_cap.min_mean_lum << ", "
+                      << c.lum_cap.max_mean_lum << "]";
+            if (mean_lum < c.lum_cap.min_mean_lum || mean_lum > c.lum_cap.max_mean_lum) {
+                LOG(ERROR) << "[" << c.name << "] 性质断言失败：这块地板按几何是正上方那个"
+                           << "方块的倒影（方块正面 ≈ 65），实测平均亮度 " << mean_lum
+                           << " 超出 [" << c.lum_cap.min_mean_lum << ", "
+                           << c.lum_cap.max_mean_lum << "]"
+                           << ((mean_lum > c.lum_cap.max_mean_lum)
+                                   ? " —— 被天光洗白了：检查合成层的 env_term 是否在世界空间求值"
+                                   : " —— 暗得像黑洞：检查是不是把 env 项减多了/命中取错");
+                ++failures;
             }
         }
         stbi_image_free(px);
