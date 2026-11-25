@@ -232,6 +232,8 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     // 远场开关（只在 above program 里声明；below 未声明 ⇒ GetUniform=-1 ⇒ no-op）。
     glUniform1i(shader_mgr_->GetUniform(prog, "uFarField"),
                 (in.waves != nullptr && in.waves->far_field) ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uFarDebugYellow"),
+                (in.waves != nullptr && in.waves->far_debug_yellow) ? 1 : 0);
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {

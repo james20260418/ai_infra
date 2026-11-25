@@ -983,6 +983,9 @@ struct WaterWaves {
     // false（默认）= 旧行为（逐像素解析），逐字节不变。
     // ⚠️ 只作用于**水上**（水下由于混浊看不到远处，不做远场，见设计文档）。
     bool far_field = false;
+    // 调试：把**被判定为远场**的像素涂黄（只看 far 判定的边界）。不影响近场；与 far_field 独立 ——
+    //   far_field 关时没有远场，涂黄自然无效。
+    bool far_debug_yellow = false;
 
     // ── 大尺度流向（flow map）──
     // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。

@@ -1089,6 +1089,8 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
     const float lam_max = 2.0f * 3.14159265358979f / kmin;
     double far_sum_off = 0.0;
     double far_sum_on = 0.0;
+    double far_alpha_on = 0.0;
+    double far_alpha_off = 0.0;
     int far_n = 0;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
@@ -1116,15 +1118,23 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
             ++far_n;
             far_sum_off += off[base * 4 + 0] + off[base * 4 + 1] + off[base * 4 + 2];
             far_sum_on += on[base * 4 + 0] + on[base * 4 + 1] + on[base * 4 + 2];
+            far_alpha_on += on[base * 4 + 3];
+            far_alpha_off += off[base * 4 + 3];
         }
     }
     EXPECT_GT(far_n, 50) << "远场采样像素太少（机位没覆盖到远场）";
     const double far_off_mean = far_sum_off / (3.0 * far_n);
     const double far_on_mean = far_sum_on / (3.0 * far_n);
     LOG(INFO) << "far-region: off=" << far_off_mean << " on=" << far_on_mean
-              << " (n=" << far_n << ")  ratio=" << (far_on_mean / far_off_mean);
-    EXPECT_GT(far_on_mean, far_off_mean * 0.98)
-        << "远场比旧版更暗：双重计入的方差把 R_eff 压低了吗（§10.15b ①）";
+              << " (n=" << far_n << ")  alpha_off=" << (far_alpha_off / far_n)
+              << " alpha_on=" << (far_alpha_on / far_n);
+    // 远场**零效应基线**（2026-11-25 Danis 定）：C ≡ 0，只有平面菲涅尔透射 ⇒ 远场区域
+    // 注入色必须**严格为 0**（第一项效应加上来之前，这正是我们要验的「干净基线」）。
+    EXPECT_NEAR(far_on_mean, 0.0, 1.0e-6)
+        << "远场基线应当只透射不加色（C=0）；有非零注入说明远场路径还混着近场逻辑";
+    // 透射项仍在：alpha = 1−(1−F)/n²，正入射 ≈0.55、掠射 →1。
+    EXPECT_GT(far_alpha_on / far_n, 0.4) << "远场 alpha 太小：透射项丢了";
+    EXPECT_LT(far_alpha_on / far_n, 1.0 + 1.0e-3) << "远场 alpha > 1：违反层契约";
     EXPECT_GT(opaque, 500) << "水皮覆盖太少";
     EXPECT_GT(near_opaque, 50) << "近处采样行太少";
     EXPECT_EQ(near_changed, 0) << "近处（最低几行）被远场污染了：far 本应=0，画面必须逐字节不变";
