@@ -50,6 +50,9 @@ constexpr const char* kLayerSlotUniforms[kMaxTransparentLayers][3] = {
 std::string AssembleCompositeShader(const char* medium_glsl, const char* body) {
     std::string s = "#version 330 core\n";
     s += kFogCommonGlsl;
+    // 水面接口 + 介质 uniform：MediumAt 依赖它们（2026-11-25 重构后 kWaterMediumGlsl 只含函数）。
+    s += water::kWaterInterfaceUniformsGlsl;
+    s += water::kWaterMediumUniformsGlsl;
     s += medium_glsl;
     s += body;
     return s;

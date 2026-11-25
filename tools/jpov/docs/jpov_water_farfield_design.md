@@ -6,6 +6,10 @@
 > 正解是**分层 LOD：几何 → 法线 → BRDF**（Bruneton et al. 2010）。
 >
 > 本文只做调查与方案，不改代码。分支 `feature/20261124-jpov-water-farfield-color`（base=main）。
+>
+> ⚠️ **2026-11-25 结构已变**：水皮 FS 已拆成「水上/水下 × 生产/调试」四 program + 共享
+> `WaterSurface` 结构体（见 `water_skin_shader.h` 顶部）。本文 §1 的「480 行 / 7 个阶段 /
+> 单一 `main()` / 行号」描述针对**重构前**的版本，仅作历史对照；**物理口径不变**。
 
 ---
 

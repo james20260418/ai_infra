@@ -32,7 +32,7 @@
 #undef far
 #endif
 
-#include "tools/jpov/src/water/water_medium_shader.h"   // kWaterMediumGlsl（MediumAt）
+#include "tools/jpov/src/water/water_medium_shader.h"   // kWaterInterfaceUniformsGlsl + kWaterMediumUniformsGlsl + kWaterMediumGlsl（MediumAt）
 #include "tools/jpov/src/water/water_skin_shader.h"
 #include "tools/jpov/src/water/water_wave_math.h"      // WaterWaves / kWaveGravity
 #include "tools/jpov/src/water/water_wave_shader.h"    // kWaterWaveGlsl
@@ -70,19 +70,51 @@ void WaterSkinRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(shader_mgr != nullptr) << "WaterSkinRenderer::Init: shader_mgr 不能为空";
     CHECK(!initialized_) << "WaterSkinRenderer::Init 重复调用";
     shader_mgr_ = shader_mgr;
-    // 介质片段（MediumAt + uWater* uniform）拼在本 pass 的 FS 前面：
-    // 水下支路要用它取「深海积分反射」 S_P(∞)，物理只写一份。
-    // GGX 片段（平光镜面项）同理 —— 与 PBR 共用同一份 D/G，不在水皮里再拄一遍。
-    std::string fs = "#version 330 core\n";
-    fs += water::kWaterMediumGlsl;
-    fs += water::kWaterWaveGlsl;
-    fs += lighting::kGgxSpecularGlsl;
-    fs += water::kWaterSkinFs;
-    prog_draw_ = shader_mgr_->GetOrCreate("water_skin_draw",
-                                          {water::kWaterSkinVs, fs.c_str()});
+    // 4 个 program：水上/水下 × 生产/调试（见 water_skin_shader.h 顶部拼装顺序）。
+    //   水上：接口 uniform + 波浪 + GGX + 公共 + 水上着色；不含介质（无 MediumAt）。
+    //   水下：接口 uniform + 介质 uniform + 介质函数 + 波浪 + 公共 + 水下着色；不含 GGX/太阳。
+    //   调试：在对应生产基础上再拼调试片段（uWaveDebug + EmitDebug）。
+    std::string above_fs = "#version 330 core\n";
+    above_fs += water::kWaterInterfaceUniformsGlsl;
+    above_fs += water::kWaterWaveGlsl;
+    above_fs += lighting::kGgxSpecularGlsl;
+    above_fs += water::kWaterSkinCommonGlsl;
+    above_fs += water::kWaterSkinAboveGlsl;
+
+    std::string below_fs = "#version 330 core\n";
+    below_fs += water::kWaterInterfaceUniformsGlsl;
+    below_fs += water::kWaterMediumUniformsGlsl;
+    below_fs += water::kWaterMediumGlsl;
+    below_fs += water::kWaterWaveGlsl;
+    below_fs += water::kWaterSkinCommonGlsl;
+    below_fs += water::kWaterSkinBelowGlsl;
+
+    prog_above_ = shader_mgr_->GetOrCreate(
+        "water_skin_above",
+        {water::kWaterSkinVs, (above_fs + water::kWaterSkinAboveMainGlsl).c_str()});
+    prog_below_ = shader_mgr_->GetOrCreate(
+        "water_skin_below",
+        {water::kWaterSkinVs, (below_fs + water::kWaterSkinBelowMainGlsl).c_str()});
+    prog_above_debug_ = shader_mgr_->GetOrCreate(
+        "water_skin_above_debug",
+        {water::kWaterSkinVs,
+         (above_fs + water::kWaterSkinDebugGlsl + water::kWaterSkinAboveDebugMainGlsl).c_str()});
+    prog_below_debug_ = shader_mgr_->GetOrCreate(
+        "water_skin_below_debug",
+        {water::kWaterSkinVs,
+         (below_fs + water::kWaterSkinDebugGlsl + water::kWaterSkinBelowDebugMainGlsl).c_str()});
     glGenVertexArrays(1, &vao_);
     CHECK_NE(vao_, 0u) << "WaterSkinRenderer::Init: glGenVertexArrays 失败";
     initialized_ = true;
+}
+
+unsigned int WaterSkinRenderer::SelectProgram(const Inputs& in) const {
+    const bool under = in.camera.position.y() < in.level_y;
+    const bool debug = in.wave_debug != 0;
+    if (under) {
+        return debug ? prog_below_debug_ : prog_below_;
+    }
+    return debug ? prog_above_debug_ : prog_above_;
 }
 
 void WaterSkinRenderer::Finalize() {
@@ -91,6 +123,13 @@ void WaterSkinRenderer::Finalize() {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
+    // 4 个 program 由 ShaderManager 拥有（它在自己的析构里 glDeleteProgram），这里只抹掉句柄：
+    // Finalize 后到下一次 Init 之间任何误用都会被 Draw 的 `CHECK(initialized_)` 先拦住，
+    // 不会拿着已失效的句柄去 glUseProgram。
+    prog_above_ = 0;
+    prog_below_ = 0;
+    prog_above_debug_ = 0;
+    prog_below_debug_ = 0;
     has_content_ = false;
     initialized_ = false;
 }
@@ -112,6 +151,9 @@ void WaterSkinRenderer::Begin(int full_w, int full_h) {
 }
 
 void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in) {
+    // ⚠️ 四个 program 各只声明自己需要的 uniform（水上无介质、水下无 env/太阳），这里**统一全传**：
+    //    未声明的 uniform 在 GetUniform 返回 -1，glUniform* 对 -1 是静默 no-op（GL 惯例），
+    //    所以「多传」不会出错，也省掉「按 program 分支决定传哪些」的重复逻辑。
     const Camera& cam = in.camera;
     const Vec3f fwd = NormalizeOr(SubVec(cam.target, cam.position), Vec3f(0.0f, 0.0f, -1.0f));
     const Vec3f side = NormalizeOr(CrossVec(fwd, cam.up), Vec3f(1.0f, 0.0f, 0.0f));
@@ -205,19 +247,20 @@ void WaterSkinRenderer::Draw(const Inputs& in) {
     wbo_.BindForDraw();
     // 全屏三角形：关剔除（NDC 绕序在部分驱动上会被判定为背面）。
     glDisable(GL_CULL_FACE);
-    glUseProgram(prog_draw_);
-    UploadCommonUniforms(prog_draw_, in);
+    const unsigned int prog = SelectProgram(in);
+    glUseProgram(prog);
+    UploadCommonUniforms(prog, in);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, in.scene_depth_tex);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSceneDepth"), 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSceneDepth"), 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, in.env_cube_tex);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uEnvCube"), 1);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uEnvCube"), 1);
     // flow map（可选）：纹理单元 2。0 时绑空纹理（uWaveHasFlow=0 不会采样它）。
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, in.wave_flow_tex);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uWaveFlowMap"), 2);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uWaveFlowMap"), 2);
     glActiveTexture(GL_TEXTURE0);
 
     glBindVertexArray(vao_);
