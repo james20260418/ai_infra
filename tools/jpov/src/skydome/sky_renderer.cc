@@ -129,6 +129,14 @@ void UploadWaveSpectrum(ShaderManager& mgr, unsigned int prog, const WaterWaves&
     p.debug = 0;
     p.displacement = true;     // 只用到法线，但求交必须与水皮同口径（含 Stokes）
     p.has_flow_tex = false;
+    // 谱截断开关必须与水皮**同值**，否则窗缘与界面几何对不上（见文件顶部）：
+    // V2 水皮不截断 ⇒ 天球折射也按不截断求法线。
+    p.no_truncation = w.v2;
+    // ⚠️ 相位局部原点（origin）**这里不传**：天球折射仍在**世界坐标**里求交/求法线
+    //    （shader 的帧约定允许，见 water_wave_shader.h::uWaveOriginXZ）。
+    //    数学上与水皮的局部坐标严格等价（差 ~1e-7 rad 的 float 重排）；水下相机离原点
+    //    很近（几米~几十米），本来也没有精度问题。将来若水下也进大世界，需要给天球
+    //    同一条 uCamPosXZLocal，否则窗缘会先丢位。
     water::UploadWaterWaveUniforms(mgr, prog, &w, p);
 }
 

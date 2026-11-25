@@ -28,6 +28,18 @@ struct WaveUniformParams {
     int debug = 0;                        // 水皮 debug 档（天球固定 0）
     bool displacement = true;             // false = 法线 only（debug 二分用）
     bool has_flow_tex = false;            // 只有水皮会绑 flow map
+
+    // ── V2 水皮的两个口径开关（默认都是 V1 / 旧行为）──
+    // 表内 72 条波是否**全部参与**（不做按足迹的谱截断）。
+    // V2 水皮传 true；V1 与天球默认 false。
+    // ⚠️ 天球折射传的必须是**同一值**（= WaterWaves::v2）：谱口径不一致会让 Snell 窗缘
+    //    用另一套几何 ⇒ 窗缘漏色（见本文件顶部）。
+    bool no_truncation = false;
+    // 相位局部原点（xz，米）：相位按 `p − origin` 求，初相在这里预算进 k·dot(d, origin)。
+    // 只是 float 精度手段（相机离世界原点很远时相位不被大数吃低位）；
+    // 0,0（默认）= 与旧版**逐位相同**。由 water::WavePhaseOriginM() 从相机位置算。
+    float origin_x = 0.0f;
+    float origin_z = 0.0f;
 };
 
 // waves == nullptr ⇒ 全部按"关"上传（uWaveCount = 0）。

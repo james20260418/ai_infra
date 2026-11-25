@@ -1036,6 +1036,21 @@ struct WaterWaves {
         float wind_speed_ms = 0.0f;  // 10 m 高处风速（m/s）；0 = 不加短波
     };
     ShortWave short_wave;
+
+    // ── 水皮实现版本（V1 / V2）──────────────────────────────────────────────
+    // 见 docs/jpov_water_skin_v2_design.md。两个版本是**两份独立的 pass**（各自的
+    // renderer / program / WBO），这里只决定 Renderer 走哪一份：
+    //   · false（默认）= V1：按像素足迹截断谱（3~8 px smoothstep）+ 屏幕导数补偿；
+    //   · true        = V2：表内 72 条波**全部采样、不截断**，每像素 S 个法线各自着色后平均。
+    // ⚠️ 为什么放在 WaterWaves 而不是 WaterCommand：天球折射（Snell 窗）与水皮必须用
+    //    **同一口径的谱**，否则窗缘会漏色（见 src/water/water_wave_uniforms.h 顶部）。
+    //    放在谱配置里 ⇒ 两个消费者自动同源，不需要各自再传一份。
+    bool v2 = false;
+
+    // V2 每像素的法线采样数，∈ [1, 16]（默认 4）。只有 v2 = true 时被消费。
+    // 1 = 只取中心法线（退化成「不采样」，但仍无谱截断）；越大越接近面积分，代价线性。
+    // 非 [1, 16] 由 Renderer CHECK 拦住（不静默夹取：S=0 会画出全黑，S=32 会让帧卡死）。
+    int v2_sample_count = 4;
 };
 
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。

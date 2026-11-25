@@ -58,6 +58,20 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
     const int count = on ? std::min(w->num_waves, WaterWaves::kMaxWaves) : 0;
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveCount"), count);
 
+    // ── 谱截断开关 + 相位局部原点（两个消费者必须同值，见本文件顶部）──
+    CHECK(std::isfinite(p.origin_x) && std::isfinite(p.origin_z))
+        << "WaveUniformParams.origin_x/origin_z 必须是有限值";
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveNoTruncate"), p.no_truncation ? 1 : 0);
+    glUniform2f(shader_mgr.GetUniform(prog, "uWaveOriginXZ"), p.origin_x, p.origin_z);
+    // 初相预算：φ' = φ + k·dot(d, origin)，**在 double 里算并把结果规范化到 (−2π, 2π)**。
+    // 为什么一定要 fmod：origin 会把 φ' 推到 k·|origin| 量级（细节波 k≈21、origin=1e6 ⇒ 2e7），
+    // 直接 cast 成 float 会被量化到 0.25~2 rad ⇒ 该波整体相位随机；更糟的是 origin 每 1 km
+    // 换一次，换格瞬间整片波的相位会跳一个随机值（近场可见的 pop）。fmod 后量化误差 ~1e-7 rad。
+    // origin = (0,0) 且 |φ| < 2π 时 fmod 是恒等（IEEE 精确）⇒ V1 逐字节不变。
+    const double origin_x = p.origin_x;
+    const double origin_z = p.origin_z;
+    const double kTwoPiDouble = 6.283185307179586476925286766559;
+
     // 波表先算好 k / ω 再上传：GPU 不重算色散（与 CPU 参考同一口径）。
     // ⚠️ 逐个 glUniform4f/2f 上传，不用 glUniform4fv/2fv —— MinGW 的 gl_loader 只导出了
     //    标量版本（数组版本 undefined reference，Windows 交叉编译直接链失败）。
@@ -70,11 +84,16 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         CHECK_GE(wv.amplitude_m, 0.0f) << "WaterWave.amplitude_m 必须 >= 0";
         CheckWaveFinite(wv, "WaterWave");
         const float k = kTwoPi / wv.wavelength_m;
-        glUniform4f(wave_l_loc + i, k, DispersionOmega(k, p.depth_m), wv.amplitude_m,
-                    wv.phase_rad);
         float dx = 0.0f;
         float dz = 0.0f;
         NormalizedDir(wv.dir_x, wv.dir_z, &dx, &dz);
+        const double phase = std::fmod(
+            static_cast<double>(wv.phase_rad) +
+                static_cast<double>(k) * (static_cast<double>(dx) * origin_x +
+                                          static_cast<double>(dz) * origin_z),
+            kTwoPiDouble);
+        glUniform4f(wave_l_loc + i, k, DispersionOmega(k, p.depth_m), wv.amplitude_m,
+                    static_cast<float>(phase));
         glUniform2f(wave_dir_loc + i, dx, dz);
     }
 
@@ -94,8 +113,13 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         float dx = 0.0f;
         float dz = 0.0f;
         NormalizedDir(w->warp_dir_x[j], w->warp_dir_z[j], &dx, &dz);
-        glUniform4f(warp_loc + j, kTwoPi / w->warp_wavelength_m[j], dx, dz,
-                    w->warp_phase_rad[j]);
+        const float k = kTwoPi / w->warp_wavelength_m[j];
+        const double phase = std::fmod(
+            static_cast<double>(w->warp_phase_rad[j]) +
+                static_cast<double>(k) * (static_cast<double>(dx) * origin_x +
+                                          static_cast<double>(dz) * origin_z),
+            kTwoPiDouble);
+        glUniform4f(warp_loc + j, k, dx, dz, static_cast<float>(phase));
     }
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveStokes2"),
                 (on && w->stokes_second_order) ? 1 : 0);
@@ -114,11 +138,16 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
         CHECK_GE(dv.amplitude_m, 0.0f) << "detail_waves.amplitude_m 必须 >= 0";
         CheckWaveFinite(dv, "detail_waves");
         const float k = kTwoPi / dv.wavelength_m;
-        glUniform4f(detail_l_loc + i, k, dv.amplitude_m, dv.phase_rad,
-                    DispersionOmega(k, p.depth_m));
         float dx = 0.0f;
         float dz = 0.0f;
         NormalizedDir(dv.dir_x, dv.dir_z, &dx, &dz);
+        const double phase = std::fmod(
+            static_cast<double>(dv.phase_rad) +
+                static_cast<double>(k) * (static_cast<double>(dx) * origin_x +
+                                          static_cast<double>(dz) * origin_z),
+            kTwoPiDouble);
+        glUniform4f(detail_l_loc + i, k, dv.amplitude_m, static_cast<float>(phase),
+                    DispersionOmega(k, p.depth_m));
         glUniform2f(detail_dir_loc + i, dx, dz);
     }
 

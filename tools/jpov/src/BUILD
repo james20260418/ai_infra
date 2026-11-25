@@ -388,6 +388,7 @@ cc_library(
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
         "//tools/jpov/src/water:water_medium_math",   # 水体介质（场的第二个来源）
         "//tools/jpov/src/water:water_skin_renderer",  # 水皮（界面层）
+        "//tools/jpov/src/water:water_skin_v2_renderer",  # 水皮 V2（多法线采样），与 V1 二选一
         "//tools/jpov/src/strip:strip_renderer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",

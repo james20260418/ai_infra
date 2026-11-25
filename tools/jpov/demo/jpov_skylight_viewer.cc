@@ -2173,6 +2173,8 @@ int main(int argc, char** argv) {
     std::string water_waves_out_dir;
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
+    bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
+    int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
     std::string box_cut_out_dir;
@@ -2211,6 +2213,10 @@ int main(int argc, char** argv) {
             start_water_waves = true;
         } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
             wave_time_s = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-v2") == 0) {
+            water_v2 = true;
+        } else if (std::strcmp(argv[i], "--water-samples") == 0 && i + 1 < argc) {
+            water_samples = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
             horizon_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
@@ -2367,6 +2373,14 @@ int main(int argc, char** argv) {
     }
     if (wave_time_s >= 0.0f) {
         app.SetWaterWaveTime(wave_time_s);
+    }
+    // 水皮版本：V2 是独立的一整份 pass（见 docs/jpov_water_skin_v2_design.md）。
+    if (water_v2) {
+        app.SetWaterSkinV2(true);
+    }
+    if (water_samples >= 0) {
+        // 不夹范围：非法值交给 Renderer 的 CHECK（CLI 手误要看得到报错）。
+        app.SetWaterSkinV2Samples(water_samples);
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
