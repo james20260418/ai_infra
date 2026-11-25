@@ -300,6 +300,10 @@ public:
     }
     jpov::WaterWaves water_waves_ = MakeDefaultWaves();
     bool water_waves_on_ = false;
+    // 远场统计着色（2026-11-25）：只作用于**水上**——水面一个像素装不下最长波时，反射走
+    // 椭圆核采样、反射率/透射走斜率分布的积分。默认关（旧行为逐字节不变）。
+    bool water_farfield_on_ = false;
+    void SetWaterFarField(bool on) { water_farfield_on_ = on; }
     float water_wave_amp_scale_ = 1.0f;
     // true ⇒ 帧内直接用 water_waves_.num_waves（capture 用整份配置覆盖时打开）。
     bool water_use_config_count_ = false;
@@ -801,6 +805,7 @@ public:
                 wv.debug = (water_wave_debug_ != 0)
                                ? water_wave_debug_
                                : (water_wave_normal_view_ ? 1 : 0);
+                wv.far_field = water_farfield_on_;
                 w.waves = wv;
             } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
@@ -1023,6 +1028,8 @@ private:
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 8))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
+                // 远海统计着色（只作用于水上）：反射走椭圆核 + 反射率/透射走分布积分。
+                ui_.Checkbox("远海 统计着色 (水上)", &water_farfield_on_, row(1, 11));
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();
                 {

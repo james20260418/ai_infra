@@ -148,9 +148,14 @@ struct WaterSurface {
     vec3  rd;             // 视线方向（单位）
     vec3  H;              // 半向量（太阳像用，① 无条件先算）
     float cos_i;          // |dot(rd, N)|
+    float footprint;      // 像素足迹（米，远场权重用）
     float footprint_a2;   // 太阳像足迹带宽（① dFdx/dFdy）
     float normal_var_px;  // 像素内法线方差（③b，specular AA）
-    float var_p;          // 入射面投影的斜率方差（探针 LOD）
+    // 斜率方差张量 [[sxx,sxz],[sxz,szz]]：远场椭圆核采样要特征分解（σ_along/σ_across）。
+    float sxx;
+    float sxz;
+    float szz;
+    float var_p;          // 入射面投影的斜率方差（近场探针 LOD）
     float var_p_mean;     // 各向同性平均（F_eff 用）
 };
 
@@ -212,6 +217,9 @@ void ResolveSurface(out WaterSurface s) {
     // ── ③d 法线场过滤：把「看不见的波」折算成粗糙度 ─────────────────────────
     float sxx, sxz, szz;
     WaveSlopeTensor(footprint, sxx, sxz, szz);
+    s.sxx = sxx;   // 远场椭圆核采样要特征分解（σ_along/σ_across）
+    s.sxz = sxz;
+    s.szz = szz;
     // 两个投影，各有各的消费者（2026-11-24 修：以前只有一个"视线投影"被三个消费者共用）：
     //   · var_p_slope：入射面方向 —— 反射方向在该平面内摆动，所以探针模糊（env_lod）用它；
     //   · var_p_mean：张量各向同性的平均 —— 反射率 R_eff 是对半球积分，不能用某一个方向的投影。
@@ -222,6 +230,7 @@ void ResolveSurface(out WaterSurface s) {
     s.var_p_mean = 0.5 * (sxx + szz);
 
     s.cos_i = abs(dot(s.rd, s.N));
+    s.footprint = footprint;
 }
 
 // 唯一 discard 点：命中/求交失败 + 场景深度拒绝。
@@ -261,6 +270,7 @@ inline constexpr const char* kWaterSkinAboveGlsl = R"glsl(
 uniform float uEnvScale;     // 天光反射消费量 [0,1]（= EnvSpecular::sky_scale）
 uniform float uHorizonClampSin;  // 反射方向夹到地平线以上的最小 y（= sin 1°）
 uniform samplerCube uEnvCube;    // 天光探针（大气色，不含日月盘）
+uniform int uFarField;           // 0 = 关闭（旧行为：逐像素解析）；1 = 远场统计着色
 
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
 //   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
@@ -281,26 +291,73 @@ float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
     return mix(shifted, plain, w);
 }
 
-void ShadeAbove(WaterSurface s, out WaterShade o) {
-    // ── ⑤ 角度平均菲涅尔（粗糙界面的方向反照率）──
-    float F = RoughFresnelAlbedo(s.cos_i, s.var_p_mean, uWaterIor);
+// ── 远场（统计着色）──
+// far=1 ⇔ 一个像素足迹里装不下一个完整的最长波 ⇒ 不再逐像素求交点，改在斜率分布上做统计：
+//   反射 = 平面反射 + 椭圆核模糊；反射率/透射 = 对分布的积分。
+// 与 WaveSlopeTensor 的谱截断用同一组阈值（kWaveLodPxMin/Max），保证「进方差的波」
+// 与「判远的波」是同一批。far=0 ⇔ 旧行为（逐像素解析），逐字节不变。
+float WaveLambdaMax() {
+    float kmin = 1.0e30;
+    for (int i = 0; i < 8; ++i) {
+        if (i >= uWaveCount) {
+            break;
+        }
+        kmin = min(kmin, uWaveL[i].x);
+    }
+    return (kmin < 1.0e29) ? (6.283185307179586 / kmin) : 0.0;
+}
 
-    // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 只做乘除，无导数 ⇒ 可在 discard 之后 ──
+float FarWeight(float footprint) {
+    if (uFarField == 0 || uWaveCount <= 0 || footprint <= 1.0e-6) {
+        return 0.0;
+    }
+    float lam_max = WaveLambdaMax();
+    if (lam_max <= 0.0) {
+        return 0.0;
+    }
+    // px_per_wave = 最长波在一个像素足迹里跨几个像素；< kWaveLodPxMin ⇒ 完全看不清 ⇒ far=1。
+    float px_per_wave = lam_max / footprint;
+    return 1.0 - smoothstep(kWaveLodPxMin, kWaveLodPxMax, px_per_wave);
+}
+
+// 椭圆核采样：沿 u_axis 拉长 spread（弧度，≈ 2σ_along：反射把斜率放大 2×），
+// 横向用各向同性 lod 的模糊（由 σ_across 给出）。5 tap 一维高斯（-1..+1，σ=1 单位）。
+vec3 SampleEnvElliptical(vec3 dir, vec3 u_axis, float spread, float lod) {
+    vec3 t0 = textureLod(uEnvCube, dir, lod).rgb * 0.2514;
+    vec3 t1 = textureLod(uEnvCube, normalize(dir + u_axis * spread), lod).rgb;
+    vec3 t2 = textureLod(uEnvCube, normalize(dir - u_axis * spread), lod).rgb;
+    vec3 t3 = textureLod(uEnvCube, normalize(dir + u_axis * (0.5 * spread)), lod).rgb;
+    vec3 t4 = textureLod(uEnvCube, normalize(dir - u_axis * (0.5 * spread)), lod).rgb;
+    return t0 + (t1 + t2) * 0.1525 + (t3 + t4) * 0.2219;
+}
+
+void ShadeAbove(WaterSurface s, out WaterShade o) {
+    // ── 远场权重 + 法线退化 ──
+    // far=1 ⇒ 法线退化到平面（mix 平滑 ⇒ 不破坏已算完的 dFdx）。
+    // ⚠️ far=0 时必须**逐字节**回到 s.N（不能写 normalize(mix(s.N, up, 0))：
+    //    多一次 normalize 会引入 1e-7 级 FP 差异，gold 就不是字节一致了）。
+    float far = FarWeight(s.footprint);
+    vec3 N = (far > 0.0) ? normalize(mix(s.N, vec3(0.0, 1.0, 0.0), far)) : s.N;
+    float cos_i = (far > 0.0) ? abs(dot(s.rd, N)) : s.cos_i;
+    // 远场不再用「逐像素法线跳变」当带宽（那是给解析法线用的），否则远场会抖。
+    float normal_var_px = (far > 0.0) ? (s.normal_var_px * (1.0 - far)) : s.normal_var_px;
+
+    // ── ⑤ 反射率 / 透射率：对斜率分布的积分（远场 = 全谱方差，近场 = 截断残差）──
+    // R_eff 是「角度平均菲涅尔」，T = 1 − R_eff；alpha 是 WBO 的背景衰减率 = 1 − (1−F)/n²。
+    float F = RoughFresnelAlbedo(cos_i, s.var_p_mean, uWaterIor);
+    float alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
+
+    // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 旧逻辑暂代（远场带宽是 §10.16 M1/M3）──
     vec3 sun_spec = vec3(0.0);
-    float NoV = dot(-s.rd, s.N);
+    float NoV = dot(-s.rd, N);
     if (uHasSun != 0) {
-        float NoL = dot(uSunToward, s.N);
+        float NoL = dot(uSunToward, N);
         if (NoV > 0.0 && NoL > 0.0) {
-            float NoH = max(dot(s.H, s.N), 0.0);
-            // 带宽 = 盘角半径（θ/2，半向量只偏一半）+ 像素足迹 + 像素内法线方差。
-            // 上限 0.25（⇒ α ≤ 0.5，半角约 26°）是**数值兜底**：极端掠射时 dFdx 会把足迹
-            // 方差推出数量级，不夹会把日斑摊成一大片糊。
-            // ⚠️ **不再叠加解析 σ_slope**（2026-11-18 定）：波浪法线是逐像素解析梯度，
-            //    再把 σ_slope 当带宽加进去 = 双计 + 抹平闪光（known_issue §11）。
-            // 方差项 → α² 也要 ×2（α² = 2σ²，与 RoughFresnelAlbedo 同一口径）。
+            float NoH = max(dot(s.H, N), 0.0);
+            // 带宽 = 盘角半径 + 像素足迹 + 像素内法线方差（远场该项按 far 淡出）。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
                            + uSunFootprint * s.footprint_a2
-                           + 2.0 * s.normal_var_px,
+                           + 2.0 * normal_var_px,
                            0.25);
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
@@ -309,8 +366,8 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
         }
     }
 
-    // ── 水面以上：天光探针沿镜像方向（方向必须夹到地平线以上 —— 探针下半球是“地色”）──
-    vec3 rdir = reflect(s.rd, s.N);
+    // ── 镜面的采样：近场各向同性 textureLod；远场椭圆核（长轴沿风）──
+    vec3 rdir = reflect(s.rd, N);
     float xz = sqrt(rdir.x * rdir.x + rdir.z * rdir.z);
     if (rdir.y < uHorizonClampSin) {
         if (xz > 1.0e-6) {
@@ -322,22 +379,37 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
     } else {
         rdir = normalize(rdir);
     }
-    // ── 探针 LOD（拉糊）：把「像素足迹内**未解析**的斜率方差」折成模糊角 ──
-    // 两个来源相加（方差可加）：var_p（谱侧被截断的波 + 短波 MSS）+ normal_var_px（屏幕侧）。
-    // 镜面反射把斜率放大 2× ⇒ 需要的模糊角 ≈ 2σ；128² 探针的 texel 角 = (π/2)/128 · 2^lod。
-    // 上限随反射方向仰角放开：探针下半球是地色，地平线附近糊大了会把地色卷进来。
+    // 近场 LOD：把「像素足迹内未解析的斜率方差」折成模糊角（与旧版同式）。
     const float kEnvTexelAngle = 1.5707963268 / 128.0;   // 常量表达式（GLSL const 限制）
     float refl_sigma = sqrt(max(s.var_p, 0.0) + max(s.normal_var_px, 0.0));
     float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
     float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, rdir.y));
     float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
-    vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
+    vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb;
+    if (far > 0.0) {
+        // 张量特征分解：σ_along（长轴，沿风）/ σ_across（短轴）+ 主轴角 theta。
+        float tr = s.sxx + s.szz;
+        float diff = s.sxx - s.szz;
+        float disc = sqrt(diff * diff + 4.0 * s.sxz * s.sxz);
+        float sig_along = sqrt(max(0.5 * (tr + disc), 0.0));
+        float sig_across = sqrt(max(0.5 * (tr - disc), 0.0));
+        float theta = 0.5 * atan(2.0 * s.sxz, diff);
+        vec3 major3 = vec3(cos(theta), 0.0, sin(theta));
+        // 主轴投影到 rdir 的切平面 ⇒ 拉长方向（近水平反射时≈风向，水平）。
+        vec3 u_axis = major3 - dot(major3, rdir) * rdir;
+        float ulen = length(u_axis);
+        u_axis = (ulen > 1.0e-5) ? (u_axis / ulen) : vec3(0.0, 1.0, 0.0);
+        // 短轴用各向同性 LOD（σ_across），长轴用 5 tap 拉长（2σ_along）。
+        float lod_far = clamp(log2(max(2.0 * sig_across, 1.0e-6) / kEnvTexelAngle),
+                              0.0, env_lod_cap);
+        vec3 refl_far = SampleEnvElliptical(rdir, u_axis, 2.0 * sig_along, lod_far);
+        refl = mix(refl, refl_far, far);
+    }
+    refl *= uEnvScale;
 
-    // 环境反射 + 太阳的像。
-    // ⚠️ 太阳项是**加法**：探针不含日月盘（kEnvProbe），SSR 也不负责它。
+    // 环境反射 + 太阳的像（太阳项是加法：探针不含日月盘，SSR 也不负责它）。
     o.C = F * refl + sun_spec;
-    // 透射率 = (1−F)/n²（辐射度跨介质守恒）；WBO 的 α 是“背景衰减率”= 1 − T。
-    o.alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
+    o.alpha = alpha;
     o.fresnel_debug = F;
     o.env_lod_debug = env_lod;
     o.refl_debug = refl;

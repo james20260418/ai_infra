@@ -1108,7 +1108,7 @@ bool LoadOceanConfig(const std::string& path, OceanConfig* out) {
 // 海面选型场的验证拍摄：只换 WaterConfig 里的风/涌，机位固定 3 个。
 // 交互版走同一条渲染路径 + 面板；这里只是把参数拍下来存档/做回归。
 int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time_s,
-                       int water_debug) {
+                       int water_debug, bool far_field) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 海面选型（WaterConfig，headless）";
@@ -1133,6 +1133,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     // 冻结时刻：同一时刻下差异只来自配置（报障复现用 --ocean-time 对齐）。
     app.SetWaterWaveTime(wave_time_s);
     app.SetWaterWaveDebug(water_debug);   // 1=法线 2=像素内法线方差 11=探针 LOD
+    app.SetWaterFarField(far_field);       // 远场统计着色（水上）
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -2187,6 +2188,7 @@ int main(int argc, char** argv) {
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
+    bool ocean_far = false;         // --ocean-far：开远场统计着色（水上）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2237,6 +2239,8 @@ int main(int argc, char** argv) {
             ocean_report_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-lab") == 0) {
             start_ocean_lab = true;
+        } else if (std::strcmp(argv[i], "--ocean-far") == 0) {
+            ocean_far = true;
         } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
             ocean_lab_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
@@ -2256,11 +2260,11 @@ int main(int argc, char** argv) {
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
-                                  water_debug);
+                                  water_debug, ocean_far);
     }
     if (!ocean_lab_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_out_dir, /*show_ui=*/false, ocean_time_s,
-                                  water_debug);
+                                  water_debug, ocean_far);
     }
     if (!ocean_report_out_dir.empty()) {
         return RunCaptureOceanReport(ocean_report_out_dir, ocean_config_path);
@@ -2359,6 +2363,7 @@ int main(int argc, char** argv) {
     // --water-waves：直接进水体场景 + 打开波浪（省掉下拉/勾选两步，验收用）。
     if (start_ocean_lab) {
         app.SetOceanLab(true);
+        app.SetWaterFarField(ocean_far);
     }
     if (start_water_waves) {
         app.SetWaterScene(true);

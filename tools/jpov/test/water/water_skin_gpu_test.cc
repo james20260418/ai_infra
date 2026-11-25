@@ -1002,3 +1002,81 @@ TEST(WaterSkinGpu, UnderwaterDebugProgramOutputsAlpha) {
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }
+
+// 远场开关（2026-11-25）：far_field 必须**只在远处**改变画面（far>0 的像素），
+// 近处（far=0）逐字节不变。这是「开关真接上了 + 没污染近场」的最小判据。
+// 机位掠射（~2.9°）：屏幕下方看近处（footprint 小 ⇒ far=0），上方贴地平线看远处（far→1）。
+TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, 0.0f};
+    cam.target = {0.0f, 0.0f, -40.0f};   // 俯角 ~8.5°，屏幕下部近、上部远
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    waves.far_field = false;
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, /*wave_time_s=*/1.3f);
+    const std::vector<float> off = ReadRgba(f.water.layer().accum_tex);
+
+    waves.far_field = true;
+    f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+             /*wave_flow_tex=*/0, /*wave_time_s=*/1.3f);
+    const std::vector<float> on = ReadRgba(f.water.layer().accum_tex);
+
+    int opaque = 0;
+    int changed = 0;
+    int near_opaque = 0;
+    int near_changed = 0;
+    double sum_on = 0.0;
+    bool finite = true;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            if (off[base * 4 + 3] <= 0.0f) {
+                continue;
+            }
+            ++opaque;
+            if (!std::isfinite(on[base * 4 + 0]) || !std::isfinite(on[base * 4 + 1]) ||
+                !std::isfinite(on[base * 4 + 2])) {
+                finite = false;
+            }
+            sum_on += on[base * 4 + 0] + on[base * 4 + 1] + on[base * 4 + 2];
+            const float d = std::max({std::fabs(off[base * 4 + 0] - on[base * 4 + 0]),
+                                      std::fabs(off[base * 4 + 1] - on[base * 4 + 1]),
+                                      std::fabs(off[base * 4 + 2] - on[base * 4 + 2])});
+            if (d > 1.0e-3f) {
+                ++changed;
+            }
+            if (y <= 2) {   // 最低 3 行 = 最近的水（footprint 极小 ⇒ far 必须=0）
+                ++near_opaque;
+                if (d > 1.0e-6f) {
+                    ++near_changed;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(finite) << "远场输出出现 NaN/Inf";
+    EXPECT_GT(opaque, 500) << "水皮覆盖太少";
+    EXPECT_GT(near_opaque, 50) << "近处采样行太少";
+    EXPECT_EQ(near_changed, 0) << "近处（最低几行）被远场污染了：far 本应=0，画面必须逐字节不变";
+    EXPECT_GT(changed, opaque / 100) << "远场开关几乎没改变画面：far 没有真正生效";
+    // 能量健全性：远场不能把画面打成全黑（丢反射）或 NaN。
+    EXPECT_GT(sum_on / (3.0 * static_cast<double>(opaque)), 5.0e-3)
+        << "远场输出几乎全黑（反射丢了？）";
+
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}

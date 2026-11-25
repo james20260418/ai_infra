@@ -228,6 +228,10 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     wp.displacement = (in.waves != nullptr) && in.waves->displacement;
     wp.has_flow_tex = in.wave_flow_tex != 0u;
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
+
+    // 远场开关（只在 above program 里声明；below 未声明 ⇒ GetUniform=-1 ⇒ no-op）。
+    glUniform1i(shader_mgr_->GetUniform(prog, "uFarField"),
+                (in.waves != nullptr && in.waves->far_field) ? 1 : 0);
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {
