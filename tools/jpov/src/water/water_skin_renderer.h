@@ -55,7 +55,10 @@ public:
         // flow map 的 GL 2D 纹理（RG 编码 (flow*0.5+0.5)；0 = 无 flow）。
         // 由 Renderer 从 WaterWaves::flow_texture_id 经 TextureManager 解析。
         unsigned int wave_flow_tex = 0;
-        // debug：0 = 正常；1 = 把交点法线编码成颜色输出（定位法线噪点用）。
+        // 调试档：0 = 走生产 program（正常出图）；非 0 ⇒ 走对应的调试 program。
+        //   1 = 交点法线编码成颜色；2 = 像素内法线方差；3 = 跳过深度拒绝（A/B 对照）；
+        //   6 = 覆盖纯红；7 = α；8 = 求交成功；9 = cos_i；11 = 探针 LOD；
+        //   12 = 探针反射色；13 = 反射率 F。全部见 kWaterSkinDebugGlsl::EmitDebug。
         int wave_debug = 0;
 
         // ── 太阳的像（解析 GGX，盘状光源）──
@@ -98,9 +101,15 @@ public:
 private:
     void EnsureTarget(int w, int h);
     void UploadCommonUniforms(unsigned int prog, const Inputs& inputs);
+    // 按「水上/水下 × 生产/调试」选 program（水上水下由相机 y vs level 决定，每帧常量；
+    // 调试由 wave_debug != 0 决定）。
+    unsigned int SelectProgram(const Inputs& inputs) const;
 
     ShaderManager* shader_mgr_ = nullptr;
-    unsigned int prog_draw_ = 0;
+    unsigned int prog_above_ = 0;         // 水上 · 生产
+    unsigned int prog_below_ = 0;         // 水下 · 生产
+    unsigned int prog_above_debug_ = 0;   // 水上 · 调试
+    unsigned int prog_below_debug_ = 0;   // 水下 · 调试
     unsigned int vao_ = 0;
     WboTarget wbo_;
     bool has_content_ = false;

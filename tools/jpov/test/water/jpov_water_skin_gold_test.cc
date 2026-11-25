@@ -9,6 +9,7 @@
 //   2) 细粒度：逐像素显著变化（单通道差 > 1）占比 <= 0.1%。
 // 水皮只要反射方向 / 菲涅尔 / 太阳项 / 深海积分 / α 任何一处走样，都会远超这两个阈值。
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -69,15 +70,38 @@ int main() {
             gold_px, gold_px + static_cast<size_t>(w) * h * 4);
         stbi_image_free(gold_px);
 
-        // 自检：必须有水皮覆盖（否则「全黑也全对」，空测）。
+        // 性质断言（对**渲染结果**，不是对 gold）：防「gold 被从坏代码重生成 ⇒ 图自洽但物理没了」。
+        // 这是 MEMORY 里的教训：gold 图能被盲目重生成，性质断言不能。
         int covered = 0;
+        int max_channel = 0;
+        int bright_pixels = 0;
         for (int i = 0; i < w * h; ++i) {
-            if (rendered[static_cast<size_t>(i) * 4 + 3] > 0) {
-                ++covered;
+            const size_t o = static_cast<size_t>(i) * 4;
+            if (rendered[o + 3] == 0) {
+                continue;
+            }
+            ++covered;
+            const int mc = std::max({rendered[o], rendered[o + 1], rendered[o + 2]});
+            max_channel = std::max(max_channel, mc);
+            if (mc > 200) {
+                ++bright_pixels;
             }
         }
         if (covered == 0) {
             LOG(ERROR) << "[" << shot.name << "] 无任何水皮覆盖像素，用例失效";
+            ++failures;
+            continue;
+        }
+        if (max_channel < shot.min_max_channel) {
+            LOG(ERROR) << "[" << shot.name << "] 最大通道 " << max_channel
+                       << " < " << shot.min_max_channel
+                       << "（水上应有日盘饱和 / 水下应有 TIR·深海反射）—— 渲染可能是坏的";
+            ++failures;
+            continue;
+        }
+        if (bright_pixels < shot.min_bright_pixels) {
+            LOG(ERROR) << "[" << shot.name << "] 亮像素 " << bright_pixels
+                       << " < " << shot.min_bright_pixels << "（日盘像没出现？）";
             ++failures;
             continue;
         }
@@ -91,7 +115,8 @@ int main() {
                   << " (<= " << kLightMeanThreshold << ")  changed="
                   << (pr.changed_ratio * 100.0) << "% (<= "
                   << (kMaxChangedRatio * 100.0) << "%)  max_diff=" << pr.max_diff
-                  << "  covered=" << covered;
+                  << "  covered=" << covered << " max_ch=" << max_channel
+                  << " bright=" << bright_pixels;
 
         if (mean_diff > kLightMeanThreshold || pr.changed_ratio > kMaxChangedRatio) {
             LOG(ERROR) << "[" << shot.name << "] 水皮回归（对比 gold " << gold << "）";

@@ -64,22 +64,33 @@ struct SkinGoldShot {
     jpov::Vec3f cam_target;
     float fov = 60.0f;
     bool under = false;   // 相机在水下（cam.y < level_y）
+    // 性质断言（对**渲染结果**，不是对 gold）：防「gold 被从坏代码重生成」的空测。
+    // 不改这两条的唯一代价：把水皮改成全黑也能让 gold 自洽。
+    int min_max_channel = 0;    // 最大通道必 ≥ 它（水上：太阳像饱和；水下：TIR/深海反射可见）
+    int min_bright_pixels = 0;  // 单通道 >200 的像素数必 ≥ 它（水上：日盘真的出现）
 };
 
 // 6 张：水上 ×3（掠射 / 45° / 俯视）+ 水下 ×3（掠射 / 45° / 正上方）。
+// min_max_channel / min_bright_pixels 实测值取自生成时的图（§P8 自审 2026-11-25）。
 inline constexpr SkinGoldShot kShots[] = {
     // ── 水上：掠射（仰角 ~2.3°，Fresnel 掠射峰 + 地平线夹取）──
-    {"above_graze", /*pos*/ {0.0f, 1.0f, 0.0f}, /*tgt*/ {0.0f, -0.2f, -30.0f}, 60.0f, false},
+    {"above_graze", /*pos*/ {0.0f, 1.0f, 0.0f}, /*tgt*/ {0.0f, -0.2f, -30.0f}, 60.0f, false,
+     /*min_max*/ 250, /*min_bright*/ 200},
     // ── 水上：45° 俯视（中段 Fresnel + 反射方向连续性）──
-    {"above_45deg", /*pos*/ {0.0f, 15.0f, 15.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, false},
+    {"above_45deg", /*pos*/ {0.0f, 15.0f, 15.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, false,
+     /*min_max*/ 250, /*min_bright*/ 100},
     // ── 水上：正俯视（Fresnel 最小 ~2%，反射几乎不可见）──
-    {"above_topdown", /*pos*/ {0.0f, 30.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, false},
+    {"above_topdown", /*pos*/ {0.0f, 30.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, false,
+     /*min_max*/ 250, /*min_bright*/ 100},
     // ── 水下：掠射（几乎全 TIR 环，只剩一条细 Snell 窗）──
-    {"below_graze", /*pos*/ {0.0f, -1.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, -30.0f}, 60.0f, true},
+    {"below_graze", /*pos*/ {0.0f, -1.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, -30.0f}, 60.0f, true,
+     /*min_max*/ 100, /*min_bright*/ 0},
     // ── 水下：45° 仰视（Snell 窗边缘 + 部分 TIR）──
-    {"below_45deg", /*pos*/ {0.0f, -10.0f, -10.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, true},
+    {"below_45deg", /*pos*/ {0.0f, -10.0f, -10.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, true,
+     /*min_max*/ 100, /*min_bright*/ 0},
     // ── 水下：正上方（整屏 Snell 窗，深海积分 + Fresnel 薄膜）──
-    {"below_up", /*pos*/ {0.0f, -10.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, true},
+    {"below_up", /*pos*/ {0.0f, -10.0f, 0.0f}, /*tgt*/ {0.0f, 0.0f, 0.0f}, 60.0f, true,
+     /*min_max*/ 100, /*min_bright*/ 0},
 };
 inline constexpr int kShotCount = static_cast<int>(sizeof(kShots) / sizeof(kShots[0]));
 
@@ -111,7 +122,8 @@ inline unsigned int MakeGradientEnvCube() {
                     case 2: dx = u; dy = 1.0f; dz = v; break;     // +Y
                     case 3: dx = u; dy = -1.0f; dz = -v; break;   // -Y
                     case 4: dx = u; dy = -v; dz = 1.0f; break;    // +Z
-                    default: dx = -u; dy = -v; dz = -1.0f; break; // -Z
+                    case 5: dx = -u; dy = -v; dz = -1.0f; break;  // -Z
+                    default: CHECK(false) << "非法 cubemap 面 " << f;
                 }
                 const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
                 dx /= len;
@@ -253,6 +265,10 @@ struct GoldHarness {
 
     // 拍一张 → RGBA8（alpha 标记覆盖，RGB 为 clamp 后的层色）。
     std::vector<unsigned char> RenderShot(const SkinGoldShot& shot) {
+        // 不变量：shot.under 必须与相机高度一致 —— 否则 medium（按 shot.under 给）和
+        // 实际选中的 program（按 cam.y < level 选）会分叉，变成「水上 program 却传了介质」。
+        CHECK_EQ(shot.under, shot.cam_pos.y() < kLevelY)
+            << "shot.under 与相机高度不一致: " << shot.name;
         jpov::Camera cam;
         cam.position = shot.cam_pos;
         cam.target = shot.cam_target;

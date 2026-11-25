@@ -951,3 +951,54 @@ TEST(WaterSkinGpu, FarFieldKeepsDetailNormals) {
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }
+
+// 水下 + 调试 program（below_debug）：其余用例只覆盖了 above_debug ——
+// FarFieldKeepsDetailNormals 用 wave_debug=1，但相机在水上 ⇒ 走 above_debug。
+// 这里在水下用 wave_debug=7（输出 α）跑一次，既证明 below_debug 这条 program 真的能跑，
+// 又锁住「水下 α = 平面菲涅尔（含 TIR）」这个调试口径（与生产支路同源）。
+TEST(WaterSkinGpu, UnderwaterDebugProgramOutputsAlpha) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, -3.0f, 0.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};   // 正上方看：整屏落在 Snell 窗内（F 很小）
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+    const jpov::water::WaterMediumSample medium = MakeMedium(level, ior);
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    f.Render(cam, depth_tex, level, ior, &medium, /*has_sun=*/false,
+             jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+             jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, /*waves=*/nullptr,
+             /*wave_flow_tex=*/0, /*wave_time_s=*/0.0f, /*wave_depth_m=*/300.0f,
+             /*wave_debug=*/7);
+
+    const std::vector<float> accum = ReadRgba(f.water.layer().accum_tex);
+    const std::vector<float> reveal = ReadRed(f.water.layer().reveal_tex);
+    const Reference ref = BuildReference(cam);
+
+    int compared = 0;
+    for (int y = 0; y < kHeight; y += 3) {
+        for (int x = 0; x < kWidth; x += 3) {
+            const LayerExpect e = ExpectLayer(cam, ref, depth, x, y, level, ior, medium);
+            if (!e.hit) {
+                continue;
+            }
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            // mode 7：oAccum = vec4(alpha, alpha, alpha, 1)，oReveal = 1 ⇒ 混合后 reveal = 0。
+            EXPECT_NEAR(accum[base * 4 + 0], e.alpha, 1.0e-3f) << "x=" << x << " y=" << y;
+            EXPECT_NEAR(accum[base * 4 + 1], e.alpha, 1.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 2], e.alpha, 1.0e-3f);
+            EXPECT_NEAR(accum[base * 4 + 3], 1.0f, 1.0e-3f);
+            EXPECT_NEAR(reveal[base], 0.0f, 1.0e-3f);
+            ++compared;
+        }
+    }
+    EXPECT_GT(compared, 60) << "水下像素太少，用例没有覆盖面";
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}

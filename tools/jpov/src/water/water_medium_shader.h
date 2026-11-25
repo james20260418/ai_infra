@@ -20,11 +20,19 @@
 namespace jpov {
 namespace water {
 
-// 介质 uniform（由 FogCompositeRenderer::Draw 上传；名字是唯一出处）。
-inline constexpr const char* kWaterMediumGlsl = R"glsl(
-uniform int   uHasWater;         // 0 = 本帧无水体介质（MediumAt 恒等，零开销）
+// ── 水面接口 uniform（唯一出处）──
+// 水面高度与折射率是「界面」量：水皮（平面交点 + 菲涅尔）、介质（MediumAt 折射）、
+// 合成趟（上传）三者共用。单独拆成一个片段，让**水皮的水上 program**可以不拼介质
+// uniform 块、只拼这个两行片段（2026-11-25 重构：水皮拆成水上/水下 × 生产/调试四 program）。
+inline constexpr const char* kWaterInterfaceUniformsGlsl = R"glsl(
 uniform float uWaterLevelY;      // 水面世界高度（米，y-up）
 uniform float uWaterIor;         // 界面折射率（只影响菲涅尔/折射方向，不产生位移）
+)glsl";
+
+// 介质 uniform（由 FogCompositeRenderer::Draw 上传；名字是唯一出处）。
+// 与 kWaterInterfaceUniformsGlsl 分开：介质独有的量（吸收/散射/太阳/环境）不进水皮水上 program。
+inline constexpr const char* kWaterMediumUniformsGlsl = R"glsl(
+uniform int   uHasWater;         // 0 = 本帧无水体介质（MediumAt 恒等，零开销）
 uniform vec3  uWaterSigmaA;      // 吸收系数 (1/m)，逐通道
 uniform vec3  uWaterSigmaS;      // 散射系数 (1/m)，逐通道
 uniform float uWaterPhaseG;      // HG 各向异性 ∈ [0, 0.95)
@@ -32,7 +40,11 @@ uniform vec3  uWaterAmbient;     // 环境入射（cmds.ambient 已乘 intensity
 uniform vec3  uWaterSunColor;    // 空气侧太阳（已乘 intensity）
 uniform vec3  uWaterSunToward;   // 指向太阳（空气侧，单位）
 uniform int   uWaterHasSun;      // 0 = 无太阳（只剩环境项）
+)glsl";
 
+// 介质函数（MediumAt + 辅助），**不再声明任何 uniform** —— 依赖使用方先拼
+// kWaterInterfaceUniformsGlsl + kWaterMediumUniformsGlsl（合成趟与水皮水下 program 都如此）。
+inline constexpr const char* kWaterMediumGlsl = R"glsl(
 const float kWmAmbientT = 0.94;  // 界面漫射透射率（= water_optics.h::kAmbientInterfaceTransmittance，
                                  //   由 test/water GlslConstantsMatchCpu 锁一致性）
 const float kWmMaxG = 0.95;      // HG 上限（= water_optics.h::kMaxPhaseG，同上）
