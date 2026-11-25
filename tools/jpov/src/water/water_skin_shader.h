@@ -342,9 +342,16 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
     // 远场不再用「逐像素法线跳变」当带宽（那是给解析法线用的），否则远场会抖。
     float normal_var_px = (far > 0.0) ? (s.normal_var_px * (1.0 - far)) : s.normal_var_px;
 
-    // ── ⑤ 反射率 / 透射率：对斜率分布的积分（远场 = 全谱方差，近场 = 截断残差）──
-    // R_eff 是「角度平均菲涅尔」，T = 1 − R_eff；alpha 是 WBO 的背景衰减率 = 1 − (1−F)/n²。
-    float F = RoughFresnelAlbedo(cos_i, s.var_p_mean, uWaterIor);
+    // ── ⑤ 反射率 / 透射率：对斜率分布的积分 ──
+    // 远场：**去掉远海专用的方差 hack**（known_issue §10.15b ①：细节短波全额 + Cox–Munk 短波
+    //   全额 = 双重计入 ⇒ 远场 var_p 比物理值高 ~3.8×，R_eff 从 0.30 掉到 0.155 ⇒ 远处过暗；
+    //   椭圆核也被撑宽 ~2× ⇒ 波纹感更弱）。远海引擎按**物理 MSS**（= Cox–Munk 总方差
+    //   uShortWaveMss）归一。只缩不放（≤1），按 far 平滑过渡；近场 far=0 ⇒ scale=1，逐字节不变。
+    float var_scale = 1.0;
+    if (far > 0.0 && uShortWaveMss > 1.0e-6 && s.var_p_mean > 1.0e-6) {
+        var_scale = mix(1.0, min(0.5 * uShortWaveMss / s.var_p_mean, 1.0), far);
+    }
+    float F = RoughFresnelAlbedo(cos_i, s.var_p_mean * var_scale, uWaterIor);
     float alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
 
     // ── ⑥ 太阳的像（解析 GGX，盘状光源）—— 旧逻辑暂代（远场带宽是 §10.16 M1/M3）──
@@ -387,13 +394,17 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
     float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
     vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb;
     if (far > 0.0) {
-        // 张量特征分解：σ_along（长轴，沿风）/ σ_across（短轴）+ 主轴角 theta。
-        float tr = s.sxx + s.szz;
-        float diff = s.sxx - s.szz;
-        float disc = sqrt(diff * diff + 4.0 * s.sxz * s.sxz);
+        // 张量同乘 var_scale：与 F 用**同一份归一后的方差**，避免「R 按物理、模糊按虚高」分叉。
+        // 特征分解：σ_along（长轴，沿风）/ σ_across（短轴）+ 主轴角 theta。
+        float sxx = s.sxx * var_scale;
+        float szz = s.szz * var_scale;
+        float sxz = s.sxz * var_scale;
+        float tr = sxx + szz;
+        float diff = sxx - szz;
+        float disc = sqrt(diff * diff + 4.0 * sxz * sxz);
         float sig_along = sqrt(max(0.5 * (tr + disc), 0.0));
         float sig_across = sqrt(max(0.5 * (tr - disc), 0.0));
-        float theta = 0.5 * atan(2.0 * s.sxz, diff);
+        float theta = 0.5 * atan(2.0 * sxz, diff);
         vec3 major3 = vec3(cos(theta), 0.0, sin(theta));
         // 主轴投影到 rdir 的切平面 ⇒ 拉长方向（近水平反射时≈风向，水平）。
         vec3 u_axis = major3 - dot(major3, rdir) * rdir;

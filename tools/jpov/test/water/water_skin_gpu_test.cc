@@ -1022,6 +1022,10 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
     const unsigned int depth_tex = MakeDepthTexture(depth);
 
     jpov::WaterWaves waves = MakeTestWaves();
+    // 真实海：带短波（Cox–Munk，8 m/s ⇒ MSS≈0.059）。远场的「按物理 MSS 归一」依赖它。
+    waves.short_wave.wind_speed_ms = 8.0f;
+    waves.short_wave.dir_x = 1.0f;
+    waves.short_wave.dir_z = 0.0f;
     waves.far_field = false;
     f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
              jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
@@ -1041,6 +1045,7 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
     int near_opaque = 0;
     int near_changed = 0;
     double sum_on = 0.0;
+    double sum_off = 0.0;
     bool finite = true;
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
@@ -1054,6 +1059,7 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
                 finite = false;
             }
             sum_on += on[base * 4 + 0] + on[base * 4 + 1] + on[base * 4 + 2];
+            sum_off += off[base * 4 + 0] + off[base * 4 + 1] + off[base * 4 + 2];
             const float d = std::max({std::fabs(off[base * 4 + 0] - on[base * 4 + 0]),
                                       std::fabs(off[base * 4 + 1] - on[base * 4 + 1]),
                                       std::fabs(off[base * 4 + 2] - on[base * 4 + 2])});
@@ -1069,6 +1075,56 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
         }
     }
     EXPECT_TRUE(finite) << "远场输出出现 NaN/Inf";
+    LOG(INFO) << "far-off mean=" << sum_off / (3.0 * opaque)
+              << "  far-on mean=" << sum_on / (3.0 * opaque);
+
+    // 只统计**远场区域**（CPU 判定 far>0.5）的亮度：去掉双重计入方差后远场应**变亮**
+    // （R_eff 0.155→0.30）。锁住「远场不能比旧版更暗」。
+    const Reference ref = BuildReference(cam);
+    const float pixel_angle = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
+    float kmin = 1.0e30f;
+    for (int i = 0; i < waves.num_waves; ++i) {
+        kmin = std::min(kmin, 2.0f * 3.14159265358979f / waves.waves[i].wavelength_m);
+    }
+    const float lam_max = 2.0f * 3.14159265358979f / kmin;
+    double far_sum_off = 0.0;
+    double far_sum_on = 0.0;
+    int far_n = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t base = static_cast<size_t>(y) * kWidth + x;
+            if (off[base * 4 + 3] <= 0.0f) {
+                continue;
+            }
+            const Vec3f rd = RayAt(ref, x, y);
+            if (!(rd.y() < -1.0e-4f)) {
+                continue;
+            }
+            const float t_plane = (level - cam.position.y()) / rd.y();
+            if (t_plane <= 0.0f) {
+                continue;
+            }
+            const float fp = jpov::water::WaveFootprintM(t_plane, rd.y(), pixel_angle);
+            if (fp <= 1.0e-6f) {
+                continue;
+            }
+            const float px_per_wave = lam_max / fp;
+            const float tt = std::clamp((px_per_wave - 3.0f) / (8.0f - 3.0f), 0.0f, 1.0f);
+            if (1.0f - tt * tt * (3.0f - 2.0f * tt) < 0.5f) {
+                continue;
+            }
+            ++far_n;
+            far_sum_off += off[base * 4 + 0] + off[base * 4 + 1] + off[base * 4 + 2];
+            far_sum_on += on[base * 4 + 0] + on[base * 4 + 1] + on[base * 4 + 2];
+        }
+    }
+    EXPECT_GT(far_n, 50) << "远场采样像素太少（机位没覆盖到远场）";
+    const double far_off_mean = far_sum_off / (3.0 * far_n);
+    const double far_on_mean = far_sum_on / (3.0 * far_n);
+    LOG(INFO) << "far-region: off=" << far_off_mean << " on=" << far_on_mean
+              << " (n=" << far_n << ")  ratio=" << (far_on_mean / far_off_mean);
+    EXPECT_GT(far_on_mean, far_off_mean * 0.98)
+        << "远场比旧版更暗：双重计入的方差把 R_eff 压低了吗（§10.15b ①）";
     EXPECT_GT(opaque, 500) << "水皮覆盖太少";
     EXPECT_GT(near_opaque, 50) << "近处采样行太少";
     EXPECT_EQ(near_changed, 0) << "近处（最低几行）被远场污染了：far 本应=0，画面必须逐字节不变";
