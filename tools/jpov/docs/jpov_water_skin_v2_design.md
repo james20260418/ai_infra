@@ -1,8 +1,8 @@
 # 水皮 V2 设计：单像素多法线采样（Mip the ground-truth sea）
 
-> 状态：**设计定稿（2026-11-25）**，实现未开始。
-> 分支 `feature/20261125-jpov-water-skin-v2-doc`（base = main `500b7a6`）。
-> 本文只写设计；实现、gold、截断等后续 PR 另开。
+> 状态：**设计定稿（2026-11-25）**；**实现已落地**（同日，分支 `feature/20261125-jpov-water-skin-v2`，
+> 文件清单见 §12）。gold 与谱截断仍不在本 PR 内（见 §11）。
+> 实现与本文的偏差只有两类，都已在正文里就地注明：椭圆**半轴**（§5.1）、相位局部系的做法（§8.1）。
 
 ---
 
@@ -130,7 +130,15 @@ V1 的近场着色函数 `ShadeAbove()`（`water_skin_shader.h`）本身是对�
 |---|---|---|
 | `S` | **默认 4，滑条 1…16** | `S=1` = 纯中心法线（退化） |
 | 抖动图案 | **Hammersley 2D（静态）** | 低差异、确定性 ⇒ 摩尔纹**静态可复现**，便于诊断 |
-| 分布域 | **椭圆足迹内均匀** | 长轴 `f_long ≈ footprint`，短轴 `f_short ≈ footprint · pa_x/pa_y`（横视线的真实宽度） |
+| 分布域 | **椭圆足迹内均匀** | **半轴**：长 `footprint/2`，短 `footprint·|rd.y|/2`（推导见下） |
+
+**半轴口径（实现时修正，2026-11-25）**：`footprint = t·pixel_angle/|rd.y|` 是**一个整像素**
+沿地面径向的世界宽度，所以像素只覆盖 `±footprint/2`。把 `footprint` 直接当半径会让采样盘
+变成 2×2 像素（面积 4×）= 白送一级 mip，并把「噪声起点距离」系统性拉近约 2×
+（而那正是 V3 定分工线要用的表）。
+短轴的物理量是 `t·pixel_angle`（横向方向本身就在水面内，不被 1/|rd.y| 拉长）：
+`t·pa = footprint·|rd.y|`。原稿写的 `pa_x/pa_y` 只在方形像素下等于 1（⇒ 圆盘），
+漏掉了 `|rd.y|` 这个真正的各向异性因子（掠射时短/长 = |rd.y| ⇒ 1° 时 0.017，横向成条）。
 
 ### 5.2 为什么静态、不做时域抖动
 
@@ -158,6 +166,8 @@ $$\big(C,\alpha\big)=\frac1S\sum_{i=0}^{S-1}\Big(\underbrace{F_i\cdot \mathrm{En
 \alpha=\frac1S\sum_i\Big(1-\frac{1-F_i}{n^2}\Big)$$
 
 ```glsl
+// 记号：sigma2_mss = 0.5·trace(MSS 张量) = MSS 的**各向同性斜率方差** σ²。
+//（MSS 是斜率张量的迹 = 2σ²；代码里的 uShortWaveMss 就是迹，别把 √迹 当标准差用。）
 float Fi  = RoughFresnelAlbedo(cos_i, sigma2_mss, uWaterIor);   // MSS 保留
 vec3  rdi = ClampAboveHorizon(reflect(rd, Ni));
 float lod = Clamp(log2(max(2*sqrt(sigma2_mss), 1e-6)/kEnvTexelAngle), 0.0, 1.5);
@@ -211,11 +221,25 @@ MSS = Cox–Munk 短波斜率方差，**不在波表里**（它不是 72 条之�
 **方案：局部原点 + CPU 预算相位偏移**（纯数值等价，不改数学）
 
 ```
-CPU（每帧，double）:  φ_i' = φ_i + k_i · dot(d_i, origin)
-GPU:                  phase = k_i · dot(d_i, p_local) + φ_i'      // p_local = p − origin
+CPU（每帧，double）:  origin  = 1 km 量化(相机 xz)
+                      φ_i'    = fmod(φ_i + k_i · dot(d_i, origin), 2π)
+GPU:                  p_local = cam_local.xz + rd.xz·t        // cam_local = cam − origin（CPU 减）
+                      phase   = k_i · dot(d_i, p_local) + φ_i'
 ```
+三个实现要点（**都是实现时才发现、原稿漏了**）：
+
+1. **必须在「算位置之前」就换成局部坐标**：`p = cam + rd·t` 这一步在 1e6 m 量级上 ulp
+   已经是 0.06 m，细节波（k≈21/m）的相位会震 ±1.3 rad —— 先算 p、再减 origin 救不回来
+   （减完还是那个已经丢位的数）。所以 renderer 用 double 传一条 `uCamPosXZLocal`，
+   水皮的求交/求法线全在局部系里做（y 保持世界系，`uWaterLevelY` 不变）。
+   V1 与天球仍传世界坐标（origin=0 ⇒ 逐位不变）。
+2. **初相必须 `fmod 2π`**：origin 会把 φ' 推到 k·|origin| 量级（细节波 21 × 1e6 = 2e7），
+   直接 cast 成 float 的量化误差是 0.25~2 rad。而 `origin` 每 1 km 换一次 ⇒ 换格瞬间整片波
+   相位跳一个随机值（近场可见的 pop）。fmod 在 double 里做，量化误差回到 ~1e-7 rad。
+3. **flow map 必须世界锚定**：局部坐标直接乘 uv 会让 flow 图案随相机每 1 km 滑动一次
+   ⇒ 采样前加回 origin（`WaveFlowAt(p + uWaveOriginXZ)`）。
 - 每波一个 uniform（8 主 + 64 细节 = 72 float），每帧一次；
-- `origin` 建议取相机位置的整千量化（避免逐帧跳变）；
+- `origin` 取相机位置的整千量化（避免逐帧跳变）；
 - **预期代价**：与不加相比结果差 **0~1 LSB**（不是数学变化，是浮点重排）。
 
 ### 8.2 多根跳变（**不治，照抄 V1**）
@@ -240,12 +264,19 @@ V2 的额外好处：多采样会把这类噪声按 `1/√S` 衰减（每次跳�
 
 ## 9. 与 V1 的关系
 
-新增开关 `uWaterSkinV2`（面板「水皮 V2」+ CLI）：
+**实现方式（2026-11-25 定）**：不是一个 uniform 开关，而是**两份独立的 pass**——
+`WaterSkinRenderer`（V1）与 `WaterSkinV2Renderer`（V2）各自持有 program / WBO，
+由 `WaterWaves::v2` 在 `Renderer` 里二选一（面板「水皮 V2」+ CLI `--water-v2` / `--water-samples`）。
+理由：V2 要**删掉** V1 的 9 个口径，在同一个着色函数里 `if` 切两套逻辑会让 V1 的注释与不变式
+失效；两份各自独立才能让 V1 逐字节冻结、V2 自由迭代。
 
-| 值 | 行为 |
+| `WaterWaves::v2` | 行为 |
 |---|---|
-| `0` | **V1 原路径，逐字节不变**（保护既有功能 + 可做 A/B） |
-| `1` | V2（S 次采样） |
+| `false` | **V1 原路径，逐字节不变**（gold 继续兜底）；天球折射按 V1 口径截断谱 |
+| `true` | V2（S = `v2_sample_count` ∈ [1,16]）；天球折射同步按不截断求法线 |
+
+⚠️ `v2` 放在 `WaterWaves`（而不是 `WaterCommand`）是因为**天球折射必须与水皮同口径**：
+放在谱配置里 ⇒ 两个消费者自动同源。V2 renderer 会 `CHECK(waves->v2)` 拦住"只换水皮不换天球"的误用。
 
 - `S=1` 在 V2 下**不等于 V1**（V2 无截断、无 `normal_var_px`/`env_lod`），这是预期的；
 - 因此 V2 首次验收**不做 gold**（Danis 2026-11-25 定：先交互式验收）。V1 的 gold 继续用
@@ -282,16 +313,26 @@ V2 的额外好处：多采样会把这类噪声按 `1/√S` 衰减（每次跳�
 
 ## 12. 涉及文件（实现时的清单）
 
+**实际落地（2026-11-25）**：
+
 | 文件 | 改动 |
 |---|---|
-| `src/water/water_wave_shader.h` | 去掉 `lod_amp`（或加 `uWaveNoTruncate`）；相位局部原点 |
-| `src/water/water_wave_uniforms.{h,cc}` | 新增 72 个相位偏移 uniform（CPU 预算） |
-| `src/water/water_skin_shader.h` | 删 8~9 项；新增 `ShadeSample()` + 平均；`uWaterSkinV2`/`uSampleCount` |
-| `src/water/water_skin_renderer.{h,cc}` | 上传新 uniform；`Inputs` 增加 `v2`/`sample_count` |
-| `src/water/water_skin_math.h` | CPU 参考（对拍用）同步 |
-| `interface/render_command.h` | `WaterWaves::{v2, sample_count}` |
-| `demo/skylight_viewer_app.h` | 面板：V2 开关 + S 滑条 |
+| `src/water/water_skin_v2_shader.h` | **新增**：V2 的公共/水上/水下/调试片段 + 4 个 main（V1 的 9 个口径一个都不带） |
+| `src/water/water_skin_v2_renderer.{h,cc}` | **新增**：整份 pass（4 program + WBO），`Inputs` 直接复用 V1 的（滑条共用），多一个 `sample_count` 参数 |
+| `src/water/water_wave_shader.h` | `uWaveNoTruncate`（V2 = 1）；`WaveLodAmp()` 抽出唯一出处；`WaveNormalAtXZ()` 供按点求法线；`uWaveOriginXZ`（只给 flow map 还原世界系用） |
+| `src/water/water_wave_uniforms.{h,cc}` | `WaveUniformParams` 增 `no_truncation` / `origin_x,z`；初相 `fmod 2π` 预算 |
+| `src/water/water_wave_math.h` | `WavePhaseOriginM()`（1 km 量化，唯一出处） |
+| `src/skydome/sky_renderer.cc` | 天球折射的谱截断开关与 `WaterWaves::v2` 同值 |
+| `src/renderer.{h,cc}` | 持有两个水皮 renderer，按 `WaterWaves::v2` 二选一 |
+| `interface/render_command.h` | `WaterWaves::{v2, v2_sample_count}` |
+| `demo/skylight_viewer_app.h` | 面板（场景 4）：`水皮 V2（多法线采样）` + `水皮 S 采样数` |
 | `demo/jpov_skylight_viewer.cc` | CLI：`--water-v2`、`--water-samples N` |
+| `test/water/water_skin_v2_gpu_test.cc` | **新增** 4 条：平面等价（水上/水下，V2 == V1 逐像素）、有波浪时 V2≠V1 且 S 有影响、S 越大横向方差越小 |
+
+**本轮没做（有意）**：`water_skin_math.h` 的 CPU 对照（V2 的抖动/σ²/env_lod 没有 CPU 参考，
+所以也没有 gold 对拍）；谱截断 / TAA / glints / 地平线过渡（§11）。
+=> 这意味着 V2 的**绝对**正确性目前由「平面时与 V1 逐像素相同」这条不变量兜着，
+而"远场到底长什么样"要等交互式验收 + V3 的闭式 mip。
 
 ---
 
@@ -307,3 +348,7 @@ V2 的额外好处：多采样会把这类噪声按 `1/√S` 衰减（每次跳�
 | 6 | 多根跳变**照抄 V1**，不治 |
 | 7 | 相位精度（局部原点）可以做（纯数值，不改数学） |
 | 8 | 地平线过渡**留给 V3** |
+| 9 | 交付形态：**两份独立 pass** + `WaterWaves::v2` 二选一（不是 shader 里的 uniform 分支） |
+| 10 | 采样椭圆用**半轴**（`footprint/2`、`footprint·|rd.y|/2`），见 §5.1 |
+| 11 | 相位局部系：`uCamPosXZLocal`（CPU double 减）+ 初相 `fmod 2π` + flow map 加回 origin，见 §8.1 |
+| 12 | 本轮不做 gold / 不做 CPU 对照（先交互式验收），正确性靠「平面 V2 == V1 逐像素」 |
