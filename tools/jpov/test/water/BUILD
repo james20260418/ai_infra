@@ -75,6 +75,55 @@ cc_test(
     linkstatic = 1,
 )
 
+# 水皮 gold 生成器（bazel run）：直接驱动 WaterSkinRenderer 拍 6 张固定机位
+# （水上 ×3 / 水下 ×3），写 tools/jpov/test/water/water_skin_gold_*_1280x720.png。
+# 机位 / 输入定义见 jpov_water_skin_gold_common.h。
+cc_binary(
+    name = "jpov_water_skin_gold_generator",
+    srcs = [
+        "jpov_water_skin_gold_common.h",
+        "jpov_water_skin_gold_generator.cc",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/lighting:ggx_specular",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src/water:water_skin_renderer",
+        "//tools/jpov/src/water:water_medium_math",
+        "//tools/jpov/test:test_utils",
+        "//third_party/stb:stb_image_write",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# 水皮 gold 测试（bazel test）：对拆分前后的水皮逐像素比对（双闸门：ROI 均值 + 像素变化）。
+# 水皮是确定性单 pass，无 llvmpipe 抖动 ⇒ 闸门比 SSR 紧得多（LSB 级）。
+cc_test(
+    name = "jpov_water_skin_gold_test",
+    srcs = [
+        "jpov_water_skin_gold_common.h",
+        "jpov_water_skin_gold_test.cc",
+    ],
+    data = glob(["water_skin_gold_*_1280x720.png"]),
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/lighting:ggx_specular",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src/water:water_skin_renderer",
+        "//tools/jpov/src/water:water_medium_math",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # WaterConfig → 谱的展开（纯 CPU）：SMB 的 Hs/Tp、方差精确、seed 确定性、
 # 无风镜面、涌按能量叠加、质量档、与渲染侧同源常数的一致性、浅水色散。
 cc_test(
