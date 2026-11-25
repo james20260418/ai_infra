@@ -35,6 +35,10 @@ inline constexpr float kHorizonClampSin = 0.0174524064f;
 // 贴着水面的几何（岛屿侧面、水下物体）会在水线处与水面深度几乎相等，容差太小会打架。
 inline constexpr float kDepthBiasM = 0.02f;
 
+// 地平线带（弧度）：与 GLSL 的 kWaterHorizonFloorRad **同一个数**（由 GPU 对拍测试兜底）。
+// 水上且 rd.y ≤ 它时，水皮一直盖到几何地平线（否则地平线那 1 px 会露出天球地色）。
+inline constexpr float kWaterHorizonFloorRad = 1.0e-3f;
+
 // 「场景深度 = 背景（远平面）」的判定阈值。MRT#1 里背景写 1.0。
 inline constexpr float kBackgroundDepthNdc = 0.999999f;
 
@@ -143,7 +147,16 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
     if (waves != nullptr && waves->enabled && waves->num_waves > 0) {
         // 像素在水面上覆盖的世界尺寸：**调同一个口径函数**（WaveFootprintM），
         // 不在这里再写一遍公式（护栏改了只改一处）。
-        const float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
+        float t_plane = (level_y - cam_pos.y()) / ray_dir.y();
+        const bool cam_above = (cam_pos.y() > level_y);
+        const bool horizon_band = cam_above && (ray_dir.y() <= kWaterHorizonFloorRad);
+        if (horizon_band && !(t_plane > 0.0f)) {
+            // 地平线带：一个像素盖住整片海（与 GLSL 同口径），否则 footprint=0 → 落进近场。
+            const float hx = cam_pos.x();
+            const float hz = cam_pos.z();
+            t_plane = std::max(std::sqrt(std::max(hx * hx + hz * hz - level_y * level_y, 0.0f)),
+                               1.0e-3f);
+        }
         footprint = WaveFootprintM(t_plane, ray_dir.y(), pixel_angle_rad);
         WaveSurfaceHit wh;
         if (!IntersectWaveSurface(cam_pos, ray_dir, level_y, *waves, flow_x, flow_z,
@@ -153,8 +166,17 @@ inline bool EvaluateWaterPixel(const Vec3f& cam_pos, const Vec3f& cam_fwd,
         t = wh.t;
         normal = wh.normal;
     } else {
+        const bool cam_above = (cam_pos.y() > level_y);
+        const bool horizon_band = cam_above && (ray_dir.y() <= kWaterHorizonFloorRad);
         if (!PlaneHitDistance(cam_pos.y(), level_y, ray_dir.y(), &t)) {
-            return false;
+            if (!horizon_band) {
+                return false;
+            }
+            // 地平线带：交点在无穷远 ⇒ 用相机到地平线的水平距离（与 GLSL 同式）。
+            const float hx = cam_pos.x();
+            const float hz = cam_pos.z();
+            t = std::max(std::sqrt(std::max(hx * hx + hz * hz - level_y * level_y, 0.0f)),
+                         1.0e-3f);
         }
     }
 

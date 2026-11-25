@@ -1301,6 +1301,113 @@ TEST(WaterSkinGpu, FarFieldEffectsAreAdditiveAndMatchPlaneMirror) {
         EXPECT_GT(all_peak, 2.0f)
             << "开了远场平面镜太阳高光，但全图都没有亮斑 —— 这一项没接上";
     }
+    // 方位判据（2026-11-25 Danis 报「高光只在背朝太阳一侧」）：
+    // 太阳是按「靶心像素的平面镜反射方向」放的 ⇒ 高光斑**必须落在靶心附近**。
+    // 若半向量写反 180°，峰值会跑到屏幕另一侧/角上（实测 (21,2) vs 靶心 (24,16)）。
+    EXPECT_LE(std::abs(all_hx - tx), 6) << "高光方位偏了：x=" << all_hx << " 靶心 x=" << tx;
+    EXPECT_LE(std::abs(all_hy - ty), 6) << "高光方位偏了：y=" << all_hy << " 靶心 y=" << ty;
+
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}
+
+// 远场 alpha = 方向反照率（Danis 2026-11-25 定的实验）：
+//   开：F = RoughFresnelAlbedo(|rd.y|, var_p_mean)  ← 与近场同一套公式、同一个方差、无补偿
+//   关：F = 平面菲涅尔
+// 判据：
+//   ① 只影响远场（近场逐字节不变）；
+//   ② 掠射处 R_eff < 平面菲涅尔 ⇒ alpha 更小（透射更多）；
+//   ③ alpha 仍落在 (0,1]，且**在远场内部有变化**（不是常数 ⇒ 「纹理」这件事可观测）。
+TEST(WaterSkinGpu, FarAlphaUsesDirectionalAlbedo) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, 0.0f};
+    cam.target = {0.0f, 0.0f, -40.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    waves.short_wave.wind_speed_ms = 8.0f;
+    waves.far_field = true;
+    waves.far_reflect = false;
+    waves.far_specular = false;
+
+    const auto render = [&](bool albedo) {
+        waves.far_alpha_albedo = albedo;
+        f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/false,
+                 jpov::Vec3f{0.0f, 1.0f, 0.0f}, jpov::Vec3f{0.0f, 0.0f, 0.0f},
+                 jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/0.0f, &waves,
+                 /*wave_flow_tex=*/0, /*wave_time_s=*/1.3f);
+        return ReadRgba(f.water.layer().accum_tex);
+    };
+    const std::vector<float> plane = render(false);
+    const std::vector<float> albedo = render(true);
+
+    // 远场像素集（CPU 同公式）
+    const Reference ref = BuildReference(cam);
+    const float pixel_angle = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
+    float kmin = 1.0e30f;
+    for (int i = 0; i < waves.num_waves; ++i) {
+        kmin = std::min(kmin, 2.0f * 3.14159265358979f / waves.waves[i].wavelength_m);
+    }
+    const float lam_max = 2.0f * 3.14159265358979f / kmin;
+    int far_n = 0, near_changed = 0, far_lower = 0;
+    float a_min = 1.0f, a_max = 0.0f;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t b = static_cast<size_t>(y) * kWidth + x;
+            if (plane[b * 4 + 3] <= 0.0f) {
+                continue;
+            }
+            const Vec3f rd = RayAt(ref, x, y);
+            bool is_far = false;
+            if (rd.y() < -1.0e-4f) {
+                const float tp = (level - cam.position.y()) / rd.y();
+                if (tp > 0.0f) {
+                    const float fp = jpov::water::WaveFootprintM(tp, rd.y(), pixel_angle);
+                    if (fp > 1.0e-6f) {
+                        const float ppw = lam_max / fp;
+                        const float t = std::clamp((ppw - 3.0f) / (8.0f - 3.0f), 0.0f, 1.0f);
+                        // 实现是**硬二分流**（far > 0 就亲近场），所以这里也用 far > 0 判定，
+                        // 否则过渡带里的像素会被误判成「近场」而报"污染"。
+                        is_far = (1.0f - t * t * (3.0f - 2.0f * t)) > 0.0f;
+                    }
+                }
+            }
+            const float a_plane = plane[b * 4 + 3];
+            const float a_alb = albedo[b * 4 + 3];
+            if (!is_far) {
+                if (std::fabs(a_alb - a_plane) > 1.0e-6f) {
+                    ++near_changed;   // 近场必须一点不变
+                }
+                continue;
+            }
+            ++far_n;
+            if (a_alb < a_plane - 1.0e-3f) {
+                ++far_lower;
+            }
+            EXPECT_GT(a_alb, 0.0f);
+            EXPECT_LE(a_alb, 1.0f + 1.0e-4f);
+            a_min = std::min(a_min, a_alb);
+            a_max = std::max(a_max, a_alb);
+        }
+    }
+    ASSERT_GT(far_n, 50) << "远场像素太少";
+    EXPECT_EQ(near_changed, 0) << "近场被 alpha 开关污染了";
+    EXPECT_GT(far_lower, far_n / 2)
+        << "掠射处方向反照率应低于平面菲涅尔（远场 alpha 应更小）";
+    LOG(INFO) << "far alpha: plane->albedo, lower " << far_lower << "/" << far_n
+              << ", albedo range [" << a_min << ", " << a_max << "]";
+    // 「有纹理 or 糊成一片」：这里只保证它在远场内部**不是常数**（可观测），
+    // 观感判断留给本地验收。
+    EXPECT_GT(a_max - a_min, 1.0e-3f) << "远场 alpha 完全均匀（方差没有空间变化？）";
 
     glDeleteTextures(1, &depth_tex);
     f.TearDown();

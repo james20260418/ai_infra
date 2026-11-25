@@ -791,6 +791,74 @@ int RunCaptureWaterCoverage(const std::string& out_dir) {
 //   box_1_default.png   全开（箱子应当完整）
 //   box_2_skin_off.png  关水皮（对照：箱子本来长这样）
 //   box_3_waves_off.png 关波浪
+// 远场地平线覆盖回归（2026-11-25 Danis 报障）：
+//   机位 R=300 / phi=21.25° / theta=98.96875°，开远场 + 反射 + 高光。
+//   问题：天际线上 1 px 的水皮漏画（露出天球下半球地色 = 深蓝线）。
+//   本入口只拍 2 张：远场关 / 远场开（都带反射+高光），便于 A/B 那条线。
+int RunCaptureFarHorizon(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 远场地平线覆盖";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.SetOceanLab(true);              // 场景4：海面选型（风/涌/介质都按 WaterConfig）
+    app.SetWaterWaveTime(7.0f);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 报障机位（HUD 抄的 CAM pos ⇒ 反推球坐标）
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 21.25 * kDegToRad;
+    app.view_.theta = 98.96875 * kDegToRad;
+    app.view_.R     = 300.0;
+
+    app.SetWaterFarField(false);
+    app.RunOnce(input, winfo, (out_dir + "/far_off.png").c_str());
+    LOG(INFO) << "far OFF captured";
+
+    app.SetWaterFarField(true);
+    app.SetWaterFarFieldReflect(true);
+    app.SetWaterFarFieldSpecular(true);
+    app.RunOnce(input, winfo, (out_dir + "/far_on.png").c_str());
+    LOG(INFO) << "far ON captured";
+
+    // alpha=方向反照率（Danis 2026-11-25：只看透射 ⇒ 反射/高光全关）
+    app.SetWaterFarFieldReflect(false);
+    app.SetWaterFarFieldSpecular(false);
+    app.SetWaterFarFieldAlpha(true);
+    app.RunOnce(input, winfo, (out_dir + "/far_alpha_albedo.png").c_str());
+    LOG(INFO) << "far ALPHA-ALBEDO captured";
+
+    app.SetWaterFarFieldYellow(true);
+    app.RunOnce(input, winfo, (out_dir + "/far_yellow.png").c_str());
+    LOG(INFO) << "far YELLOW captured";
+
+    // 覆盖探测：wave_debug=6 = 每个**画出来的**水皮像素涂纯红（未画 = 不红）。
+    // 红/不红直接回答「地平线那一行到底有没有被 discard」。
+    app.SetWaterFarFieldYellow(false);
+    app.SetWaterWaveDebug(6);
+    app.RunOnce(input, winfo, (out_dir + "/coverage.png").c_str());
+    LOG(INFO) << "coverage captured";
+
+    app.Finalize();
+    return 0;
+}
+
 int RunCaptureBoxCut(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — box 被水皮锯（headless）";
@@ -2186,6 +2254,7 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string far_horizon_out_dir;
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
@@ -2193,6 +2262,7 @@ int main(int argc, char** argv) {
     bool ocean_far_yellow = false;  // --ocean-far-yellow：远场像素涂黄（看边界）
     bool ocean_far_reflect = false;   // --ocean-far-reflect：远场平面镜反射
     bool ocean_far_specular = false;  // --ocean-far-specular：远场平面镜太阳高光
+    bool ocean_far_alpha = false;     // --ocean-far-alpha：远场 alpha 用方向反照率
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2254,8 +2324,13 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--ocean-far-specular") == 0) {
             ocean_far = true;
             ocean_far_specular = true;
+        } else if (std::strcmp(argv[i], "--ocean-far-alpha") == 0) {
+            ocean_far = true;
+            ocean_far_alpha = true;
         } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
             ocean_lab_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-far-horizon") == 0 && i + 1 < argc) {
+            far_horizon_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
             ocean_lab_ui_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
@@ -2270,6 +2345,9 @@ int main(int argc, char** argv) {
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!far_horizon_out_dir.empty()) {
+        return RunCaptureFarHorizon(far_horizon_out_dir);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
@@ -2380,6 +2458,7 @@ int main(int argc, char** argv) {
         app.SetWaterFarFieldYellow(ocean_far_yellow);
         app.SetWaterFarFieldReflect(ocean_far_reflect);
         app.SetWaterFarFieldSpecular(ocean_far_specular);
+        app.SetWaterFarFieldAlpha(ocean_far_alpha);
     }
     if (start_water_waves) {
         app.SetWaterScene(true);

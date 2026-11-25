@@ -991,6 +991,9 @@ struct WaterWaves {
     //   · far_specular = 平面镜的太阳像
     bool far_reflect = false;
     bool far_specular = false;
+    // 远场 alpha 用「方向反照率」（∫F·p dζ）而不是平面菲涅尔；方差取张量各向同性均值，
+    // 与近场同一口径、无补偿。
+    bool far_alpha_albedo = false;
 
     // ── 大尺度流向（flow map）──
     // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。

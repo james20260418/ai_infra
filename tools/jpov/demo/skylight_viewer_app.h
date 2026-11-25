@@ -306,6 +306,8 @@ public:
     bool water_farfield_yellow_ = false;   // 调试：远场像素涂黄
     bool water_farfield_reflect_ = false;  // 远场：平面镜反射
     bool water_farfield_specular_ = false; // 远场：平面镜太阳高光
+    bool water_farfield_alpha_ = false;    // 远场：alpha 用方向反照率
+    void SetWaterFarFieldAlpha(bool on) { water_farfield_alpha_ = on; }
     void SetWaterFarFieldReflect(bool on) { water_farfield_reflect_ = on; }
     void SetWaterFarFieldSpecular(bool on) { water_farfield_specular_ = on; }
     void SetWaterFarField(bool on) { water_farfield_on_ = on; }
@@ -815,6 +817,7 @@ public:
                 wv.far_debug_yellow = water_farfield_yellow_;
                 wv.far_reflect = water_farfield_reflect_;
                 wv.far_specular = water_farfield_specular_;
+                wv.far_alpha_albedo = water_farfield_alpha_;
                 w.waves = wv;
             } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
@@ -1042,6 +1045,7 @@ private:
                 ui_.Checkbox("远海 涂黄(看边界)", &water_farfield_yellow_, row(1, 12));
                 ui_.Checkbox("远海 +反射(平面镜 env)", &water_farfield_reflect_, row(1, 13));
                 ui_.Checkbox("远海 +高光(平面镜 太阳)", &water_farfield_specular_, row(1, 14));
+                ui_.Checkbox("远海 alpha=方向反照率", &water_farfield_alpha_, row(1, 15));
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();
                 {

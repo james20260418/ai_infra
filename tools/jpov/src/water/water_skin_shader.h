@@ -118,6 +118,11 @@ uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU �
 
 const float kBackgroundDepth = 0.999999;
 
+// 地平线带（弧度）：水上且 rd.y ≤ 它时按「地平线」处理，把水皮一直盖到几何地平线。
+// 取 1e-3 rad ≈ 0.057° ≈ 半像素（720p / 60° 时 1 px ≈ 1.6e-3 rad）。
+// 只影响地平线那半个像素；其余像素 rd.y 更大 ⇒ 判定与旧代码完全一致。
+const float kWaterHorizonFloorRad = 1.0e-3;
+
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
     float eta = n1 / n2;
@@ -189,16 +194,40 @@ void ResolveSurface(out WaterSurface s) {
     s.footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
 
     // ── ③ 视线 ∩ 水面（无波浪 ⇒ 平面解析解；有波浪 ⇒ 二分求交）──
+    // ⚠️ **地平线那半个像素也必须盖住**（2026-11-25 修「天际线一行水皮覆盖不全」）：
+    //    地平线附近 1 px 的 rd.y 可能是 +2.7e-5（高出地平线 0.0017°）⇒ t_raw<0 ⇒ 旧逻辑 discard
+    //    ⇒ 露出**天球下半球的地色**（深蓝）⇒ 画面上一条 1 px 暗蓝线。
+    //    它不是「水面没被水皮覆盖」，而是「水皮在几何地平线上漏了半个像素」。
+    //    修法：水上且 rd.y ≤ kWaterHorizonFloorRad 的窄带里，t 取**到地平线的水平距离**
+    //    （有限、连续）并计为命中；着色量（cos_i / footprint / var_p）仍用原始 rd，
+    //    所以这条带以外逐像素不变。
     float t_raw = (uWaterLevelY - uCamPos.y) / s.rd.y;
-    s.hit = (t_raw > 0.0);
+    bool has_hit = (t_raw > 0.0);
+    bool cam_above_water = (uCamPos.y > uWaterLevelY);
+    bool horizon_band = cam_above_water && (s.rd.y <= kWaterHorizonFloorRad);
+    has_hit = has_hit || horizon_band;
+    s.hit = has_hit;
     s.t = max(t_raw, 1.0e-3);   // 不可见的像素用安全值，只为让导数有定义
     s.t_plane = s.t;
+    if (horizon_band && !(t_raw > 0.0)) {
+        // 射线与 y=level 平面「交于无穷远」⇒ 用相机到地平线的水平距离代表（有限值）。
+        vec2 hl = uCamPos.xz;
+        s.t_plane = max(sqrt(max(dot(hl, hl) - uWaterLevelY * uWaterLevelY, 0.0)), 1.0e-3);
+        s.t = s.t_plane;
+    }
 
     // ── ③b 法线 + 像素内法线方差（specular AA 的唯一正确来源）──
     s.N = vec3(0.0, 1.0, 0.0);
     s.wave_ok = true;
     float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
+    // ⚠️ 地平线带必须用「无穷大足迹」：WaveFootprint 内部按 rd.y 重算 t_plane，
+    //    rd.y>0 时它返回 0 ⇒ far=0 ⇒ 这一行会落进**近场**着色，而近场在 cos_i≈0 + 巨大
+    //    var_p_mean 下 RoughFresnelAlbedo ≈ 0.06 ⇒ 反射几乎全丢 ⇒ 天际线一条暗线。
+    //    地平线语义上就是「一个像素盖住整片海」⇒ 直接给上限。
     float footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, pixel_angle);
+    if (horizon_band && !(footprint > 0.0)) {
+        footprint = kWaveMaxFootprintM;
+    }
     if (uWaveCount > 0) {
         vec3 pos_w = vec3(0.0);   // WaveSurfaceHit 的 out 参数；交点由 s.t 表达，这里不读
         vec3 nrm_w = vec3(0.0, 1.0, 0.0);
@@ -274,6 +303,7 @@ uniform int uFarField;           // 0 = 关闭（旧行为：逐像素解析）�
 uniform int uFarDebugYellow;     // 1 = 远场像素涂黄（只看 far 判定的边界；不改变着色路径）
 uniform int uFarReflect;         // 1 = 远场加平面镜反射（采天球 env）
 uniform int uFarSpecular;        // 1 = 远场加平面镜太阳高光
+uniform int uFarAlphaAlbedo;     // 1 = 远场 alpha 用「方向反照率」而不是平面菲涅尔
 
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
 //   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
@@ -387,7 +417,17 @@ void ShadeAboveNear(WaterSurface s, out WaterShade o) {
 void ShadeAboveFar(WaterSurface s, out WaterShade o) {
     // 平面：入射角对 y=0 平面（|rd.y|），法线恒 +Y。
     float cos_i = abs(s.rd.y);
-    float F = FresnelDielectric(clamp(cos_i, 1.0e-4, 0.999), 1.0, uWaterIor);
+    // ── 反射率 F ──
+    // OFF：平面菲涅尔（镜面假设，理想光滑界面的反射率）。
+    // ON ：**方向反照率** R_eff = ∫ F(ζ)p(ζ)dζ（粗糙界面的角度平均反射率），
+    //      方差直接用张量的各向同性均值 `var_p_mean` —— 与近场 `ShadeAboveNear` **同一个量**、
+    //      **同一套公式**，不加任何缩放/补偿。这样远近场的 R↔T 分账口径一致，可以直接看连续性。
+    float F;
+    if (uFarAlphaAlbedo != 0) {
+        F = RoughFresnelAlbedo(cos_i, s.var_p_mean, uWaterIor);
+    } else {
+        F = FresnelDielectric(clamp(cos_i, 1.0e-4, 0.999), 1.0, uWaterIor);
+    }
     const vec3 N = vec3(0.0, 1.0, 0.0);
 
     // ① 反射项（纯平面镜）：方向 = reflect(rd, +Y)，夹到地平线以上再采天球探针。
@@ -419,13 +459,14 @@ void ShadeAboveFar(WaterSurface s, out WaterShade o) {
     // 带宽 = 盘角 + 像素足迹 + 2·远场斜率方差（α² = 2σ²，与 RoughFresnelAlbedo 同口径）。
     vec3 sun_spec = vec3(0.0);
     if (uFarSpecular != 0 && uHasSun != 0) {
-        float NoL = uSunToward.y;                 // 平面法线 +Y
-        if (cos_i > 0.0 && NoL > 0.0) {
-            // ⚠️ 半向量要用**平面镜的反射方向**算：H = normalize(reflect(rd,+Y) + toward_sun)。
-            //    直接用 -rd 会得到「折射的半向量」，太阳像会落到错误位置。
-            vec3 mirror_dir = reflect(s.rd, N);
-            vec3 Hh = normalize(mirror_dir + uSunToward);
-            float NoH = max(Hh.y, 0.0);
+        float NoV = cos_i;                        // 平面法线 +Y ⇒ NoV = |rd.y|
+        float NoL = uSunToward.y;
+        if (NoV > 0.0 && NoL > 0.0) {
+            // 半向量 = 观测方向(-rd) 与 光线方向(sun_toward) 的角平分线 ⇒ 直接复用 s.H。
+            // ⚠️ 2026-11-25 修（Danis 报：高光只在背朝太阳一侧）：曾写成
+            //    normalize(reflect(rd,+Y) + sun_toward)。`reflect(rd,N)` 已经是**出射反射线**，
+            //    再拿它当观测方向做半向量 ⇒ 方位多翻 180° ⇒ 只有背对太阳时才命中 O。
+            float NoH = max(s.H.y, 0.0);
             // 带宽只取**盘角 + 像素足迹**：纯平面镜的法线是确定已知的，斜率分布不该再当
             // 带宽叠进来（那是「法线未知」的补偿，叠了等于把光摊成一片糊 —— 2026-11-18
             // 在近场就定过这条：法线已知就不再叠 σ_slope）。远场真正的拉宽/拉糊是
@@ -435,7 +476,9 @@ void ShadeAboveFar(WaterSurface s, out WaterShade o) {
             //    摊成一片背景糊。远场先只给**盘角**带宽（真拉宽是 §10.16 M1，另立项）。
             float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius), 0.25);
             float D = GgxDistribution(NoH, a2);
-            sun_spec = uSunIrradiance * (F * D / max(4.0 * cos_i, 1.0e-6)) * NoL;
+            // 与近场同口径：E·F·D·G/(4·NoV·NoL)·NoL（之前少了 G、又多乘一次 NoL ⇒ 偏暗 NoL 倍）。
+            float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
+            sun_spec = uSunIrradiance * (F * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
         }
     }
 
