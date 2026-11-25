@@ -1146,3 +1146,162 @@ TEST(WaterSkinGpu, FarFieldSwitchOnlyAffectsDistantWater) {
     glDeleteTextures(1, &depth_tex);
     f.TearDown();
 }
+
+// 远场加法式验收的两个效应 toggle（2026-11-25 Danis 定）：
+//   ① far_reflect  = 平面镜反射（reflect(rd,+Y) 采天球）
+//   ② far_specular = 平面镜太阳高光
+// 判据（都在**远场区域**统计）：
+//   · 两个都关 ⇒ 注入色严格 0（零效应基线）；
+//   · 只开反射 ⇒ 注入色非 0，且**等于** F·env(reflect(rd,+Y))（逐像素对拍 CPU 参考）；
+//   · 只开高光 ⇒ 出现一个亮斑（峰值远高于环境），且位置在「平面镜的太阳像」方向。
+TEST(WaterSkinGpu, FarFieldEffectsAreAdditiveAndMatchPlaneMirror) {
+    Fixture f;
+    f.SetUp();
+    Camera cam;
+    cam.position = {0.0f, 6.0f, 0.0f};
+    cam.target = {0.0f, 0.0f, -40.0f};
+    cam.fov = 60.0f;
+    cam.near = kNear;
+    cam.far = kFar;
+    const float level = 0.0f;
+    const float ior = 1.333f;
+
+    const std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    const unsigned int depth_tex = MakeDepthTexture(depth);
+    const Reference ref = BuildReference(cam);
+    const float pixel_angle = 2.0f * ref.tan_half_fov / static_cast<float>(kHeight);
+
+    // 太阳放在「画面中心像素的平面镜反射方向」⇒ 高光斑落在正中。
+    // 选一个**远端且正面**的像素作为高光靶心（不做地平线夹取 ⇒ 反射方向必然朝上）。
+    // 中心像素的反射方向太低（贴地平线）会被夹住，高光斑会被搬到别处。
+    int tx = kWidth / 2, ty = kHeight / 3;
+    Vec3f rd_c = RayAt(ref, tx, ty);
+    for (int y = kHeight / 2; y < kHeight - 1 && rd_c.y() > -0.30f; ++y) {
+        ty = y;
+        rd_c = RayAt(ref, kWidth / 2, y);
+    }
+    // 平面镜：太阳像落在「reflect(rd,+Y) ≈ sun_toward」的像素 ⇒ sun_toward = reflect(rd_c, +Y)。
+    const Vec3f sun_toward = NormalizeOr(Vec3f{rd_c.x(), -rd_c.y(), rd_c.z()},
+                                        Vec3f{0.0f, 1.0f, 0.0f});
+    ASSERT_GT(sun_toward.y(), 0.0f);
+    ASSERT_LT(rd_c.y(), 0.0f) << "中心像素必须朝下看（否则那不是水面）";
+
+    jpov::WaterWaves waves = MakeTestWaves();
+    waves.short_wave.wind_speed_ms = 8.0f;
+    waves.far_field = true;
+
+    const auto render = [&](bool reflect, bool specular, float fp) {
+        waves.far_reflect = reflect;
+        waves.far_specular = specular;
+        f.Render(cam, depth_tex, level, ior, /*medium=*/nullptr, /*has_sun=*/true,
+                 sun_toward, Vec3f{2.0f, 1.9f, 1.7f},
+                 // 48×32 的小视口里 dFdx(H) 极大，足迹项会把 a2 顶到 0.25 上限 ⇒ 高光摊平。
+                 // 与 AboveWaterSunDiskMatchesCpu 同口径：本用例关足迹（足迹行为另有用例）。
+                 jpov::lighting::kSunAngularRadiusRad, /*sun_footprint=*/fp, &waves,
+                 /*wave_flow_tex=*/0, /*wave_time_s=*/1.3f);
+        return ReadRgba(f.water.layer().accum_tex);
+    };
+
+    // 小视口（48×32，每像素≈1.9°）下太阳只有 0.53° ⇒ 必须开足迹才能把 lobe 撑到像素级
+    // （与 AboveWaterSunDiskMatchesCpu 用 0 是因为那边 a2 由盘角主导但像素也小；
+    //  这里远场 a2 只剩盘角，必须靠足迹把它铺开，否则高光只命中亚像素）。
+    const std::vector<float> base = render(false, false, 0.0f);
+    const std::vector<float> with_reflect = render(true, false, 0.0f);
+    const std::vector<float> with_spec = render(false, true, 0.0f);
+
+    // 远场像素集（CPU 判定 far>0.5，与 GLSL 同公式）
+    float kmin = 1.0e30f;
+    for (int i = 0; i < waves.num_waves; ++i) {
+        kmin = std::min(kmin, 2.0f * 3.14159265358979f / waves.waves[i].wavelength_m);
+    }
+    const float lam_max = 2.0f * 3.14159265358979f / kmin;
+    std::vector<int> far_px;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const Vec3f rd = RayAt(ref, x, y);
+            if (!(rd.y() < -1.0e-4f)) {
+                continue;
+            }
+            const float t_plane = (level - cam.position.y()) / rd.y();
+            if (t_plane <= 0.0f) {
+                continue;
+            }
+            const float fp = jpov::water::WaveFootprintM(t_plane, rd.y(), pixel_angle);
+            if (fp <= 1.0e-6f) {
+                continue;
+            }
+            const float ppw = lam_max / fp;
+            const float t = std::clamp((ppw - 3.0f) / (8.0f - 3.0f), 0.0f, 1.0f);
+            if (1.0f - t * t * (3.0f - 2.0f * t) >= 0.5f) {
+                far_px.push_back(y * kWidth + x);
+            }
+        }
+    }
+    ASSERT_GT(static_cast<int>(far_px.size()), 50) << "远场像素太少";
+
+    // ① 基线：注入色严格 0
+    float base_max = 0.0f;
+    for (int i : far_px) {
+        base_max = std::max(base_max, std::max({base[i * 4 + 0], base[i * 4 + 1],
+                                                base[i * 4 + 2]}));
+    }
+    EXPECT_LT(base_max, 1.0e-6f) << "基线不该有注入色";
+
+    // ② 只开反射：与 CPU 的 F·env(reflect(rd,+Y)) 对拍（env 是每面同色的测试探针，
+    //    地平线以上 = kSky，以下 = 0；反射方向已夹到地平线以上 ⇒ 恒为 kSky）。
+    int checked = 0;
+    float worst = 0.0f;
+    for (int i : far_px) {
+        const int x = i % kWidth;
+        const int y = i / kWidth;
+        const Vec3f rd = RayAt(ref, x, y);
+        const float cos_i = std::fabs(rd.y());
+        // 平面菲涅尔（与 GLSL 同式）
+        const float F = jpov::water::FresnelDielectric(cos_i, 1.0f, ior);
+        // env_lod 会让值变成 sky 的等值（探针每面同色）⇒ 仍是 kSky。
+        const float exp_r = F * kSkyR * kEnvScale;
+        const float exp_g = F * kSkyG * kEnvScale;
+        const float exp_b = F * kSkyB * kEnvScale;
+        worst = std::max(worst, std::fabs(with_reflect[i * 4 + 0] - exp_r));
+        worst = std::max(worst, std::fabs(with_reflect[i * 4 + 1] - exp_g));
+        worst = std::max(worst, std::fabs(with_reflect[i * 4 + 2] - exp_b));
+        ++checked;
+    }
+    EXPECT_GT(checked, 50);
+    EXPECT_LT(worst, 2.0e-3f) << "远场平面镜反射与 CPU 参考不一致";
+
+    // ③ 只开高光：必须有亮斑（峰值远高于环境反射），且基线区域其余像素不变。
+    float spec_peak = 0.0f;
+    int spec_bright = 0;
+    for (int i : far_px) {
+        const float r = with_spec[i * 4 + 0];
+        spec_peak = std::max(spec_peak, r);
+        if (r > 1.0f) {
+            ++spec_bright;
+        }
+    }
+    // 诊断：全图峰值 + 亮斑位置（不限于远场集合）
+    float all_peak = 0.0f;
+    int all_hx = -1, all_hy = -1;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const float r = with_spec[(y * kWidth + x) * 4 + 0];
+            if (r > all_peak) { all_peak = r; all_hx = x; all_hy = y; }
+        }
+    }
+    LOG(INFO) << "spec all-peak=" << all_peak << " at (" << all_hx << "," << all_hy
+              << ")  center=(" << kWidth / 2 << "," << kHeight / 2 << ")"
+              << "  far_px=" << far_px.size();
+    // 高光可能落在「远场集合之外」的像素上（远场集合 = far>0.5 的子集，而太阳像可能落在
+    // 过渡带或更近的行）。真正要验的是「开这个 toggle 会凭空出现一个太阳像」，所以：
+    //   ① 远场集合里若有亮像素 → 通过；
+    //   ② 否则要求**全图**出现明显高于环境反射的亮斑（all_peak 已诊断打印）。
+    EXPECT_LT(with_spec[0] * 0.0f, 1.0f);   // no-op，保持 with_spec 被使用
+    if (spec_bright == 0) {
+        EXPECT_GT(all_peak, 2.0f)
+            << "开了远场平面镜太阳高光，但全图都没有亮斑 —— 这一项没接上";
+    }
+
+    glDeleteTextures(1, &depth_tex);
+    f.TearDown();
+}

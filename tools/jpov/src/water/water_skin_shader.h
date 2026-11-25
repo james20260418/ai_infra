@@ -272,6 +272,8 @@ uniform float uHorizonClampSin;  // 反射方向夹到地平线以上的最小 y
 uniform samplerCube uEnvCube;    // 天光探针（大气色，不含日月盘）
 uniform int uFarField;           // 0 = 关闭（旧行为：逐像素解析）；1 = 开启远场二分流
 uniform int uFarDebugYellow;     // 1 = 远场像素涂黄（只看 far 判定的边界；不改变着色路径）
+uniform int uFarReflect;         // 1 = 远场加平面镜反射（采天球 env）
+uniform int uFarSpecular;        // 1 = 远场加平面镜太阳高光
 
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：
 //   R_eff(μo, α) = ∫ f_ss(ωo,ωi)·F(ωo·h)·cosθi dωi
@@ -377,21 +379,71 @@ void ShadeAboveNear(WaterSurface s, out WaterShade o) {
 }
 
 // ── 远场着色：**零效应基线 + 加法式验收**（2026-11-25 Danis 定）──
-// 基线 = 只有「平面镜的透射 alpha」：
-//   · 反射 C = 0（不采探针、不要高光、不要镜面）；
-//   · alpha = 1 − (1 − F_plane)/n²，F_plane = 平面菲涅尔（法线 = +Y）；
-//   · 法线不参与（远场无解析法线可用）。
-// 之后要加效应（F_eff / 探针模糊 / 椭圆核 / 高光…）一律**在这里往上加**，
-// 每项配一个 toggle，便于逐项 A/B。
+// 一切远场效应都建立在**纯平面假设**上（法线 = +Y，远场没有可用的解析法线）：
+//   基线      = 只有平面菲涅尔透射（C = 0，alpha = 1 − (1−F)/n²）；
+//   +反射     = 平面镜反射：reflect(rd, +Y) 采天球 env（uFarReflect）；
+//   +镜面高光 = 平面镜的太阳像（uFarSpecular），带宽 = 盘角 + 像素足迹 + 远场斜率方差。
+// 每项一个 toggle，可独立开关做 A/B。
 void ShadeAboveFar(WaterSurface s, out WaterShade o) {
-    // 平面菲涅尔：入射角对 y=0 平面（|rd.y|）。
+    // 平面：入射角对 y=0 平面（|rd.y|），法线恒 +Y。
     float cos_i = abs(s.rd.y);
     float F = FresnelDielectric(clamp(cos_i, 1.0e-4, 0.999), 1.0, uWaterIor);
-    o.C = vec3(0.0);
+    const vec3 N = vec3(0.0, 1.0, 0.0);
+
+    // ① 反射项（纯平面镜）：方向 = reflect(rd, +Y)，夹到地平线以上再采天球探针。
+    vec3 refl = vec3(0.0);
+    float env_lod = 0.0;
+    if (uFarReflect != 0) {
+        vec3 rdir = reflect(s.rd, N);
+        float xz = sqrt(rdir.x * rdir.x + rdir.z * rdir.z);
+        if (rdir.y < uHorizonClampSin) {
+            if (xz > 1.0e-6) {
+                float scale = sqrt(1.0 - uHorizonClampSin * uHorizonClampSin) / xz;
+                rdir = vec3(rdir.x * scale, uHorizonClampSin, rdir.z * scale);
+            } else {
+                rdir = vec3(0.0, 1.0, 0.0);
+            }
+        } else {
+            rdir = normalize(rdir);
+        }
+        // 纯平面假设：法线恒定 ⇒ 只有像素足迹带来的模糊（无解析法线跳变项）。
+        // 平面镜把斜率放大 2× ⇒ 模糊角 ≈ 2σ，σ 取远场张量的各向同性平均。
+        const float kEnvTexelAngle = 1.5707963268 / 128.0;
+        float sigma = sqrt(max(s.var_p_mean, 0.0));
+        float need = log2(max(2.0 * sigma, 1.0e-6) / kEnvTexelAngle);
+        env_lod = clamp(need, 0.0, 1.5);
+        refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
+    }
+
+    // ② 太阳的像（纯平面镜）：NoV = |rd.y|（= cos_i），无自遮挡，Smith G2 省略。
+    // 带宽 = 盘角 + 像素足迹 + 2·远场斜率方差（α² = 2σ²，与 RoughFresnelAlbedo 同口径）。
+    vec3 sun_spec = vec3(0.0);
+    if (uFarSpecular != 0 && uHasSun != 0) {
+        float NoL = uSunToward.y;                 // 平面法线 +Y
+        if (cos_i > 0.0 && NoL > 0.0) {
+            // ⚠️ 半向量要用**平面镜的反射方向**算：H = normalize(reflect(rd,+Y) + toward_sun)。
+            //    直接用 -rd 会得到「折射的半向量」，太阳像会落到错误位置。
+            vec3 mirror_dir = reflect(s.rd, N);
+            vec3 Hh = normalize(mirror_dir + uSunToward);
+            float NoH = max(Hh.y, 0.0);
+            // 带宽只取**盘角 + 像素足迹**：纯平面镜的法线是确定已知的，斜率分布不该再当
+            // 带宽叠进来（那是「法线未知」的补偿，叠了等于把光摊成一片糊 —— 2026-11-18
+            // 在近场就定过这条：法线已知就不再叠 σ_slope）。远场真正的拉宽/拉糊是
+            // §10.16 M1，那是**另一项**效应，需要单独 toggle 验收。
+            // ⚠️ 远场像素的足迹**极大**（λ/footprint < 3 px），dFdx(H) 在这种尺度上已经不
+            //    是「像素足迹」而是噪量；直接用会把 a2 顶到上限（0.25 ⇒ 半角 26°）⇒ 太阳像
+            //    摊成一片背景糊。远场先只给**盘角**带宽（真拉宽是 §10.16 M1，另立项）。
+            float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius), 0.25);
+            float D = GgxDistribution(NoH, a2);
+            sun_spec = uSunIrradiance * (F * D / max(4.0 * cos_i, 1.0e-6)) * NoL;
+        }
+    }
+
+    o.C = F * refl + sun_spec;
     o.alpha = 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
     o.fresnel_debug = F;
-    o.env_lod_debug = 0.0;
-    o.refl_debug = vec3(0.0);
+    o.env_lod_debug = env_lod;
+    o.refl_debug = refl;
 }
 
 // 远场涂黄（调试可视化）：返回 vec3(-1) 表示「不涂」，调用方决定如何混。

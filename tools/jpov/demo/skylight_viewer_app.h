@@ -304,6 +304,10 @@ public:
     // 椭圆核采样、反射率/透射走斜率分布的积分。默认关（旧行为逐字节不变）。
     bool water_farfield_on_ = false;
     bool water_farfield_yellow_ = false;   // 调试：远场像素涂黄
+    bool water_farfield_reflect_ = false;  // 远场：平面镜反射
+    bool water_farfield_specular_ = false; // 远场：平面镜太阳高光
+    void SetWaterFarFieldReflect(bool on) { water_farfield_reflect_ = on; }
+    void SetWaterFarFieldSpecular(bool on) { water_farfield_specular_ = on; }
     void SetWaterFarField(bool on) { water_farfield_on_ = on; }
     void SetWaterFarFieldYellow(bool on) { water_farfield_yellow_ = on; }
     float water_wave_amp_scale_ = 1.0f;
@@ -809,6 +813,8 @@ public:
                                : (water_wave_normal_view_ ? 1 : 0);
                 wv.far_field = water_farfield_on_;
                 wv.far_debug_yellow = water_farfield_yellow_;
+                wv.far_reflect = water_farfield_reflect_;
+                wv.far_specular = water_farfield_specular_;
                 w.waves = wv;
             } else if (water_waves_on_) {
                 jpov::WaterWaves wv = water_waves_;
@@ -910,7 +916,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 14;   // 场景4：row(0,0..13) + row(1,0..10)
+        constexpr int kOceanLabPanelRows = 16;   // 场景4：row(0,0..13) + row(1,0..15)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
                         : IsWaterScene() ? kWaterPanelRows
@@ -1034,6 +1040,8 @@ private:
                 // 远海（只作用于水上）：二分流，远场走独立着色路径。
                 ui_.Checkbox("远海 开启 (水上)", &water_farfield_on_, row(1, 11));
                 ui_.Checkbox("远海 涂黄(看边界)", &water_farfield_yellow_, row(1, 12));
+                ui_.Checkbox("远海 +反射(平面镜 env)", &water_farfield_reflect_, row(1, 13));
+                ui_.Checkbox("远海 +高光(平面镜 太阳)", &water_farfield_specular_, row(1, 14));
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();
                 {

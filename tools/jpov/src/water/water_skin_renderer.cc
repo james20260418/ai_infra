@@ -234,6 +234,10 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
                 (in.waves != nullptr && in.waves->far_field) ? 1 : 0);
     glUniform1i(shader_mgr_->GetUniform(prog, "uFarDebugYellow"),
                 (in.waves != nullptr && in.waves->far_debug_yellow) ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uFarReflect"),
+                (in.waves != nullptr && in.waves->far_reflect) ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uFarSpecular"),
+                (in.waves != nullptr && in.waves->far_specular) ? 1 : 0);
 }
 
 void WaterSkinRenderer::Draw(const Inputs& in) {

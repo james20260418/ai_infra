@@ -2191,6 +2191,8 @@ int main(int argc, char** argv) {
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
     bool ocean_far = false;         // --ocean-far：开远场二分流（水上）
     bool ocean_far_yellow = false;  // --ocean-far-yellow：远场像素涂黄（看边界）
+    bool ocean_far_reflect = false;   // --ocean-far-reflect：远场平面镜反射
+    bool ocean_far_specular = false;  // --ocean-far-specular：远场平面镜太阳高光
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2246,6 +2248,12 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--ocean-far-yellow") == 0) {
             ocean_far = true;
             ocean_far_yellow = true;
+        } else if (std::strcmp(argv[i], "--ocean-far-reflect") == 0) {
+            ocean_far = true;
+            ocean_far_reflect = true;
+        } else if (std::strcmp(argv[i], "--ocean-far-specular") == 0) {
+            ocean_far = true;
+            ocean_far_specular = true;
         } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
             ocean_lab_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
@@ -2370,6 +2378,8 @@ int main(int argc, char** argv) {
         app.SetOceanLab(true);
         app.SetWaterFarField(ocean_far);
         app.SetWaterFarFieldYellow(ocean_far_yellow);
+        app.SetWaterFarFieldReflect(ocean_far_reflect);
+        app.SetWaterFarFieldSpecular(ocean_far_specular);
     }
     if (start_water_waves) {
         app.SetWaterScene(true);

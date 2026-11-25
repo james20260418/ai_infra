@@ -986,6 +986,11 @@ struct WaterWaves {
     // 调试：把**被判定为远场**的像素涂黄（只看 far 判定的边界）。不影响近场；与 far_field 独立 ——
     //   far_field 关时没有远场，涂黄自然无效。
     bool far_debug_yellow = false;
+    // 远场效应开关（加法式验收，全部建立在纯平面假设上）：
+    //   · far_reflect  = 平面镜反射（reflect(rd,+Y) 采天球 env）
+    //   · far_specular = 平面镜的太阳像
+    bool far_reflect = false;
+    bool far_specular = false;
 
     // ── 大尺度流向（flow map）──
     // 一张 RG 纹理：uv = p.xz * flow_uv_scale，rg ∈ [0,1] 解码成 (rg−0.5)*2。
