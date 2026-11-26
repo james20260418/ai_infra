@@ -178,10 +178,17 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
     // V2 唯一的门控量：每像素采样数（GLSL 侧还有 clamp 兜底，这里负责拦住 API 误用）。
     glUniform1i(shader_mgr_->GetUniform(prog, "uSampleCount"), sample_count);
     // 方差系两个消费点的开关（水面以上着色才消费；水下 program 没有这两个 uniform ⇒ no-op）。
-    const bool env_lod_on = (in.waves == nullptr) || in.waves->v2_env_lod;
-    const bool sun_lobe_on = (in.waves == nullptr) || in.waves->v2_sun_lobe;
-    glUniform1i(shader_mgr_->GetUniform(prog, "uEnvLodOn"), env_lod_on ? 1 : 0);
-    glUniform1i(shader_mgr_->GetUniform(prog, "uSunLobeOn"), sun_lobe_on ? 1 : 0);
+    if (in.waves == nullptr) {
+        glUniform1i(shader_mgr_->GetUniform(prog, "uEnvLodOn"), 1);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM1On"), 1);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM2On"), 1);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM3On"), 0);
+    } else {
+        glUniform1i(shader_mgr_->GetUniform(prog, "uEnvLodOn"), in.waves->v2_env_lod ? 1 : 0);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM1On"), in.waves->v2_m1 ? 1 : 0);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM2On"), in.waves->v2_m2 ? 1 : 0);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uM3On"), in.waves->v2_m3 ? 1 : 0);
+    }
     // 波浪局部系的相机 xz：**必须在 double 里减**（相机的 float 值已经是 1e5 量级时，
     // 在着色器里减已经晚了 —— 那一步之前 `cam + rd·t` 就已经丢位了）。
     const float origin_x = water::WavePhaseOriginM(cam.position.x());

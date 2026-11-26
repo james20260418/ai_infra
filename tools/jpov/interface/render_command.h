@@ -1067,13 +1067,20 @@ struct WaterWaves {
     float v2_truncate_px_main = 0.0f;
     float v2_truncate_px_detail = 1.0f;
 
-    // ② 方差系的两个消费点开关（Danis 2026-11-26：交互式调优用）。
-    //    σ² 的口径已改成「按谱截断自动推导」（= V1 的 WaveSlopeTensor 迹，含 MSS + 被裁的波）。
-    //    · `v2_env_lod`  false ⇒ 探针 LOD 恒 0（不模糊；看纯采样能撑到多远）
-    //    · `v2_sun_lobe` false ⇒ 太阳 lobe 只剩盘角带宽（不叠加 2σ²；看 M1 单独做会暗多少）
+    // ② 亚像素补偿的三条通道（known_issue §10.16 的 M1/M2/M3），各自一个开关便于比对。
+    //    三条通道补偿的都是「**没解析的斜率**」：近场只有 MSS 属于这一档（≲10 m），
+    //    10 m 之外细节波逐段掉进"未解析"，700 m 只剩主波 + MSS。
+    //    · `v2_m1`  lobe 拉宽：`a2 = min(盘角² + 2σ², 0.25)`。σ² 与 F_eff/env_lod 同一份
+    //               （MSS + 被截断的表内波）。**必须与 M2 一起开**，否则能量不守恒。
+    //    · `v2_m2`  多散射能量对账：`spec *= 1 + F̄·(1−E_ss)/E_ss`（Turquin 2019 形式；
+    //               `E_ss` 用 Karis 的解析 DFG 拟合，TODO 换 32×32 Kulla–Conty LUT）。
+    //    · `v2_m3`  glints：各向异性 lobe（主轴 = 风向，比例取 MSS 的 2.7:1）
+    //               + 静态颗粒调制（近似 Yan 2017；不是完整 position-free glints）。
     //    ⚠️ F_eff（⇒ α / 透射率）**没有开关**：那是菲涅尔的物理口径，关掉就不是水了。
     bool v2_env_lod = true;
-    bool v2_sun_lobe = true;
+    bool v2_m1 = true;
+    bool v2_m2 = true;
+    bool v2_m3 = false;
 };
 
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。

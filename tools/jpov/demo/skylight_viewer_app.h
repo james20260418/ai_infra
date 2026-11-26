@@ -352,9 +352,11 @@ public:
     // 两个截断乘数：主波 / 细节波分开（0 = 该族不截断，1 = 与 V1 同线）。
     float water_v2_truncate_main_ = 0.0f;     // 验收样貌：主波不截断
     float water_v2_truncate_detail_ = 1.0f;   // 细节波走 V1 那条 3~8 px 线
-    // 方差系两个消费点的开关（调优用；F_eff 没有开关）。
+    // 亚像素补偿三条通道 + 探针模糊（调优用；F_eff 没有开关）。
     bool water_v2_env_lod_ = true;
-    bool water_v2_sun_lobe_ = true;
+    bool water_v2_m1_ = true;    // lobe 拉宽
+    bool water_v2_m2_ = true;    // 多散射能量对账
+    bool water_v2_m3_ = false;   // glints（各向异性 + 颗粒）
     void SetWaterSkinV2(bool on) { water_v2_ = on; }
     void SetWaterSkinV2Samples(int sample_count) {
         water_v2_samples_f_ = static_cast<float>(sample_count);
@@ -362,7 +364,9 @@ public:
     void SetWaterSkinV2TruncateMain(float t) { water_v2_truncate_main_ = t; }
     void SetWaterSkinV2TruncateDetail(float t) { water_v2_truncate_detail_ = t; }
     void SetWaterSkinV2EnvLod(bool on) { water_v2_env_lod_ = on; }
-    void SetWaterSkinV2SunLobe(bool on) { water_v2_sun_lobe_ = on; }
+    void SetWaterSkinV2M1(bool on) { water_v2_m1_ = on; }
+    void SetWaterSkinV2M2(bool on) { water_v2_m2_ = on; }
+    void SetWaterSkinV2M3(bool on) { water_v2_m3_ = on; }
 
     // ── 水下验收物体：蓝人（skinned）──
     // 用 InstancedInstanceState 的静态语义（pose_a = pose_b = 0 = 恒等 pose）：一次 instanced
@@ -869,7 +873,9 @@ public:
             w.waves.v2_truncate_px_main = water_v2_truncate_main_;
             w.waves.v2_truncate_px_detail = water_v2_truncate_detail_;
             w.waves.v2_env_lod = water_v2_env_lod_;
-            w.waves.v2_sun_lobe = water_v2_sun_lobe_;
+            w.waves.v2_m1 = water_v2_m1_;
+            w.waves.v2_m2 = water_v2_m2_;
+            w.waves.v2_m3 = water_v2_m3_;
             cmds->water = w;
         }
 
@@ -935,7 +941,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 19;   // 场景4：row(0,0..13) + row(1,0..18)
+        constexpr int kOceanLabPanelRows = 21;   // 场景4：row(0,0..13) + row(1,0..20)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
                         : IsWaterScene() ? kWaterPanelRows
@@ -1096,9 +1102,11 @@ private:
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 14))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
-                // 方差系两个消费点（σ² 本身已按谱截断自动推导，没有开关）
+                // 亚像素补偿三条通道（σ² 本身按谱截断自动推导，没有开关）
                 ui_.Checkbox("V2 探针模糊 (env LOD←σ²)", &water_v2_env_lod_, row(1, 17));
-                ui_.Checkbox("V2 太阳 lobe (a2←2σ²)", &water_v2_sun_lobe_, row(1, 18));
+                ui_.Checkbox("V2 M1 lobe 拉宽 (a2←2σ²)", &water_v2_m1_, row(1, 18));
+                ui_.Checkbox("V2 M2 多散射对账", &water_v2_m2_, row(1, 19));
+                ui_.Checkbox("V2 M3 glints (各向异性+颗粒)", &water_v2_m3_, row(1, 20));
 
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();

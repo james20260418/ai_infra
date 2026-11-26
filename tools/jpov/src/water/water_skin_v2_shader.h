@@ -103,9 +103,11 @@ uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 
 // 每像素法线采样数 S ∈ [1, 16]（renderer 已 CHECK）。S = 1 ⇒ 只取中心法线。
 uniform int uSampleCount;
-// 方差系两个消费点的开关（交互调优用；F_eff 没有开关，见 render_command.h）。
+// 亚像素补偿三条通道的开关（known_issue §10.16 的 M1/M2/M3；F_eff 没有开关）。
 uniform int uEnvLodOn;    // 0 ⇒ 探针 LOD 恒 0
-uniform int uSunLobeOn;   // 0 ⇒ 太阳 lobe 只剩盘角带宽
+uniform int uM1On;        // lobe 拉宽：a2 = min(盘角² + 2σ², 0.25)
+uniform int uM2On;        // 多散射能量对账（M1 的必要配件）
+uniform int uM3On;        // glints：各向异性 lobe + 静态颗粒
 
 const int   kMaxSkinSamples = 16;
 const float kBackgroundDepth = 0.999999;
@@ -404,6 +406,65 @@ float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
 //   sigma2 MSS 斜率方差（**唯一**的带宽来源；V2 没有 footprint/导数项）
 // 带宽 a2 = 盘角² + 2σ²，**无上限**（V1 那个 min(…, 0.25) 是给会爆的 dFdx 兜底的，
 // V2 里没有 dFdx ⇒ 兜底退休）。
+// ── 镜面 lobe 的宽度：M1（lobe 拉宽）──────────────────────────────────────
+// 未解析的斜率方差 σ² 折进 GGX 的 α²：**方差相加**（GGX 的 NDF 与斜率分布都是斜率空间的
+// 分布 ⇒ 卷积 = 方差相加）。上限 0.25 与 V1 的数值兜底同口径（α ≤ 0.5 ⇒ 半角 ≈ 28.6°）。
+float SkinV2LobeA2(float sigma2) {
+    float a2 = GgxDiskBandwidthA2(uSunAngularRadius);
+    if (uM1On != 0) {
+        a2 = min(a2 + 2.0 * sigma2, 0.25);
+    }
+    return a2;
+}
+
+// ── M2：多散射能量对账 ────────────────────────────────────────────────────
+// 单次散射的 GGX 在粗糙时会丢能量（微面元之间的二次反弹被 G 吃掉）。
+// 形式取 Turquin 2019：`spec *= 1 + F̄·(1−E_ss)/E_ss`；
+// `E_ss(NoV, α)` 用 Karis 的解析 DFG 拟合（`EnvBRDFApprox(f0=1)` 的 A+B），
+// 不是 Kulla–Conty 32×32 LUT —— 口径记在 render_command.h 的 TODO 里。
+float SkinV2SingleScatterAlbedo(float NoV, float a2) {
+    // roughness 用 α（= √a2），与 GGX 的 α 口径一致。
+    float roughness = sqrt(max(a2, 0.0));
+    vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * clamp(NoV, 1.0e-4, 1.0))) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    // f0 = 1 ⇒ A·1 + B
+    return clamp(ab.x + ab.y, 1.0e-3, 1.0);
+}
+
+float SkinV2MultiScatterGain(float NoV, float a2, float F) {
+    if (uM2On == 0) {
+        return 1.0;
+    }
+    float e = SkinV2SingleScatterAlbedo(NoV, a2);
+    // F̄：把 F 当成单值（掠射时 F→1，法向时 F→0.02），乘在"丢失的那部分能量"上。
+    return 1.0 + F * (1.0 - e) / e;
+}
+
+// ── M3：glints（各向异性 lobe + 静态颗粒）────────────────────────────────
+// 说明：这是 **Yan et al. 2017 position-free glints 的近似**，不是完整实现。
+//   ① 各向异性：主轴 = 风向，along:cross 取 MSS 的 2.7:1（Cox–Munk 实测比）。
+//   ② 颗粒：亚像素面元是离散的 ⇒ 高光强度有**空间方差**。这里用静态 hash 调制，
+//      幅度随 lobe 宽度增长（lobe 越宽 ⇒ 最近一次"对齐"的面元越少 ⇒ 颗粒越显眼）。
+//      静态（不依赖时间）⇒ 与 gold 兼容；真做闪烁要配 TAA，那是后话。
+float SkinV2Hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// 各向异性 GGX 的 D（Burley/Filament 形式）。
+float SkinV2GgxAnisoD(float NoH, float ToH, float BoH, float at, float ab) {
+    float a2 = at * ab;
+    vec3 v = vec3(ab * ToH, at * BoH, a2 * NoH);
+    float v2 = dot(v, v);
+    float w2 = a2 / max(v2, 1.0e-12);
+    return a2 * w2 * w2 / 3.141592653589793;
+}
+
+// 单个样本的太阳的像。M1/M2/M3 全部从这里进出。
 vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
     if (uHasSun == 0) {
         return vec3(0.0);
@@ -414,12 +475,37 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
         return vec3(0.0);
     }
     float NoH = max(dot(H, N), 0.0);
-    // 调优开关：关掉 = 只剩盘角带宽（不叠加 2σ²）。M1 单独做会变暗（缺 M2 多散射补偿）。
-    float a2 = GgxDiskBandwidthA2(uSunAngularRadius) +
-               ((uSunLobeOn != 0) ? 2.0 * sigma2 : 0.0);
-    float D = GgxDistribution(NoH, a2);
+    float a2 = SkinV2LobeA2(sigma2);
+
+    float D;
+    if (uM3On != 0) {
+        // 各向异性：主轴 = 风向在水面切平面内的投影；along:cross = 2.7:1。
+        vec2 wd = uShortWaveDir;
+        vec3 T = vec3(wd.x, 0.0, wd.y);
+        T = T - N * dot(N, T);
+        float tl = length(T);
+        T = (tl > 1.0e-5) ? T / tl : vec3(1.0, 0.0, 0.0);
+        vec3 B = cross(N, T);
+        // 方差按两轴分：along 拿 2.7/3.7，cross 拿 1.0/3.7（张量迹不变）。
+        float at = sqrt(max(a2 * 2.7 / 3.7, 1.0e-8));
+        float ab = sqrt(max(a2 * 1.0 / 3.7, 1.0e-8));
+        D = SkinV2GgxAnisoD(NoH, dot(T, H), dot(B, H), at, ab);
+    } else {
+        D = GgxDistribution(NoH, a2);
+    }
     float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
-    return uSunIrradiance * (F * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
+    vec3 spec = uSunIrradiance * (F * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
+
+    // M2：能量对账（与 M1 配套；单独开 M2 就是"在窄 lobe 上凭空加能量"，只作对照）。
+    spec *= SkinV2MultiScatterGain(NoV, a2, F);
+
+    // M3：静态颗粒（幅度随 lobe 宽度增长；窄 lobe（近场）几乎为 0）。
+    if (uM3On != 0) {
+        float amp = clamp(1.6 * sqrt(max(a2, 0.0)), 0.0, 0.8);
+        float n = SkinV2Hash12(gl_FragCoord.xy);
+        spec *= 1.0 + amp * (2.0 * n - 1.0);
+    }
+    return spec;
 }
 
 void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
@@ -463,9 +549,7 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         if (i == 0) {
             o.fresnel_debug = F;
             o.refl_debug = refl;
-            // 与 SkinV2SunSpecular 内部同一条式子（同一份 sigma2_trunc）。
-            o.a2_debug = GgxDiskBandwidthA2(uSunAngularRadius) +
-                         ((uSunLobeOn != 0) ? 2.0 * sigma2_trunc : 0.0);
+            o.a2_debug = SkinV2LobeA2(sigma2_trunc);
         }
     }
     o.C = sum_c / float(S);

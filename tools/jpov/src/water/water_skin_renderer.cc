@@ -179,8 +179,10 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     // waves == nullptr（没开波浪）时按默认 1/1 上传 ⇒ 与历史行为逐字节相同。
     glUniform1i(shader_mgr_->GetUniform(prog, "uEnvLodOn"),
                 ((in.waves == nullptr) || in.waves->v2_env_lod) ? 1 : 0);
+    // V1 的 lobe 只有两个来源（盘角 + dFdx 项），没有 M1/M2/M3；这里让 M1 开关同时管它，
+    // 这样"关掉 lobe"在 V1/V2 上是同一件事（对照用）。
     glUniform1i(shader_mgr_->GetUniform(prog, "uSunLobeOn"),
-                ((in.waves == nullptr) || in.waves->v2_sun_lobe) ? 1 : 0);
+                ((in.waves == nullptr) || in.waves->v2_m1) ? 1 : 0);
 
     // ── 介质 uniform（水下支路的 S_P(∞) 与水平面/折射率）──
     // 水平面高度与 ior 总是上传（即使没有介质也要能画界面）；

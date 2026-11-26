@@ -753,7 +753,7 @@ TEST(WaterSkinV2Gpu, V2HorizonClampCoversTheSeam) {
 //    判据用 debug 11（输出 `env_lod / 1.5`）：
 //    ① 细节波 T=1（真截断）的 env_lod **必须大于** T=0（只有 MSS）—— 这就是"自动量"接上了；
 //    ② 关掉 `v2_env_lod` ⇒ debug 11 全 0（开关真的断开了）；
-//    ③ 关掉 `v2_sun_lobe` ⇒ 图像与开着不同（a2 那条同样接上了）。
+//    ③ 关掉 `v2_m1` ⇒ 图像与开着不同（M1 那条同样接上了）。
 TEST(WaterSkinV2Gpu, V2SigmaComesFromTruncationAndTogglesWork) {
     Fixture f;
     f.SetUp();
@@ -780,7 +780,7 @@ TEST(WaterSkinV2Gpu, V2SigmaComesFromTruncationAndTogglesWork) {
         w.v2_truncate_px_main = 0.0f;
         w.v2_truncate_px_detail = detail_t;
         w.v2_env_lod = env_lod;
-        w.v2_sun_lobe = sun_lobe;
+        w.v2_m1 = sun_lobe;
         s.waves = &w;
         s.wave_debug = wave_debug;
         f.DrawV2(s, 4);
@@ -836,7 +836,7 @@ TEST(WaterSkinV2Gpu, V2SigmaComesFromTruncationAndTogglesWork) {
     const std::vector<float> lobe_on = render(8.0f, 0, 1.0f, true, /*sun_lobe=*/true);
     const std::vector<float> lobe_off = render(8.0f, 0, 1.0f, true, /*sun_lobe=*/false);
     EXPECT_GT(mean_abs_diff(lobe_on, lobe_off), 1.0e-4)
-        << "v2_sun_lobe 开关对画面没有影响 —— a2 那条没接上";
+        << "v2_m1 开关对画面没有影响 —— M1 那条没接上";
 
     glDeleteTextures(1, &s.depth_tex);
     f.TearDown();
@@ -874,7 +874,7 @@ TEST(WaterSkinV2Gpu, V2SunLobeOnlyWidensWherePixelsCannotResolve) {
         w.v2_truncate_px_main = 0.0f;
         w.v2_truncate_px_detail = 1.0f;
         w.v2_env_lod = true;
-        w.v2_sun_lobe = sun_lobe;
+        w.v2_m1 = sun_lobe;
         s.waves = &w;
         s.wave_debug = 14;
         f.DrawV2(s, 4);
@@ -907,7 +907,7 @@ TEST(WaterSkinV2Gpu, V2SunLobeOnlyWidensWherePixelsCannotResolve) {
     // ② 掠射：截断带方差必须进来 ⇒ a2 明显 > 盘角。
     EXPECT_GT(graze_on, 1.0e-3) << "掠射 a2 没有张开 —— 截断带方差没进 a2（M1 丢了）";
     // ③ 开关关掉 ⇒ 只剩盘角。
-    EXPECT_LT(graze_off, 1.0e-4) << "关掉 v2_sun_lobe 后 a2 仍然很大 —— 开关没接上";
+    EXPECT_LT(graze_off, 1.0e-4) << "关掉 M1 后 a2 仍然很大 —— 开关没接上";
     // ④ 近场 vs 掠射必须拉开数量级（否则 a2 是个常数）。
     EXPECT_GT(graze_on, 10.0 * near_on) << "近场/掠射的 a2 没拉开 —— a2 与距离无关";
 
@@ -915,5 +915,90 @@ TEST(WaterSkinV2Gpu, V2SunLobeOnlyWidensWherePixelsCannotResolve) {
     f.TearDown();
 }
 
+
+
+// ⑪ M2 必须"补能量"、M3 必须是静态颗粒、M1 的 a2 必须有 0.25 上限。
+TEST(WaterSkinV2Gpu, V2M2CompensatesM3StaticAndM1Capped) {
+    Fixture f;
+    f.SetUp();
+    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.cam.position = {0.0f, 3.0f, -30.0f};
+    s.cam.target = {0.0f, 0.0f, -200.0f};
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.has_sun = true;
+    s.sun_irradiance = {3.0f, 2.8f, 2.4f};
+    s.sun_toward = Normalized(Vec3f{0.0f, 0.30f, -0.95f});
+
+    const auto render = [&](bool m1, bool m2, bool m3, int wave_debug) {
+        jpov::WaterWaves w = waves;
+        w.short_wave.wind_speed_ms = 8.0f;
+        w.short_wave.dir_x = 1.0f;
+        w.short_wave.dir_z = 0.0f;
+        w.v2_m1 = m1;
+        w.v2_m2 = m2;
+        w.v2_m3 = m3;
+        s.waves = &w;
+        s.wave_debug = wave_debug;
+        f.DrawV2(s, 4);
+        return ReadRgba(f.v2.layer().accum_tex);
+    };
+    const auto mean_covered = [](const std::vector<float>& a, bool rgb) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            if (!(a[i + 3] > 0.0f)) {
+                continue;
+            }
+            if (rgb) {
+                for (int c = 0; c < 3; ++c) {
+                    sum += a[i + c];
+                }
+                n += 3;
+            } else {
+                sum += a[i];
+                ++n;
+            }
+        }
+        return n ? sum / static_cast<double>(n) : 0.0;
+    };
+
+    // ① M2 补能量：M1 开着（宽 lobe）时，M2 打开必须让画面变亮。
+    const double m1_only = mean_covered(render(true, false, false, 0), true);
+    const double m1m2 = mean_covered(render(true, true, false, 0), true);
+    SCOPED_TRACE(testing::Message() << "M1 " << m1_only << " → M1+M2 " << m1m2);
+    EXPECT_GT(m1m2, m1_only) << "M2 没有补能量（应当乘 1 + F(1−E)/E > 1）";
+    EXPECT_LT(m1m2, 3.0 * m1_only) << "M2 增益大得离谱 —— E_ss 口径写错了";
+
+    // ② M3 必须是**静态**颗粒：同参数渲两次要逐位相同（否则它与 gold/复现都不兼容）。
+    const std::vector<float> m3_a = render(true, true, true, 0);
+    const std::vector<float> m3_b = render(true, true, true, 0);
+    EXPECT_EQ(m3_a, m3_b) << "M3 不是静态的 —— 颗粒不该依赖时间/帧号";
+    // 而且必须真的改变画面。
+    const std::vector<float> m3_off = render(true, true, false, 0);
+    double d = 0.0;
+    for (size_t i = 0; i + 3 < m3_off.size(); i += 4) {
+        d += std::fabs(m3_a[i] - m3_off[i]);
+    }
+    EXPECT_GT(d, 1.0) << "M3 开关对画面没有影响 —— glints 那条没接上";
+
+    // ③ M1 的 a2 上限 0.25（debug 14 的满量程就是 0.25 ⇒ 值必须 ≤ 1）。
+    const std::vector<float> a2_dbg = render(true, true, false, 14);
+    double peak = 0.0;
+    for (size_t i = 0; i + 3 < a2_dbg.size(); i += 4) {
+        if (a2_dbg[i + 3] > 0.0f) {
+            peak = std::max(peak, static_cast<double>(a2_dbg[i]));
+        }
+    }
+    EXPECT_LE(peak, 1.0 + 1e-3) << "a2 超过 0.25 上限";
+    EXPECT_GT(peak, 0.01) << "掠射时 a2 几乎没有张开 —— M1 没生效";
+
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
 
 }  // namespace

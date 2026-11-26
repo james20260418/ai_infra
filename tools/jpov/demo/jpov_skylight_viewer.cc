@@ -2273,7 +2273,9 @@ int main(int argc, char** argv) {
     bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
     int water_env_lod = -1;               // --water-env-lod 0|1：V2 探针模糊（σ²⇒env LOD）
-    int water_sun_lobe = -1;              // --water-sun-lobe 0|1：V2 太阳 lobe（σ²⇒a2）
+    int water_m1 = -1;                    // --water-m1 0|1：V2 lobe 拉宽
+    int water_m2 = -1;                    // --water-m2 0|1：V2 多散射能量对账
+    int water_m3 = -1;                    // --water-m3 0|1：V2 glints（各向异性+颗粒）
     float water_truncate_main = -1.0f;    // --water-truncate-main T：主波截断乘数（<0 = 不动）
     float water_truncate_detail = -1.0f;  // --water-truncate-detail T：细节波截断乘数
     std::string horizon_repro_out_dir;
@@ -2322,8 +2324,12 @@ int main(int argc, char** argv) {
             water_samples = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--water-env-lod") == 0 && i + 1 < argc) {
             water_env_lod = std::atoi(argv[i + 1]);
-        } else if (std::strcmp(argv[i], "--water-sun-lobe") == 0 && i + 1 < argc) {
-            water_sun_lobe = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m1") == 0 && i + 1 < argc) {
+            water_m1 = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m2") == 0 && i + 1 < argc) {
+            water_m2 = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m3") == 0 && i + 1 < argc) {
+            water_m3 = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--water-truncate-main") == 0 && i + 1 < argc) {
             water_truncate_main = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-truncate-detail") == 0 && i + 1 < argc) {
@@ -2500,8 +2506,14 @@ int main(int argc, char** argv) {
     if (water_env_lod >= 0) {
         app.SetWaterSkinV2EnvLod(water_env_lod != 0);
     }
-    if (water_sun_lobe >= 0) {
-        app.SetWaterSkinV2SunLobe(water_sun_lobe != 0);
+    if (water_m1 >= 0) {
+        app.SetWaterSkinV2M1(water_m1 != 0);
+    }
+    if (water_m2 >= 0) {
+        app.SetWaterSkinV2M2(water_m2 != 0);
+    }
+    if (water_m3 >= 0) {
+        app.SetWaterSkinV2M3(water_m3 != 0);
     }
     if (water_truncate_main >= 0.0f) {
         app.SetWaterSkinV2TruncateMain(water_truncate_main);
