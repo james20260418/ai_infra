@@ -20,9 +20,15 @@
 // │ v2_sample_count          S ∈ [1,16]，默认 4（实测 S≥4 已收敛）              │
 // │ v2_truncate_px_main      主波截断乘数，默认 **0 = 不截断**                   │
 // │ v2_truncate_px_detail    细节波截断乘数，默认 **1 = 走 V1 那条 3~8 px 线**    │
+// │ v2_env_lod / v2_sun_lobe 方差系两个消费点的开关（V1/V2 共用；F_eff 无开关）      │
 // │ 语义：`3T ~ 8T px`；T=1 与 V1 同一条线（乘 1.0 精确 ⇒ 可与 V1 逐字节对比）。   │
 // │ 为什么分开：主波管几何/剪影，细节波只进法线 —— 实测**噪点元凶是细节波**。      │
 // │ 为什么主波默认不截断：截掉主波会把远处的"骨架"拿掉（变平），而它并不产生噪点。  │
+// │ σ² 有两份（与 V1 的分工一致，别合并）：                                        │
+// │   σ²_all   = MSS + 被截断的表内波 → F_eff（⇒ α / 透射率）、env_lod              │
+// │   σ²_trunc = 只有被截断的表内波    → 太阳 a2                                    │
+// │ 太阳 a2 **不能**吃 MSS：MSS 是与距离无关的常数（8 m/s 时 σ²≈0.03），加进 lobe   │
+// │ 会让半角恒 ~14°、近场一片糊；V1 的注释里也写死了"不再叠加解析 σ_slope"。         │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // ⭐ 与 V1（water_skin_shader.h）的关系：**独立的一整份 pass**（自己的 renderer /
@@ -161,7 +167,8 @@ struct WaterShadeV2 {
     vec3  C;               // 层色（P 点辐射度，**S 个样本的平均**，未乘相机段衰减）
     float alpha;           // 层遮挡率（S 个样本的平均）
     float fresnel_debug;   // 调试（13）：**第一个样本**（i=0；S=1 时就是中心）的 F
-    float env_lod_debug;   // 调试（11）：探针 LOD（全像素常量，只由 MSS 决定）
+    float env_lod_debug;   // 调试（11）：探针 LOD（全像素常量，由 σ² 决定）
+    float a2_debug;        // 调试（14）：太阳 lobe 的 a2（第一个样本；0.25 为满量程）
     vec3  refl_debug;      // 调试（12）：第一个抖动样本的探针反射色（未乘 F）
     // ⚠️ 调试 9（cos_i）/ 默认（法线色）用的是**中心法线** s.N，与 12/13 不是同一个采样点；
     //    S>1 时 i=0 落在离中心 sqrt(0.5/S)·footprint 处。别看混。
@@ -348,6 +355,22 @@ float SkinV2SlopeVariance(float footprint) {
     return 0.5 * max(sxx + szz, 0.0);
 }
 
+// **只要"被谱截断掉的那部分"**（把 MSS 减出去）= 与 V1 对太阳 lobe 的取舍对齐。
+//
+// 为什么 a2 不能吃全 σ²（2026-11-26 报障：开着 a2 时 V1 透亮、V2 一片糊）：
+//   · V1 的 a2 = 盘角² + `footprint_a2` + `2·normal_var_px`，两项都来自 **dFdx/dFdy**，
+//     近场法线逐像素几乎不变 ⇒ a2 ≈ 盘角²（≈0.8°）⇒ 日盘像"透亮"；
+//     V1 的注释里也写死了「**不再叠加解析 σ_slope**」，理由就是会双计 + 抹平闪光。
+//   · V2 若把全 σ²（含 MSS 0.0297 这种**与距离无关的常数**）加进 lobe ⇒ a2 ≈ 0.06
+//     在任何距离都成立 ⇒ 半角恒 ~14° ⇒ 近场就是"一片糊"，且与 V1 差 12 倍角度。
+//   · 所以 a2 只吃**截断带**：近场 → 0（与 V1 对上），远场 → 长起来（这才是 M1 该管的）。
+//     MSS 仍然进 F_eff 和 env_lod（V1 也是这么分的：var_p_mean 含 MSS，lobe 不含）。
+float SkinV2TruncatedSlopeVariance(float footprint) {
+    // WaveSlopeTensor 里 MSS 是各向同性加的（sxx += 0.5·mss, szz += 0.5·mss）
+    // ⇒ 迹 +mss ⇒ 0.5·迹 +0.5·mss。减回去就只剩表内波被裁掉的部分。
+    return max(SkinV2SlopeVariance(footprint) - 0.5 * max(uShortWaveMss, 0.0), 0.0);
+}
+
 // WBO 发射（生产程序唯一出口）。att3 必须是**射线距离** t（见 water_skin_shader.h 顶部）。
 void EmitWBO(vec3 C, float alpha, float t) {
     oAccum  = vec4(C, alpha);
@@ -400,7 +423,11 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
 }
 
 void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
+    // 两份方差，各有各的消费者（与 V1 的分工一致，别合并）：
+    //   sigma2_all   = MSS + 被截断的表内波  → F_eff（⇒ α）、env_lod
+    //   sigma2_trunc = 只有被截断的表内波     → 太阳 a2（MSS 不进 lobe，理由见上）
     float sigma2 = SkinV2SlopeVariance(s.footprint);
+    float sigma2_trunc = SkinV2TruncatedSlopeVariance(s.footprint);
     // 探针 LOD：V2 里唯一的模糊来源就是 MSS 的斜率方差（表内波由采样自己平均）。
     // 镜面反射把斜率放大 2× ⇒ 需要的模糊角 ≈ 2σ；128² 探针的 texel 角 = (π/2)/128 · 2^lod。
     // ⚠️ σ 是**各向同性斜率标准差** = √sigma2（sigma2 = 0.5·迹，见 SkinV2SlopeVariance）：
@@ -431,11 +458,14 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float hlen = length(H);
         H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, sigma2);
+        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, sigma2_trunc);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
             o.refl_debug = refl;
+            // 与 SkinV2SunSpecular 内部同一条式子（同一份 sigma2_trunc）。
+            o.a2_debug = GgxDiskBandwidthA2(uSunAngularRadius) +
+                         ((uSunLobeOn != 0) ? 2.0 * sigma2_trunc : 0.0);
         }
     }
     o.C = sum_c / float(S);
@@ -489,6 +519,7 @@ void ShadeBelowV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
     o.refl_debug = vec3(0.0);   // 水下 V1 也不采集探针反射（调试模式不复用）
     o.fresnel_debug = 0.0;      // 水下 V1 也是 0（F 已折进 C/α）
     o.env_lod_debug = 0.0;
+    o.a2_debug = 0.0;
 }
 )glsl";
 
@@ -537,6 +568,14 @@ void EmitDebugV2(WaterSurfaceV2 s, WaterShadeV2 o, int mode) {
     if (mode == 13) {
         // 中心样本的反射率 F
         oAccum  = vec4(vec3(o.fresnel_debug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (mode == 14) {
+        // 太阳 lobe 的 a2（满量程 0.25 ⇒ α ≤ 0.5）。用来盯「lobe 该不该在这个距离张开」。
+        float v = clamp(o.a2_debug / 0.25, 0.0, 1.0);
+        oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;

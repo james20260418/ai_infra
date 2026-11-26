@@ -842,4 +842,77 @@ TEST(WaterSkinV2Gpu, V2SigmaComesFromTruncationAndTogglesWork) {
     f.TearDown();
 }
 
+
+// ⑩ 太阳 lobe 的宽度只能来自**被截断的那部分**方差（MSS 不许进 a2）。
+//    2026-11-26 报障：开着 a2 时 V1 透亮、V2 一片糊 —— 因为 V2 把 MSS（与距离无关的常数）
+//    也加进了 a2 ⇒ 半角恒 ~14°，近场直接被抹平。
+//
+//    判据直接用 **debug 14（a2 / 0.25）**，不靠"日盘像落在哪个像素"这种运气：
+//      · 近场：a2 必须 ≈ 盘角（本用例 sun_angular_radius = 默认 ⇒ a2_disk ≈ 5.4e-6）
+//      · 掠射远场：a2 必须明显张开（截断带方差进来）
+//    用 debug 是因为「lobe 很窄时高光可能一个像素都碰不到」（48×32 视口一个像素 ≈ 3.5°），
+//    第一版靠 lit/peak 判，近场直接测出 peak = 0.013（根本没点亮），属于假信号。
+TEST(WaterSkinV2Gpu, V2SunLobeOnlyWidensWherePixelsCannotResolve) {
+    Fixture f;
+    f.SetUp();
+    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.has_sun = true;
+    s.sun_irradiance = {3.0f, 2.8f, 2.4f};
+    s.sun_toward = Normalized(Vec3f{0.0f, 1.0f, 0.0f});   // 方向对本用例不影响 a2
+
+    const auto a2_mean = [&](const Vec3f& cam_pos, const Vec3f& cam_target, bool sun_lobe) {
+        s.cam.position = cam_pos;
+        s.cam.target = cam_target;
+        jpov::WaterWaves w = waves;
+        w.short_wave.wind_speed_ms = 8.0f;   // MSS 在：若被错加进 a2，近场立刻变糊
+        w.v2_truncate_px_main = 0.0f;
+        w.v2_truncate_px_detail = 1.0f;
+        w.v2_env_lod = true;
+        w.v2_sun_lobe = sun_lobe;
+        s.waves = &w;
+        s.wave_debug = 14;
+        f.DrawV2(s, 4);
+        const std::vector<float> a = ReadRgba(f.v2.layer().accum_tex);
+        // 只统计水面像素（accum.a > 0），并乘回满量程 0.25。
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            if (!(a[i + 3] > 0.0f)) {
+                continue;
+            }
+            sum += a[i + 0];
+            ++n;
+        }
+        return (n > 0 ? sum / static_cast<double>(n) : 0.0) * 0.25;
+    };
+
+    // 近场：**必须真的贴到水面**——本用例视口 48×32 ⇒ pixel_angle ≈ 0.036 rad（720p 的 20 倍），
+    // 1.5 m 高度已经有 0.9 m 足迹、细节波被截一半（第一版这么写，量出来"近场"和掠射一样糊）。
+    const double near_on = a2_mean({0.01f, 0.30f, 0.01f}, {0.0f, 0.0f, 0.0f}, true);
+    // 掠射远场：足迹几百米 ⇒ 细节波全被截断。
+    const double graze_on = a2_mean({0.0f, 3.0f, -30.0f}, {0.0f, 0.0f, -200.0f}, true);
+    const double graze_off = a2_mean({0.0f, 3.0f, -30.0f}, {0.0f, 0.0f, -200.0f}, false);
+
+    SCOPED_TRACE(testing::Message() << "a2: 近场(on) " << near_on << " | 掠射(on) " << graze_on
+                                   << " | 掠射(off) " << graze_off);
+    // ① 近场：a2 ≈ 盘角（5.4e-6）⇒ 远小于 0.01。MSS 若混进来就是 0.0594。
+    EXPECT_LT(near_on, 1.0e-3)
+        << "近场 a2 被抬到了 MSS 量级 —— lobe 只在「像素解析不了」时才该张开";
+    // ② 掠射：截断带方差必须进来 ⇒ a2 明显 > 盘角。
+    EXPECT_GT(graze_on, 1.0e-3) << "掠射 a2 没有张开 —— 截断带方差没进 a2（M1 丢了）";
+    // ③ 开关关掉 ⇒ 只剩盘角。
+    EXPECT_LT(graze_off, 1.0e-4) << "关掉 v2_sun_lobe 后 a2 仍然很大 —— 开关没接上";
+    // ④ 近场 vs 掠射必须拉开数量级（否则 a2 是个常数）。
+    EXPECT_GT(graze_on, 10.0 * near_on) << "近场/掠射的 a2 没拉开 —— a2 与距离无关";
+
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
 }  // namespace
