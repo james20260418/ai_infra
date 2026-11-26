@@ -1023,9 +1023,10 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
     app.deg_.sun_azim_deg    = 214.0f;   // 与相机朝向同侧 ⇒ 水面能收到日盘像
 
     struct Shot { const char* prefix; float phi; float theta; float radius; };
-    const Shot kShots[2] = {
+    const Shot kShots[3] = {
         {"near", 0.30f, 0.6f, 20.0f},   // ≈17° 俯视：近场波纹/碎光
         {"graze", 0.06f, 0.6f, 40.0f},  // ≈3.4° 掠射：足迹大 ⇒ 摩尔纹最先在这里出现
+        {"high", 0.10f, 0.6f, 700.0f},  // 高空掠射（≈5.7°/700 m 远，高 70 m）：天际线 + 远场整体
     };
     for (const Shot& shot : kShots) {
         app.view_ = jpov_viewer::DefaultView();

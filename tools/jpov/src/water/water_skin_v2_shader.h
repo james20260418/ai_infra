@@ -1,47 +1,53 @@
 // JPOV 水皮 V2（单像素多法线采样）—— GLSL
 //
-// 设计：docs/jpov_water_skin_v2_design.md（2026-11-25 定稿）。
-// 一句话：**一个公式 + 每像素 S 个法线采样 + 平均**。不给距离阈值、不给补偿项 ——
-// 像素本来就是面积的积分器。（谱截断默认关，但留了一个旋钮 T = WaterWaves::v2_truncation_px
-// 供验收「摩尔纹从多远开始」时做 A/B，见 render_command.h 的注释。）
+// 设计：docs/jpov_water_skin_v2_design.md。**2026-11-26 验收通过，样貌固定**：
+//
+//     水皮 V2 = 一个公式 + 每像素 S 个法线采样 + 两个截断旋钮
+//
+// ┌─ 链路（从上到下就是一次着色）──────────────────────────────────────────────┐
+// │ ① ResolveSurfaceV2   几何，**永不 discard**，唯一真状态                       │
+// │     · 视线 → rd；**地平线钳位**（|rd.y| < 1 px 拉到水面一侧，天际线那一行不漏）│
+// │     · 平面交点 t_plane（**只用于深度测试**，波浪无关）                       │
+// │     · 波浪求交 t + 中心法线 N + 足迹 footprint（含谱截断）                    │
+// │ ② RejectOccludedV2   唯一 discard 点                                         │
+// │     · !hit / !wave_ok / 场景更近 / **钳位像素：这一像素有几何就 discard**      │
+// │ ③ ShadeAboveV2 | ShadeBelowV2   S 个样本**各自着色**再平均，EmitWBO          │
+// │     · 样本位置：中心交点 + 椭圆足迹内的 Hammersley 抖动（面积均匀、静态确定）  │
+// │     · 法线：对样本 xz 调 WaveNormalAtXZ（解析梯度，与几何同一份谱）            │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ 两个旋钮（WaterWaves）──────────────────────────────────────────────────┐
+// │ v2_sample_count          S ∈ [1,16]，默认 4（实测 S≥4 已收敛）              │
+// │ v2_truncate_px_main      主波截断乘数，默认 **0 = 不截断**                   │
+// │ v2_truncate_px_detail    细节波截断乘数，默认 **1 = 走 V1 那条 3~8 px 线**    │
+// │ 语义：`3T ~ 8T px`；T=1 与 V1 同一条线（乘 1.0 精确 ⇒ 可与 V1 逐字节对比）。   │
+// │ 为什么分开：主波管几何/剪影，细节波只进法线 —— 实测**噪点元凶是细节波**。      │
+// │ 为什么主波默认不截断：截掉主波会把远处的"骨架"拿掉（变平），而它并不产生噪点。  │
+// └──────────────────────────────────────────────────────────────────────────┘
 //
 // ⭐ 与 V1（water_skin_shader.h）的关系：**独立的一整份 pass**（自己的 renderer /
 //    program / WBO 附件），V1 一行不改、逐字节保留，靠 `WaterWaves::v2` 二选一。
-//    两条路径的差别只有一条：V1 用「1 个法线 + 若干二阶补偿量（屏幕导数 / 方差）」
-//    去近似面积分，V2 直接采样。V1 里那 9 个补偿项（kWaveLodPxMin/Max、var_p、
-//    var_p_mean、normal_var_px、footprint_a2、env_lod 的 normal_var 项、env_lod_cap、
-//    a2 的 0.25 兜底、far 分流）在这里**全部不存在**。
+//    差别只有一条：V1 用「1 个法线 + 若干二阶补偿量（屏幕导数 / 方差）」去近似面积分，
+//    V2 直接采样。V1 的 9 个补偿项（var_p / var_p_mean / normal_var_px / footprint_a2 /
+//    env_lod 的 normal_var 项 / env_lod_cap / a2 的 0.25 兜底 / far 分流 / lod 常量本身）
+//    在这里**全部不存在**。
 //
-// ⭐ 结构性收益：V2 里**没有显式 dFdx/dFdy**，所以历史上反复追的「导数必须先于 discard」
+// ⭐ 结构性收益：V2 里**没有显式 dFdx/dFdy** ⇒ 历史上反复追的「导数必须先于 discard」
 //    这条不变式整条消失。（唯一残留的隐式导数是 `texture(uSceneDepth, …)` 的 LOD 选择，
 //    但那张深度图是 NEAREST 且无 mip ⇒ 取哪一级都一样；与 V1 同一份代码。）
 //
-// ⭐ 谱：表内 72 条波（8 主 + 64 细节）默认**全部采样、不截断**（T = 0）；
-//    T > 0 时按「像素足迹」口径截断（与 V1 同一把尺，T 是 3/8 px 的乘数）。
-//    物理上 T = 0 等价于「无限分辨率且不截断的真值海」。
-//    MSS（Cox–Munk 短波）**不在波表里** ⇒ 它永远不可采样，作为 σ 偏置保留：
+// ⭐ MSS（Cox–Munk 短波）**不在波表里** ⇒ 永远不可采样，作为 σ 偏置保留，
 //    参与反射率 F、太阳 lobe 宽度、探针 LOD 三处（见 docs §7）。
-//
-// ⭐ 三段式契约（docs §3）：
-//      ① ResolveSurfaceV2   → (pos_xz, N, t)  几何，唯一真状态，**永不 discard**
-//        ⚠️ pos_xz 是**波浪局部系**（世界 xz − 帧约定原点）：相位精度要求"先换成小数再乘 k"，
-//           见 uCamPosXZLocal 的注释。
-//      ② RejectOccludedV2   → 唯一 discard 点（命中失败 / 场景更近）
-//      ③ ShadeAboveV2 / ShadeBelowV2 → S 个样本各自着色后平均，EmitWBO
 //
 // ⭐ 三条必须写死的纪律（docs §6.1）：
 //    ① 不能平均法向再着色一次：mean(Shade(N_i)) ≠ Shade(mean(N_i))；
 //    ② 不能平均 env 再乘平均 F：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)；
 //    ③ C 与 alpha 必须用同一批样本（反射/透射的能量账才守恒）。
 //
-//   拼装顺序（见 water_skin_v2_renderer.cc::Init）：
-//     水上生产：#version + kWaterInterfaceUniformsGlsl + kWaterWaveGlsl + kGgxSpecularGlsl
-//               + kWaterSkinV2CommonGlsl + kWaterSkinV2AboveGlsl + kWaterSkinV2AboveMainGlsl
-//     水下生产：#version + kWaterInterfaceUniformsGlsl + kWaterMediumUniformsGlsl + kWaterMediumGlsl
-//               + kWaterWaveGlsl + kWaterSkinV2CommonGlsl + kWaterSkinV2BelowGlsl
-//               + kWaterSkinV2BelowMainGlsl
-//     调试：在对应生产基础上再拼 kWaterSkinV2DebugGlsl + 对应 debug main。
-
+// ⭐ 采样点位置的纪律（Danis 2026-11-26）：世界 xz 一律用「海面是平的」推演，
+//    **绝不用中心像素的 N** 把偏移投影到切平面 —— 否则中心法线的噪声会变成采样位置、
+//    再被采回来（正反馈，噪声收不住）。
+//
 #ifndef JPOV_SRC_WATER_WATER_SKIN_V2_SHADER_H_
 #define JPOV_SRC_WATER_WATER_SKIN_V2_SHADER_H_
 
@@ -144,13 +150,14 @@ struct WaterSurfaceV2 {
     float cos_i;          // 中心样本的 |dot(rd, N)|
     float footprint;      // 一个像素在水面上的世界尺寸（米，沿地面**径向**；见 SkinV2SampleOffset）
     float graze;          // max(|rd.y|, 护栏)：短半轴 = 0.5·footprint·graze
+    bool  horizon_clamped; // |rd.y| 被钳到水面一侧（天际线那一行；见 ResolveSurfaceV2）
 };
 
 // 着色输出（生产只用 C/α；调试读中心样本的 F / 探针反射色 / 探针 LOD）。
 struct WaterShadeV2 {
     vec3  C;               // 层色（P 点辐射度，**S 个样本的平均**，未乘相机段衰减）
     float alpha;           // 层遮挡率（S 个样本的平均）
-    float fresnel_debug;   // 调试（13）：**第一个样本**（i=0；S=1 / 2×2 时它是角上的子像素）的 F
+    float fresnel_debug;   // 调试（13）：**第一个样本**（i=0；S=1 时就是中心）的 F
     float env_lod_debug;   // 调试（11）：探针 LOD（全像素常量，只由 MSS 决定）
     vec3  refl_debug;      // 调试（12）：第一个抖动样本的探针反射色（未乘 F）
     // ⚠️ 调试 9（cos_i）/ 默认（法线色）用的是**中心法线** s.N，与 12/13 不是同一个采样点；
@@ -170,6 +177,22 @@ vec3 SkinV2RayDir(vec2 ndc) {
 void ResolveSurfaceV2(out WaterSurfaceV2 s) {
     s.rd = SkinV2RayDir(vNdc);
 
+    // ── 地平线钳位（**照抄 V1 的老口径**，Danis 2026-11-26 第三次报障后要求）──
+    // 水面与天空的「地平线以下」起点都在 rd.y = 0，卡在同一条线上 ⇒ 边界那一行会露出
+    // 天空在地平线以下填的 ground_color（"地缝"/暗线，观感是水皮覆盖不足）。
+    // 做法：|rd.y| < 1 px 的射线一律**拉到水面那一侧**，让这一层多盖一像素。
+    //   · 水面上方：rd.y → −eps（交点在"无穷远"但仍在前方 ⇒ t > 0）
+    //   · 水面下方：rd.y → +eps（看向水面，同样多盖一像素）
+    // ⚠️ 只改**求交用的方向**，不改亮度/反射的数学 —— 这一行本来就是半覆盖的边界像素。
+    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;   // 一个像素的视角（弧度）
+    float horizon_eps = pixel_angle;                       // = 1 px（与 V1 的 0.0016@720p/60° 同量级）
+    s.horizon_clamped = false;
+    if (abs(s.rd.y) < horizon_eps) {
+        float sign_y = (uCamPos.y < uWaterLevelY) ? 1.0 : -1.0;
+        s.rd = normalize(vec3(s.rd.x, sign_y * horizon_eps, s.rd.z));
+        s.horizon_clamped = true;
+    }
+
     // 波浪场的求值一律在「相对 uWaveOriginXZ 的局部 xz」里做；y 保持世界系
     //（高度的基准是 uWaterLevelY，与 xz 无关）。见 uCamPosXZLocal 的注释。
     vec3 cam_wave = vec3(uCamPosXZLocal.x, uCamPos.y, uCamPosXZLocal.y);
@@ -180,7 +203,6 @@ void ResolveSurfaceV2(out WaterSurfaceV2 s) {
     s.t = max(t_raw, 1.0e-3);   // 不可见的像素用安全值，只为让后续运算有定义
     s.t_plane = s.t;
 
-    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;   // 非 const：依赖 uniform
     s.footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, pixel_angle);
     // 椭圆短轴因子：像素在水面上的足迹是**各向异性**的 ——
     //   径向（视线在水平面的投影方向）被 1/|rd.y| 拉长 ⇒ 整宽 = footprint（半轴 = 1/2）；
@@ -218,9 +240,20 @@ void RejectOccludedV2(WaterSurfaceV2 s, bool skip_depth) {
     if (skip_depth) {
         return;
     }
+    float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
+    if (s.horizon_clamped) {
+        // 钳位像素的交点在"无穷远" ⇒ **任何不透明几何都挡在它前面**。
+        // ⚠️ 不能拿 view_z 去比（钳位后是数十 km，浮点残差会把整行剔掉 ⇒ 反而露出地色），
+        //    也不能整条跳过（那会把天际线那 1~2 行的近处物体一起盖掉 ——
+        //    2026-11-19 报的「box 上沿被水皮锯 3 行」就是这么来的）。
+        //    判据只有一句：这一像素有没有几何。（V1 的最终口径，逐字照抄。）
+        if (scene_ndc < kBackgroundDepth) {
+            discard;
+        }
+        return;
+    }
     // 用**平面**交点距离（不用波浪求交的 t）：后者在掠射时相邻像素能差几公里 ⇒ view_z 抖动。
     float view_z = s.t_plane * dot(s.rd, uCamFwd);
-    float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
     if (scene_ndc < kBackgroundDepth) {
         float scene_z = LinearizeDepthNdc(scene_ndc, uNear, uFar);
         if (view_z > scene_z + uDepthBiasM) {
@@ -282,7 +315,7 @@ int SkinV2SampleCount() {
 //      噪声当成采样位置，再采回法线 ⇒ 正反馈，噪声彻底收不住。
 // 法线仍然是对该 xz 的解析场求值（WaveNormalAtXZ）⇒ 波浪细节一个没丢，只是"位置"不跟着抖。
 struct SkinV2SampleGeom {
-    vec3  rd;          // 该样本的视线方向（2×2 时逐子像素不同）
+    vec3  rd;          // 该样本的视线方向（当前只有一个方向；保留字段是为了将来接子像素）
     vec2  pos_xz;      // 波浪局部系 xz
     vec3  N;           // 该 xz 上的解析法线
     float footprint;   // 该样本的像素足迹（米）——谱截断用
@@ -375,7 +408,7 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float F = RoughFresnelAlbedo(cos_i, sigma2, uWaterIor);
         vec3 refl = textureLod(uEnvCube, ClampReflectionAboveHorizon(reflect(g.rd, g.N)),
                               env_lod).rgb * uEnvScale;
-        // 半向量随 rd 变（2×2 下每个子像素一条）⇒ 逐样本算，不能再提到循环外。
+        // 半向量随 rd 变（将来接子像素射线时每个样本一条）⇒ 逐样本算，别提到循环外。
         vec3 H = uSunToward - g.rd;
         float hlen = length(H);
         H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);

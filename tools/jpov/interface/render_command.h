@@ -1062,8 +1062,10 @@ struct WaterWaves {
     //    ⚠️ V2 截断后**不做 V1 那套补偿**（var_p / env_lod / 导数项都退休了）⇒
     //        T > 0 时远场能量会变，这是预期的缺口：这两个是验收旋钮，不是产品外观。
     //    ⚠️ 天球折射（Snell 窗缘）必须同口径 —— 由 water::ResolveWaveTruncation() 统一给。
+    // 默认值 = **2026-11-26 验收通过的样貌**：主波不截断、细节波按 V1 那条 3~8 px 线截断。
+    // （结论来自实测：噪点元凶是细节波；主波截断反而把远处的"骨架"拿掉。）
     float v2_truncate_px_main = 0.0f;
-    float v2_truncate_px_detail = 0.0f;
+    float v2_truncate_px_detail = 1.0f;
 
 
 };

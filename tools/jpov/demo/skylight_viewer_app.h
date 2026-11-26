@@ -347,12 +347,11 @@ public:
     // SliderFloat 只能收 float；写进 WaterCommand 时四舍五入成 int。
     // 非法值不在这里夹：交给 Renderer 的 CHECK（CLI 写错要看得到报错）。
     float water_v2_samples_f_ = 4.0f;
-    // V2 验收旋钮（见 interface/render_command.h 的注释）：
-    //   T = 谱截断乘数（0 = 不截断，1 = 与 V1 同一条线 3~8 px）；
-    //   2×2 = 屏幕空间四分子像素采样（与 Hammersley 互斥）。
+    // V2 的两个验收旋钮（见 interface/render_command.h 的注释）：
+    //   主波 T / 细节波 T = 谱截断乘数（0 = 该族不截断，1 = 与 V1 同一条线 3~8 px）。
     // 两个截断乘数：主波 / 细节波分开（0 = 该族不截断，1 = 与 V1 同线）。
-    float water_v2_truncate_main_ = 0.0f;
-    float water_v2_truncate_detail_ = 0.0f;
+    float water_v2_truncate_main_ = 0.0f;     // 验收样貌：主波不截断
+    float water_v2_truncate_detail_ = 1.0f;   // 细节波走 V1 那条 3~8 px 线
     void SetWaterSkinV2(bool on) { water_v2_ = on; }
     void SetWaterSkinV2Samples(int sample_count) {
         water_v2_samples_f_ = static_cast<float>(sample_count);

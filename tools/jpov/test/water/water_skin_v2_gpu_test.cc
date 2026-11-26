@@ -655,4 +655,97 @@ TEST(WaterSkinV2Gpu, V2TruncationKnobsAreIndependent) {
     f.TearDown();
 }
 
+
+// ⑧ 天际线覆盖（Danis 2026-11-26 第三次报障）：水皮必须**多盖一像素**，不能在地平线那一行
+//    露出天空填的 ground_color（"地缝"）。做法照抄 V1 的老口径：|rd.y| < 1 px 的射线钳到
+//    水面一侧；钳位像素的深度判据只看"这一像素有没有几何"。
+//    三条判据（缺一条都会重新长出地缝，或者反过来把物体盖掉）：
+//    ① **V1 覆盖 ⇒ V2 覆盖**（钳位只允许加覆盖，不允许丢）；
+//    ② 绝大多数列上 V2 比 V1 **多覆盖 ≥1 行**（钳位真的生效了）；
+//    ③ 每一列的覆盖**连续**（从水面顶一直到画面底，中间不许有洞）。
+//
+// ⚠️ 机位必须让地平线**落在两行之间**：这样地平线上下那两行的 |rd.y| ≈ 半像素 < 1 px，
+//    钳位才真的起作用。视线正好水平时 `|rd.y| = 0` 那一行本来就会命中（t = inf > 0），
+//    量出来 V1/V2 覆盖相同 —— 那是测试伪装成通过（第一版写成 0 就是这个原因）。
+TEST(WaterSkinV2Gpu, V2HorizonClampCoversTheSeam) {
+    Fixture f;
+    f.SetUp();
+    SceneInputs s;
+    constexpr float kHalfFovDeg = 30.0f;   // fov 60
+    const float pixel_angle =
+        2.0f * std::tan(kHalfFovDeg * 3.14159265358979323846f / 180.0f) /
+        static_cast<float>(kHeight);
+    const float cam_y = 6.0f;
+    const float cam_z = 9.0f;
+    s.cam.position = {0.0f, cam_y, cam_z};
+    // 视线抬高半个像素 ⇒ 地平线落在两行中间。
+    const float elev = 0.5f * pixel_angle;
+    s.cam.target = {0.0f, cam_y + cam_z * std::tan(elev), 0.0f};
+    s.cam.fov = 2.0f * kHalfFovDeg;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.waves = nullptr;   // 平面：只测覆盖，不掺波浪
+
+    // ⚠️ 用 **accum 的 α 分量**判覆盖，不要用 reveal 纹理：WBO 的 reveal 槽是
+    //    `1 − α`（clear=1 + (ZERO, ONE_MINUS_SRC_COLOR)），没画到的像素是 **1.0** ——
+    //    拿它 `> 0` 判覆盖会得到"整屏都覆盖"的假通过（第一版就是这么写的）。
+    f.DrawV1(s);
+    const std::vector<float> a1_rgba = ReadRgba(f.v1.layer().accum_tex);
+    f.DrawV2(s, /*sample_count=*/4);
+    const std::vector<float> a2_rgba = ReadRgba(f.v2.layer().accum_tex);
+    std::vector<float> a1(a1_rgba.size() / 4);
+    std::vector<float> a2(a2_rgba.size() / 4);
+    for (size_t i = 0; i < a1.size(); ++i) {
+        a1[i] = a1_rgba[i * 4 + 3];
+        a2[i] = a2_rgba[i * 4 + 3];
+    }
+
+    int lost = 0;        // V1 覆盖 / V2 不覆盖
+    int cols_more = 0;
+    int cols_gap = 0;
+    for (int x = 0; x < kWidth; ++x) {
+        int covered_v1 = 0;
+        int covered_v2 = 0;
+        int first_v2 = -1;
+        int last_v2 = -1;
+        for (int y = 0; y < kHeight; ++y) {
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            const bool c1 = a1[i] > 0.0f;
+            const bool c2 = a2[i] > 0.0f;
+            covered_v1 += c1 ? 1 : 0;
+            covered_v2 += c2 ? 1 : 0;
+            if (c1 && !c2) {
+                ++lost;
+            }
+            if (c2) {
+                if (first_v2 < 0) {
+                    first_v2 = y;
+                }
+                last_v2 = y;
+            }
+        }
+        if (covered_v2 > covered_v1) {
+            ++cols_more;
+        }
+        if (first_v2 >= 0) {
+            for (int y = first_v2; y <= last_v2; ++y) {
+                const size_t i = static_cast<size_t>(y) * kWidth + x;
+                if (!(a2[i] > 0.0f)) {
+                    ++cols_gap;
+                    break;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(lost, 0) << "V2 丢了 V1 覆盖到的像素 —— 钳位方向或深度判据写错了";
+    EXPECT_GT(cols_more, kWidth * 8 / 10)
+        << "绝大多数列上 V2 没有比 V1 多盖哪怕一行 —— 地平线钳位没生效（地缝会回来）";
+    EXPECT_EQ(cols_gap, 0) << "V2 的覆盖在某列中间断开 —— 水皮有洞";
+
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
 }  // namespace
