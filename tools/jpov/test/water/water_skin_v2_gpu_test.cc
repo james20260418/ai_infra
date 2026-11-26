@@ -532,65 +532,6 @@ TEST(WaterSkinV2Gpu, LargerSampleCountReducesPixelToPixelVariance) {
     f.TearDown();
 }
 
-// ⑤ 屏幕 2×2 图案：它必须是一条**活的新路径**，且 S 在它下而**完全不起作用**。
-//    （Danis 2026-11-26：从像素中心信息推算 2×2 四分后的四个 sub-px 世界坐标，
-//    假设海面是平的，不用中心 N、不对子像素求波浪交点。）
-TEST(WaterSkinV2Gpu, V2Screen2x2PatternIsAliveAndIgnoresS) {
-    Fixture f;
-    f.SetUp();
-    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
-    SceneInputs s;
-    s.cam.position = {2.0f, 8.0f, -1.0f};
-    s.cam.target = {2.0f, 0.0f, 4.0f};
-    s.cam.fov = 60.0f;
-    s.cam.near = kNear;
-    s.cam.far = kFar;
-    s.depth_tex = MakeDepthTexture();
-    s.level_y = 0.5f;
-    s.has_sun = true;
-    s.sun_toward = Normalized(Vec3f{0.2f, 0.8f, 0.55f});
-    s.sun_irradiance = {2.0f, 1.9f, 1.7f};
-    s.waves = &waves;
-
-    const auto draw = [&](int pattern, int samples) {
-        jpov::WaterWaves w = waves;
-        w.v2_sample_pattern = pattern;
-        s.waves = &w;
-        f.DrawV2(s, samples);
-        return ReadRgba(f.v2.layer().accum_tex);
-    };
-    const auto mean_abs_diff = [](const std::vector<float>& a, const std::vector<float>& b) {
-        double sum = 0.0;
-        size_t n = 0;
-        for (size_t i = 0; i + 3 < a.size(); i += 4) {
-            for (int c = 0; c < 3; ++c) {
-                sum += std::fabs(a[i + c] - b[i + c]);
-            }
-            n += 3;
-        }
-        return n > 0 ? sum / static_cast<double>(n) : 0.0;
-    };
-
-    const std::vector<float> hammer4 =
-        draw(jpov::WaterWaves::kV2PatternHammersley, 4);
-    const std::vector<float> quad4 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 4);
-    EXPECT_GT(mean_abs_diff(hammer4, quad4), 1.0e-4)
-        << "2×2 与 Hammersley(S=4) 几乎一样 —— 新图案没接上";
-
-    // S 在 2×2 下而被忽略（恒 4）：S=1 与 S=16 必须**逐位相同**。
-    const std::vector<float> quad_s1 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 1);
-    const std::vector<float> quad_s16 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 16);
-    EXPECT_EQ(mean_abs_diff(quad_s1, quad_s16), 0.0)
-        << "2×2 图案下 S 仍然在起作用 —— 应该恒为 4 个样本";
-    // 而 Hammersley 下 S 必须起作用（否则上一条可能是“全局 S 都失效”的假通过）。
-    const std::vector<float> hammer16 =
-        draw(jpov::WaterWaves::kV2PatternHammersley, 16);
-    EXPECT_GT(mean_abs_diff(hammer4, hammer16), 1.0e-4)
-        << "Hammersley 下 S=4 与 S=16 一样 —— S 整个失效了";
-    glDeleteTextures(1, &s.depth_tex);
-    f.TearDown();
-}
-
 // ⑥ 谱截断旋钮 T：乘数必须真的接在阈值上。
 //    判据用**法线可视化**（debug=1）而不是颜色：截断只影响几何，颜色还混着 F / 探针，
 //    在法线上测才能把“截断生效”与“着色变了”分开。

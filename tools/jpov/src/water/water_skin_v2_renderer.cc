@@ -185,15 +185,6 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
                 static_cast<float>(static_cast<double>(cam.position.x()) - origin_x),
                 static_cast<float>(static_cast<double>(cam.position.z()) - origin_z));
 
-    // 采样图案：0 = Hammersley，1 = 屏幕 2×2 子像素。非法值直接拦住（不是静默回退）。
-    const int pattern = (in.waves != nullptr) ? in.waves->v2_sample_pattern
-                                              : WaterWaves::kV2PatternHammersley;
-    CHECK(pattern == WaterWaves::kV2PatternHammersley ||
-          pattern == WaterWaves::kV2PatternScreen2x2)
-        << "WaterWaves::v2_sample_pattern 只能是 " << WaterWaves::kV2PatternHammersley
-        << "（Hammersley）或 " << WaterWaves::kV2PatternScreen2x2 << "（屏幕 2×2）";
-    glUniform1i(shader_mgr_->GetUniform(prog, "uSamplePattern"), pattern);
-
     // ── 介质 uniform（水下支路的 S_P(∞) 与水平面/折射率）──
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaterLevelY"), in.level_y);
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaterIor"), in.ior);

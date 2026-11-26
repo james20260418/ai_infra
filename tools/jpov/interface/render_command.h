@@ -1065,17 +1065,6 @@ struct WaterWaves {
     float v2_truncate_px_main = 0.0f;
     float v2_truncate_px_detail = 0.0f;
 
-    // ② 采样图案（只对 V2 生效）：
-    //      kHammersley（0，默认）= 像素足迹椭圆内的 Hammersley 静态抖动，S 个样本；
-    //      kScreen2x2  （1）      = 屏幕空间 2×2 子像素：把像素四分成 4 个 sub-px，
-    //                               各自的**世界位置按「海面是平的」推演**（rd ∩ y=level），
-    //                               再在该 xz 上解析求法线 → 各自着色 → 平均。
-    //                               S 被忽略（恒 4）；t / 深度 / 遮挡判定仍用中心像素。
-    //    为什么 2×2 值得单独做：它是像素面积的 **box 4-tap**（双线性 mip 的定义），
-    //    而 S=4 的 Hammersley 在椭圆里落成同心环上的十字，四个角根本没采到。
-    static constexpr int kV2PatternHammersley = 0;
-    static constexpr int kV2PatternScreen2x2 = 1;
-    int v2_sample_pattern = kV2PatternHammersley;
 
 };
 

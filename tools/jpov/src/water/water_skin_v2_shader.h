@@ -92,17 +92,8 @@ uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 // 每像素法线采样数 S ∈ [1, 16]（renderer 已 CHECK）。S = 1 ⇒ 只取中心法线。
 uniform int uSampleCount;
 
-// 采样图案（WaterWaves::v2_sample_pattern）：
-//   0 = Hammersley 椭圆抖动（S 个样本，面积均匀但**四角采不到**）；
-//   1 = 屏幕空间 2×2 子像素（恒 4 个样本，S 被忽略）——像素面积的 box 4-tap，
-//       即「双线性 mip」的定义；每个 sub-px 的世界位置由**平面**推演（见 SkinV2SampleAt）。
-uniform int uSamplePattern;
-
 const int   kMaxSkinSamples = 16;
 const float kBackgroundDepth = 0.999999;
-const int   kSkinV2PatternHammersley = 0;
-const int   kSkinV2PatternScreen2x2  = 1;
-const int   kSkinV2Screen2x2Samples  = 4;   // 2×2
 
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
@@ -152,7 +143,6 @@ struct WaterSurfaceV2 {
     vec3  N;              // 中心法线（S=1 时就是它；也是调试可视化用的那个）
     float cos_i;          // 中心样本的 |dot(rd, N)|
     float footprint;      // 一个像素在水面上的世界尺寸（米，沿地面**径向**；见 SkinV2SampleOffset）
-    float pixel_angle;    // 一个像素的视角尺寸（弧度，按画面高度）：footprint 的分子
     float graze;          // max(|rd.y|, 护栏)：短半轴 = 0.5·footprint·graze
 };
 
@@ -190,8 +180,8 @@ void ResolveSurfaceV2(out WaterSurfaceV2 s) {
     s.t = max(t_raw, 1.0e-3);   // 不可见的像素用安全值，只为让后续运算有定义
     s.t_plane = s.t;
 
-    s.pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
-    s.footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, s.pixel_angle);
+    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;   // 非 const：依赖 uniform
+    s.footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, pixel_angle);
     // 椭圆短轴因子：像素在水面上的足迹是**各向异性**的 ——
     //   径向（视线在水平面的投影方向）被 1/|rd.y| 拉长 ⇒ 整宽 = footprint（半轴 = 1/2）；
     //   横向方向本身就在水面内 ⇒ 整宽 = t·pixel_angle = footprint·|rd.y|。
@@ -279,24 +269,18 @@ vec2 SkinV2SampleOffset(int i, int sample_count, vec3 rd, float footprint, float
     return radial * (disk.x * long_half) + lateral * (disk.y * short_half);
 }
 
-// 本像素实际要跑的样本数：2×2 图案恒 4（S 被忽略），Hammersley 用 uSampleCount。
-// 两个 Shade* 与采样函数都用它 ⇒ “写循环的人”只有一个口径。
+// 本像素实际要跑的样本数（唯一口径）。
 int SkinV2SampleCount() {
-    if (uSamplePattern == kSkinV2PatternScreen2x2) {
-        return kSkinV2Screen2x2Samples;
-    }
     return clamp(uSampleCount, 1, kMaxSkinSamples);
 }
 
 // ── 一个采样点的全部几何（两条图案的唯一汇合点）──
 //
 // ⭐ 纪律（2026-11-26 Danis 定，**不能破**）：
-//   ① 采样点的世界 xz **一律用「海面是平的」推演**：rd_i ∩ (y = uWaterLevelY)；
-//   ② **绝不用中心像素的法线 N** 去把偏移“投影到切平面”上 —— 那会把中心法线自己的
-//      噪声当成采样位置，再采回法线 ⇒ 正反馈，噪声彻底收不住；
-//   ③ 子像素也不做波浪求交（二分在多根/掠射处会跳根）：位置只用平面解，
-//      高度场只经**解析法线**体现。
-// 法线仍然是对该 xz 的解析场求值（WaveNormalAtXZ）⇒ 波浪细节一个没丢，只是“位置”不跟着抖。
+//   ① 采样点的世界 xz 一律用「海面是平的」推演（椭圆足迹以**中心交点**为锚点铺开）；
+//   ② **绝不用中心像素的法线 N** 去把偏移"投影到切平面"上 —— 那会把中心法线自己的
+//      噪声当成采样位置，再采回法线 ⇒ 正反馈，噪声彻底收不住。
+// 法线仍然是对该 xz 的解析场求值（WaveNormalAtXZ）⇒ 波浪细节一个没丢，只是"位置"不跟着抖。
 struct SkinV2SampleGeom {
     vec3  rd;          // 该样本的视线方向（2×2 时逐子像素不同）
     vec2  pos_xz;      // 波浪局部系 xz
@@ -306,23 +290,6 @@ struct SkinV2SampleGeom {
 
 SkinV2SampleGeom SkinV2SampleAt(WaterSurfaceV2 s, int i, int sample_count) {
     SkinV2SampleGeom g;
-    if (uSamplePattern == kSkinV2PatternScreen2x2) {
-        // 2×2 子像素中心 = 像素中心 ± 0.25 px；NDC 里 1 px = 2/uViewport。
-        vec2 sub = vec2(((i & 1) != 0) ? 0.25 : -0.25, ((i & 2) != 0) ? 0.25 : -0.25);
-        g.rd = SkinV2RayDir(vNdc + sub * 2.0 / uViewport);
-        float t_plane = (uWaterLevelY - uCamPos.y) / g.rd.y;
-        if (t_plane > 0.0) {
-            g.footprint = WaveFootprint(uCamPos, g.rd, uWaterLevelY, s.pixel_angle);
-            g.pos_xz = vec2(uCamPosXZLocal.x, uCamPosXZLocal.y) + g.rd.xz * t_plane;
-        } else {
-            // 子射线指向地平线以上（只在“中心打到水、角落打到天空”的那一行像素发生）：
-            // 退回中心样本（既不脏数据，也不把 1e6 的假位置喂给法线）。
-            g.pos_xz = s.pos_xz;
-            g.footprint = s.footprint;
-        }
-        g.N = WaveNormalAtXZ(g.pos_xz, g.footprint);
-        return g;
-    }
     g.rd = s.rd;
     g.footprint = s.footprint;
     g.pos_xz = s.pos_xz + SkinV2SampleOffset(i, sample_count, s.rd, s.footprint, s.graze);

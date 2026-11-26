@@ -983,9 +983,8 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 // 两组机位（近场俯视 / 掠射远场），每组同一帧拍下面 5 张：
 //   1_v1.png           V1（3~8 px 截断 + 那套补偿）
 //   2_hammer_s4.png    V2 + Hammersley 4 样本（不截断）
-//   3_screen2x2.png    V2 + 屏幕 2×2 子像素（不截断）
-//   4_hammer_s16.png   V2 + Hammersley 16 样本（看 S 的趋势）
-//   5_trunc_t1.png     V2 + Hammersley 4 样本 + 截断 T=1（与 V1 **同一条线**，但无补偿）
+//   3_hammer_s16.png   V2 + Hammersley 16 样本（看 S 的趋势）
+//   4..7_ trunc_*      截断的四组合（主波 T / 细节波 T × 开/关）
 // 验收点：①② 的近场差别应该很小（远处才分家）；③ 四角覆盖 ⇒ 比 ② 更均匀；
 //          ⑤ 应该明显变暗变平（能量缺口 = V2 没有 V1 的补偿，这是预期的）。
 int RunCaptureWaterSkinV2(const std::string& out_dir) {
@@ -1039,18 +1038,13 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
         app.RunOnce(input, winfo, (base + "1_v1.png").c_str());
 
         app.SetWaterSkinV2(true);
-        app.SetWaterSkinV2Screen2x2(false);
         app.SetWaterSkinV2TruncateMain(0.0f);
         app.SetWaterSkinV2TruncateDetail(0.0f);
         app.SetWaterSkinV2Samples(4);
         app.RunOnce(input, winfo, (base + "2_hammer_s4.png").c_str());
 
-        app.SetWaterSkinV2Screen2x2(true);
-        app.RunOnce(input, winfo, (base + "3_screen2x2.png").c_str());
-
-        app.SetWaterSkinV2Screen2x2(false);
         app.SetWaterSkinV2Samples(16);
-        app.RunOnce(input, winfo, (base + "4_hammer_s16.png").c_str());
+        app.RunOnce(input, winfo, (base + "3_hammer_s16.png").c_str());
 
         app.SetWaterSkinV2Samples(4);
         // 截断归因扫：主波 T / 细节波 T 四个组合（谁是噪点的来源，一眼分开）。
@@ -2279,7 +2273,6 @@ int main(int argc, char** argv) {
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
     float water_truncate_main = -1.0f;    // --water-truncate-main T：主波截断乘数（<0 = 不动）
     float water_truncate_detail = -1.0f;  // --water-truncate-detail T：细节波截断乘数
-    bool water_screen2x2 = false;         // --water-2x2：V2 采样用屏幕 2×2 子像素
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
     std::string box_cut_out_dir;
@@ -2328,8 +2321,6 @@ int main(int argc, char** argv) {
             water_truncate_main = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-truncate-detail") == 0 && i + 1 < argc) {
             water_truncate_detail = std::strtof(argv[i + 1], nullptr);
-        } else if (std::strcmp(argv[i], "--water-2x2") == 0) {
-            water_screen2x2 = true;
         } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
             horizon_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
@@ -2504,9 +2495,6 @@ int main(int argc, char** argv) {
     }
     if (water_truncate_detail >= 0.0f) {
         app.SetWaterSkinV2TruncateDetail(water_truncate_detail);
-    }
-    if (water_screen2x2) {
-        app.SetWaterSkinV2Screen2x2(true);
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
