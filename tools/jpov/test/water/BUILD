@@ -137,3 +137,22 @@ cc_test(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# 水皮 V2（单像素多法线采样）GPU 测试：平面等价性（V2 == V1 逐像素）+ 采样是否真的在生效
+# + S 越大空间方差越小。见 water_skin_v2_gpu_test.cc 顶部。
+cc_test(
+    name = "water_skin_v2_gpu_test",
+    srcs = ["water_skin_v2_gpu_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/lighting:ggx_specular",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src/water:water_skin_renderer",
+        "//tools/jpov/src/water:water_skin_v2_renderer",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

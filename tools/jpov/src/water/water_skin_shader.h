@@ -115,6 +115,12 @@ uniform vec3  uSunToward;         // 指向太阳（气侧，单位）
 uniform vec3  uSunIrradiance;     // color × intensity（辐照度语义）
 uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 uniform float uSunFootprint;      // 像素足迹带宽开关（1 = 开；GPU 对拍测试置 0）
+// 方差系两个消费点的开关（**V1 / V2 共用**，Danis 2026-11-26 交互 A/B 用）：
+//   uSunLobeOn = 0 ⇒ 太阳 lobe 只剩盘角带宽（不叠加足迹 / 像素内法线方差）
+//   uEnvLodOn  = 0 ⇒ 探针 LOD 恒 0（不模糊）
+// 默认 1/1 ⇒ 与历史行为**逐字节相同**（V1 gold 门禁）。
+uniform int   uSunLobeOn;
+uniform int   uEnvLodOn;
 
 const float kBackgroundDepth = 0.999999;
 
@@ -161,6 +167,7 @@ struct WaterShade {
     float alpha;           // 层遮挡率
     float fresnel_debug;   // 调试用（uWaveDebug=13）：水上=F，水下=0
     float env_lod_debug;   // 调试用（uWaveDebug=11）：水上=env_lod，水下=0
+    float a2_debug;        // 调试用（uWaveDebug=14）：水上=太阳 lobe 的 a2，水下=0
     vec3  refl_debug;      // 调试用（uWaveDebug=12）：水上=refl，水下=0
 };
 
@@ -298,10 +305,11 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
             // ⚠️ **不再叠加解析 σ_slope**（2026-11-18 定）：波浪法线是逐像素解析梯度，
             //    再把 σ_slope 当带宽加进去 = 双计 + 抹平闪光（known_issue §11）。
             // 方差项 → α² 也要 ×2（α² = 2σ²，与 RoughFresnelAlbedo 同一口径）。
-            float a2 = min(GgxDiskBandwidthA2(uSunAngularRadius)
-                           + uSunFootprint * s.footprint_a2
-                           + 2.0 * s.normal_var_px,
-                           0.25);
+            float a2 = GgxDiskBandwidthA2(uSunAngularRadius);
+            if (uSunLobeOn != 0) {
+                a2 = min(a2 + uSunFootprint * s.footprint_a2 + 2.0 * s.normal_var_px, 0.25);
+            }
+            o.a2_debug = a2;   // 调试 14：与 V2 的同一口径对比用
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
             float Fw = F;
@@ -330,7 +338,7 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
     float refl_sigma = sqrt(max(s.var_p, 0.0) + max(s.normal_var_px, 0.0));
     float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
     float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, rdir.y));
-    float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
+    float env_lod = (uEnvLodOn != 0) ? clamp(env_lod_need, 0.0, env_lod_cap) : 0.0;
     vec3 refl = textureLod(uEnvCube, rdir, env_lod).rgb * uEnvScale;
 
     // 环境反射 + 太阳的像。
@@ -425,6 +433,13 @@ void EmitDebug(WaterSurface s, WaterShade o, int mode) {
     if (mode == 13) {
         // 反射率 F
         oAccum  = vec4(vec3(o.fresnel_debug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (mode == 14) {
+        float v = clamp(o.a2_debug / 0.25, 0.0, 1.0);
+        oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;

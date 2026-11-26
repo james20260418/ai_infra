@@ -616,6 +616,7 @@ Renderer::~Renderer() {
     fog_renderer_.Finalize();
     fog_composite_.Finalize();
     water_skin_renderer_.Finalize();
+    water_skin_v2_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1326,6 +1327,7 @@ void Renderer::Init(
     fog_renderer_.Init(&shader_mgr_);
     fog_composite_.Init(&shader_mgr_, water::kWaterMediumGlsl);
     water_skin_renderer_.Init(&shader_mgr_);
+    water_skin_v2_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
@@ -2064,13 +2066,44 @@ void Renderer::Render(const RenderCommandList& cmds,
                     }
                 }
 
-                water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
-                water_skin_renderer_.Draw(wsi);
-                // 只有相机在水上时才启用「水皮包住水体」的约定。
-                if (!cam_underwater) {
-                    water_layer_index = layers.count;
+                // 选 V1 / V2 两版水皮：**两份独立的 pass**（各自的 program / WBO），不共用对象。
+                // 口径与 CHECK 全在各自的 renderer 里；这里只做二选一。
+                // 为什么要分成两份：V2 要删掉 V1 的 9 个补偿口径（谱截断/方差/屏幕导数…），
+                // 在同一个着色函数里用 if 切两套逻辑会让 V1 的注释与不变式全部失效。
+                if (cmds.water->waves.v2) {
+                    // 采样数的范围由 Draw 的 CHECK 拦住（单一执法点）。
+                    const int samples = cmds.water->waves.v2_sample_count;
+                    // CSM：与 strip 同一套填法（阴影 pass 属于主链路，水皮只是消费者）。
+                    WaterCsmShadow water_csm;
+                    if (eff_sun.has_value() && !shadow_fbos_.empty()) {
+                        water_csm.sun = eff_sun;
+                        water_csm.cfg = shadow_cfg_;
+                        water_csm.fbos = shadow_fbos_;
+                        for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+                            std::memcpy(water_csm.vp[c], shadow_vp_[c],
+                                        sizeof(water_csm.vp[c]));
+                            std::memcpy(water_csm.depth_vp[c], shadow_depth_vp_[c],
+                                        sizeof(water_csm.depth_vp[c]));
+                            water_csm.texel_world[c] = shadow_texel_world_[c];
+                        }
+                    }
+                    const WaterCsmShadow* water_csm_ptr =
+                        water_csm.IsValid() ? &water_csm : nullptr;
+                    water_skin_v2_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                    water_skin_v2_renderer_.Draw(wsi, samples, water_csm_ptr);
+                    if (!cam_underwater) {
+                        water_layer_index = layers.count;
+                    }
+                    layers.Add(water_skin_v2_renderer_.layer());
+                } else {
+                    water_skin_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                    water_skin_renderer_.Draw(wsi);
+                    // 只有相机在水上时才启用「水皮包住水体」的约定。
+                    if (!cam_underwater) {
+                        water_layer_index = layers.count;
+                    }
+                    layers.Add(water_skin_renderer_.layer());
                 }
-                layers.Add(water_skin_renderer_.layer());
 
                 // Draw 改了 FBO / viewport / 纹理单元：恢复主 3D 目标。
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);

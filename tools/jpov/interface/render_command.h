@@ -1036,6 +1036,51 @@ struct WaterWaves {
         float wind_speed_ms = 0.0f;  // 10 m 高处风速（m/s）；0 = 不加短波
     };
     ShortWave short_wave;
+
+    // ── 水皮实现版本（V1 / V2）──────────────────────────────────────────────
+    // 见 docs/jpov_water_skin_v2_design.md。两个版本是**两份独立的 pass**（各自的
+    // renderer / program / WBO），这里只决定 Renderer 走哪一份：
+    //   · false（默认）= V1：按像素足迹截断谱（3~8 px smoothstep）+ 屏幕导数补偿；
+    //   · true        = V2：表内 72 条波**全部采样、不截断**，每像素 S 个法线各自着色后平均。
+    // ⚠️ 为什么放在 WaterWaves 而不是 WaterCommand：天球折射（Snell 窗）与水皮必须用
+    //    **同一口径的谱**，否则窗缘会漏色（见 src/water/water_wave_uniforms.h 顶部）。
+    //    放在谱配置里 ⇒ 两个消费者自动同源，不需要各自再传一份。
+    bool v2 = false;
+
+    // V2 每像素的法线采样数，∈ [1, 16]（默认 4）。只有 v2 = true 时被消费。
+    // 1 = 只取中心法线（退化成「不采样」，但仍无谱截断）；越大越接近面积分，代价线性。
+    // 非 [1, 16] 由 Renderer CHECK 拦住（不静默夹取：S=0 会画出全黑，S=32 会让帧卡死）。
+    int v2_sample_count = 4;
+
+    // ① 谱截断乘数（**主波 / 细节波分开**，Danis 2026-11-26）：把阈值对
+    //    (kWaveLodPxMin, kWaveLodPxMax) = (3, 8) px 同时乘 T。
+    //      T = 0  ⇒ 这一族不截断
+    //      T = 1  ⇒ 与 V1 **同一条线**（乘 1.0 是 IEEE 精确的 ⇒ V1/天球逐字节不变）
+    //      T = 2  ⇒ 6~16 px（更早截断）
+    //    为什么分两个：主波还管几何/剪影（求交、层深），细节波只进法线 ——
+    //    噪点到底来自哪一族要能单独归因，一个旋钮一起动就分不清。
+    //    ⚠️ V2 截断后**不做 V1 那套补偿**（var_p / env_lod / 导数项都退休了）⇒
+    //        T > 0 时远场能量会变，这是预期的缺口：这两个是验收旋钮，不是产品外观。
+    //    ⚠️ 天球折射（Snell 窗缘）必须同口径 —— 由 water::ResolveWaveTruncation() 统一给。
+    // 默认值 = **2026-11-26 验收通过的样貌**：主波不截断、细节波按 V1 那条 3~8 px 线截断。
+    // （结论来自实测：噪点元凶是细节波；主波截断反而把远处的"骨架"拿掉。）
+    float v2_truncate_px_main = 0.0f;
+    float v2_truncate_px_detail = 1.0f;
+
+    // ② 亚像素补偿的三条通道（known_issue §10.16 的 M1/M2/M3），各自一个开关便于比对。
+    //    三条通道补偿的都是「**没解析的斜率**」：近场只有 MSS 属于这一档（≲10 m），
+    //    10 m 之外细节波逐段掉进"未解析"，700 m 只剩主波 + MSS。
+    //    · `v2_m1`  lobe 拉宽：`a2 = min(盘角² + 2σ², 0.25)`。σ² 与 F_eff/env_lod 同一份
+    //               （MSS + 被截断的表内波）。**必须与 M2 一起开**，否则能量不守恒。
+    //    · `v2_m2`  多散射能量对账：`spec *= 1 + F̄·(1−E_ss)/E_ss`（Turquin 2019 形式；
+    //               `E_ss` 用 Karis 的解析 DFG 拟合，TODO 换 32×32 Kulla–Conty LUT）。
+    //    · `v2_m3`  glints：各向异性 lobe（主轴 = 风向，比例取 MSS 的 2.7:1）
+    //               + 静态颗粒调制（近似 Yan 2017；不是完整 position-free glints）。
+    //    ⚠️ F_eff（⇒ α / 透射率）**没有开关**：那是菲涅尔的物理口径，关掉就不是水了。
+    bool v2_env_lod = true;
+    bool v2_m1 = true;
+    bool v2_m2 = true;
+    bool v2_m3 = false;
 };
 
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。

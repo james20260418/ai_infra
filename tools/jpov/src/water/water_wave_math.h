@@ -78,6 +78,20 @@ inline float WaveFootprintM(float t_plane_m, float ray_dir_y, float pixel_angle_
     return std::min(t_plane_m * pixel_angle_rad / graze, kMaxFootprintM);
 }
 
+// 相位局部原点（米）—— V2 水皮的数值手段（docs/jpov_water_skin_v2_design.md §8.1）。
+//
+// 问题：相位 = k·dot(d, p)，细节波的 k 可达 2π/0.3 ≈ 21 /m；p 到 1e5~1e6 m 时
+//   float32 的 ulp 已经是 0.008~0.06 m ⇒ 相位误差 0.2~2 rad ⇒ 远处波锋变成随机噪声。
+// 解法：把 p 换成 `p − origin`（GPU），把 k·dot(d, origin) **算进初相**（CPU，double）。
+//   数学上完全等价，只是让 GPU 那边乘的是小数。
+// 量化到 1 km：不量化则 origin 随相机逐帧变（数学等价，但 float 重排让静止画面
+//   逐帧微抖）；量化后相机在 1 km 格内移动时 origin 恒定。
+// 0 ⇒ 与旧版**逐位相同**（V1 永远传 0）。
+inline constexpr float kWavePhaseOriginQuantumM = 1000.0f;
+inline float WavePhaseOriginM(float world_m) {
+    return std::floor(world_m / kWavePhaseOriginQuantumM) * kWavePhaseOriginQuantumM;
+}
+
 // 二分次数：区间半宽 = ΣA/|rd.y|，12 次 ⇒ 精度 = 区间/4096（ΣA=1 m、|rd.y|=0.3 时 ~0.8 mm）。
 // 用二分而不是 Newton：区间端点必有变号（|h| ≤ ΣA），全局收敛且相邻像素连续
 // （Newton 在波谷/陡坡处 f'→0 会跳根，实测表现为法线噪点）。

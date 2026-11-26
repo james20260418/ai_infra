@@ -130,7 +130,7 @@ public:
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
-        cmds->camera.far      = 1000.0f;  // 场景 R 最大 300，far 足够
+        cmds->camera.far      = 3000.0f;  // 场景 R 最大 900（2026-11-26 ×3），far 留余量
 
         // ── 光照：由滑条状态经 sky 推导（含 Turb*Loss/季节色温）──
         const NoonLighting light = MakeLighting(elev_deg_, turbidity_, daylight_season_r_);

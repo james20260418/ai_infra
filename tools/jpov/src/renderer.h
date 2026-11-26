@@ -18,6 +18,7 @@
 #include "tools/jpov/src/fog/fog_composite_renderer.h"
 #include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/water/water_skin_renderer.h"
+#include "tools/jpov/src/water/water_skin_v2_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
@@ -376,7 +377,9 @@ private:
     // 见 src/fog/fog_composite_renderer.h。
     FogCompositeRenderer fog_composite_;
     // 水皮（界面层）：只产层，合成交给 fog_composite_ 的「场段 ↔ 层」交替积分。
+    // V1 / V2 是**两份独立的 pass**，由 `WaterWaves::v2` 二选一（docs/jpov_water_skin_v2_design.md）。
     WaterSkinRenderer water_skin_renderer_;
+    WaterSkinV2Renderer water_skin_v2_renderer_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。

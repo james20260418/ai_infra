@@ -103,6 +103,41 @@ cc_library(
         ":water_wave_math",
         ":water_wave_uniforms",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src:csm_shadow_glsl",   # CSM 单次采样（与 fog/strip 同一份）
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src:transparent_layer",
+        "//tools/jpov/src/lighting:ggx_specular",
+        "//tools/jpov/src/wbo:wbo_target",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 水皮 V2（单像素多法线采样）的整份 pass：与 water_skin_renderer **互斥**，
+# 由 WaterWaves::v2 二选一（见 docs/jpov_water_skin_v2_design.md）。
+# 输入契约直接复用 V1 的 Inputs（面板滑条共用），输出 WBO 三槽语义与 V1 逐项相同。
+cc_library(
+    name = "water_skin_v2_renderer",
+    srcs = ["water_skin_v2_renderer.cc"],
+    hdrs = [
+        "water_skin_v2_renderer.h",
+        "water_skin_v2_shader.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":water_medium_math",
+        ":water_skin_math",
+        ":water_skin_renderer",   # 共享输入契约（WaterSkinRenderer::Inputs）
+        ":water_wave_math",
+        ":water_wave_uniforms",
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/src:csm_shadow_glsl",   # CSM 单次采样（与 fog/strip 同一份）
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",
         "//tools/jpov/src/lighting:ggx_specular",

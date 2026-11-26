@@ -57,6 +57,8 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.box_mesh_    = app.RegisterMesh(jpov::MeshData::MakeBox(
         jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
         jpov_skylight::kBoxHalf));
+    // 方形立柱（1.2 × 12 × 1.2 m）：给水面投一条影，验收 CSM 用。
+    app.pillar_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.6f, 6.0f, 0.6f));
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
     app.ground_strip_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad(
         jpov_skylight::kLadderStripHalfWidth, jpov_skylight::kLadderStripHalfDepth));
@@ -971,6 +973,99 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 
     LOG(INFO) << "water waves A/B captured to " << out_dir
               << " (water_waves_off / low / mid / high)";
+    app.Finalize();
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 水皮 V2 验收（2026-11-26）：同一机位 A/B —— V1 / V2(S=4,S=16) / 两个截断旋钮的组合。
+//
+// 用法：jpov_skylight_viewer --capture-skin-v2 <out_dir>
+//
+// 两组机位（近场俯视 / 掠射远场），每组同一帧拍下面 5 张：
+//   1_v2_default.png   V2 默认样貌（V1 开关已移除）
+//   2_hammer_s4.png    V2 + Hammersley 4 样本（不截断）
+//   3_hammer_s16.png   V2 + Hammersley 16 样本（看 S 的趋势）
+//   4..7_ trunc_*      截断的四组合（主波 T / 细节波 T × 开/关）
+// 验收点：①② 的近场差别应该很小（远处才分家）；③ 四角覆盖 ⇒ 比 ② 更均匀；
+//          ⑤ 应该明显变暗变平（能量缺口 = V2 没有 V1 的补偿，这是预期的）。
+int RunCaptureWaterSkinV2(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水皮 V2 验收（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+    app.SetWaterWaves(true);
+    app.SetWaterLevel(0.0f);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 18.0f;
+    app.deg_.sun_azim_deg    = 214.0f;   // 与相机朝向同侧 ⇒ 水面能收到日盘像
+
+    struct Shot { const char* prefix; float phi; float theta; float radius; };
+    const Shot kShots[3] = {
+        {"near", 0.30f, 0.6f, 20.0f},   // ≈17° 俯视：近场波纹/碎光
+        {"graze", 0.06f, 0.6f, 40.0f},  // ≈3.4° 掠射：足迹大 ⇒ 摩尔纹最先在这里出现
+        {"high", 0.10f, 0.6f, 700.0f},  // 高空掠射（≈5.7°/700 m 远，高 70 m）：天际线 + 远场整体
+    };
+    for (const Shot& shot : kShots) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = shot.phi;
+        app.view_.theta = shot.theta;
+        app.view_.R     = shot.radius;
+
+        const std::string base = out_dir + "/" + shot.prefix + "_";
+        app.RunOnce(input, winfo, (base + "1_v2_default.png").c_str());
+
+        app.SetWaterSkinV2TruncateMain(0.0f);
+        app.SetWaterSkinV2TruncateDetail(0.0f);
+        app.SetWaterSkinV2Samples(4);
+        app.RunOnce(input, winfo, (base + "2_hammer_s4.png").c_str());
+
+        app.SetWaterSkinV2Samples(16);
+        app.RunOnce(input, winfo, (base + "3_hammer_s16.png").c_str());
+
+        app.SetWaterSkinV2Samples(4);
+        // 截断归因扫：主波 T / 细节波 T 四个组合（谁是噪点的来源，一眼分开）。
+        {
+            struct TS { float main_t; float detail_t; const char* suffix; };
+            const TS kTs[4] = {{1.0f, 1.0f, "5_trunc_main1_detail1.png"},
+                               {1.0f, 0.0f, "6_trunc_main1_detail0.png"},
+                               {0.0f, 1.0f, "7_trunc_main0_detail1.png"},
+                               {0.0f, 0.0f, "8_trunc_off.png"}};
+            for (const TS& ts : kTs) {
+                app.SetWaterSkinV2TruncateMain(ts.main_t);
+                app.SetWaterSkinV2TruncateDetail(ts.detail_t);
+                app.RunOnce(input, winfo, (base + ts.suffix).c_str());
+            }
+            app.SetWaterSkinV2TruncateMain(0.0f);
+            app.SetWaterSkinV2TruncateDetail(0.0f);
+        }
+
+    }
+    LOG(INFO) << "water skin v2 A/B captured to " << out_dir;
     app.Finalize();
     return 0;
 }
@@ -2171,8 +2266,16 @@ int main(int argc, char** argv) {
     std::string mat_out_dir;
     std::string water_out_dir;
     std::string water_waves_out_dir;
+    std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/V2/截断组合）
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
+    int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
+    int water_env_lod = -1;               // --water-env-lod 0|1：V2 探针模糊（σ²⇒env LOD）
+    int water_m1 = -1;                    // --water-m1 0|1：V2 lobe 拉宽
+    int water_m2 = -1;                    // --water-m2 0|1：V2 多散射能量对账
+    int water_m3 = -1;                    // --water-m3 0|1：V2 glints（各向异性+颗粒）
+    float water_truncate_main = -1.0f;    // --water-truncate-main T：主波截断乘数（<0 = 不动）
+    float water_truncate_detail = -1.0f;  // --water-truncate-detail T：细节波截断乘数
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
     std::string box_cut_out_dir;
@@ -2207,10 +2310,26 @@ int main(int argc, char** argv) {
             water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-waves") == 0 && i + 1 < argc) {
             water_waves_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-skin-v2") == 0 && i + 1 < argc) {
+            water_skin_v2_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--water-waves") == 0) {
             start_water_waves = true;
         } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
             wave_time_s = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-samples") == 0 && i + 1 < argc) {
+            water_samples = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-env-lod") == 0 && i + 1 < argc) {
+            water_env_lod = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m1") == 0 && i + 1 < argc) {
+            water_m1 = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m2") == 0 && i + 1 < argc) {
+            water_m2 = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-m3") == 0 && i + 1 < argc) {
+            water_m3 = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-truncate-main") == 0 && i + 1 < argc) {
+            water_truncate_main = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-truncate-detail") == 0 && i + 1 < argc) {
+            water_truncate_detail = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
             horizon_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
@@ -2276,6 +2395,9 @@ int main(int argc, char** argv) {
     }
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir);
+    }
+    if (!water_skin_v2_out_dir.empty()) {
+        return RunCaptureWaterSkinV2(water_skin_v2_out_dir);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);
@@ -2367,6 +2489,30 @@ int main(int argc, char** argv) {
     }
     if (wave_time_s >= 0.0f) {
         app.SetWaterWaveTime(wave_time_s);
+    }
+    // 水皮版本：V2 是独立的一整份 pass（见 docs/jpov_water_skin_v2_design.md）。
+    if (water_samples >= 0) {
+        // 不夹范围：非法值交给 Renderer 的 CHECK（CLI 手误要看得到报错）。
+        app.SetWaterSkinV2Samples(water_samples);
+    }
+    // V2 的两个验收旋钮（谱截断：主波 T / 细节波 T）。
+    if (water_env_lod >= 0) {
+        app.SetWaterSkinV2EnvLod(water_env_lod != 0);
+    }
+    if (water_m1 >= 0) {
+        app.SetWaterSkinV2M1(water_m1 != 0);
+    }
+    if (water_m2 >= 0) {
+        app.SetWaterSkinV2M2(water_m2 != 0);
+    }
+    if (water_m3 >= 0) {
+        app.SetWaterSkinV2M3(water_m3 != 0);
+    }
+    if (water_truncate_main >= 0.0f) {
+        app.SetWaterSkinV2TruncateMain(water_truncate_main);
+    }
+    if (water_truncate_detail >= 0.0f) {
+        app.SetWaterSkinV2TruncateDetail(water_truncate_detail);
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──

@@ -29,6 +29,23 @@ uniform sampler2D uWaveFlowMap;    // RG 编码 (flow*0.5+0.5)
 uniform vec2  uWaveFlowUvScale;    // p.xz * scale -> uv
 uniform float uWaveFlowStrength;   // flow 整体增益
 uniform int   uWaveDisplace;       // 0 = 法线 only（debug）；1 = 真位移
+// 谱截断阈值对 (kWaveLodPxMin, kWaveLodPxMax) 的 **两个独立乘数**（>= 0）：
+//   T = 1（默认）⇒ 与 V1 完全同一条线（乘 1.0 是 IEEE 精确的 ⇒ 逐字节不变）；
+//   T = 0        ⇒ 这一族不截断；
+//   T > 1        ⇒ 线往长波方向平移（更早截断）。
+// **主波与细节波分开**（Danis 2026-11-26）：它们承担的角色不同（主波还管几何/剪影、
+// 细节波只进法线），所以噪点的来源要能分开归因，而不是一个旋钮一起动。
+// V1 与天球折射永远传 1.0/1.0。
+uniform float uWaveTruncatePxMain;
+uniform float uWaveTruncatePxDetail;
+// 相位局部原点（xz，米）—— **帧约定**：V2 水皮传进来的 `p` 已经是「相对本原点的局部
+// xz」（见 water_skin_v2_shader.h::ResolveSurfaceV2），所以本片段所有相位都直接用 p。
+// 本 uniform 只有一处用途：把**flow map 的采样位置**还原回世界系（flow 图案必须世界锚定，
+// 否则相机每跨 1 km 图案就滑动一次）。
+// CPU 侧的初相已预算进 `k·dot(d, origin)`（见 water_wave_uniforms.cc），与局部坐标合起来
+// 和「世界坐标直接求值」数学等价，但 GPU 侧乘的是小数 ⇒ 不丢相位精度。
+// (0,0)（V1 与天球）= 传世界坐标、逐位与旧版相同（`p + 0` 是恒等运算）。
+uniform vec2  uWaveOriginXZ;
 // 域扭曲（domain warp）：低频位移场，θ += k·dot(u, d)。uWaveWarpAmp = 0 ⇒ 关。
 uniform float uWaveWarpAmp;        // 每条载波的位移幅度（米）
 uniform vec4  uWaveWarp[4];        // 每条载波 (k, dir_x, dir_z, phase)
@@ -56,6 +73,31 @@ const float kWaveLodPxMax = 8.0;
 // 那会把足迹系统性算小 3 倍（远处"看起来很细"其实是亚像素波没被杀）。
 const float kWaveGrazeFloorSin = 1.0e-4;
 const float kWaveMaxFootprintM = 1.0e6;
+
+// 一条波在当前像素足迹下还剩多少振幅（谱截断 / 抗锯齿）：
+//   · truncate_px <= 0 ⇒ 恒 1（这一族不截断，靠采样做面积分）；
+//   · footprint == 0   ⇒ 恒 1（未给足迹：不截断）；
+//   · 波长 > T·kWaveLodPxMax 像素 ⇒ 1；≤ T·kWaveLodPxMin ⇒ 0；中间 smoothstep。
+// 唯一出处：WaveSampleAt / WaveDetailGrad / WaveAmplitudeSum / WaveSlopeTensor 都调它，
+// 主波传 uWaveTruncatePxMain、细节波传 uWaveTruncatePxDetail。
+float WaveLodAmp(float k, float footprint, float truncate_px) {
+    if (!(truncate_px > 0.0) || footprint <= 1.0e-6) {
+        return 1.0;
+    }
+    // ⚠️ 这里是普通 float（不是 const）：GLSL 的 const 必须编译期常量，而 T 是 uniform。
+    float lod_px_min = kWaveLodPxMin * truncate_px;
+    float lod_px_max = kWaveLodPxMax * truncate_px;
+    float wavelength_px = (6.283185307179586 / k) / footprint;
+    if (wavelength_px <= lod_px_min) {
+        return 0.0;
+    }
+    if (wavelength_px < lod_px_max) {
+        float u = (wavelength_px - lod_px_min) / (lod_px_max - lod_px_min);
+        return u * u * (3.0 - 2.0 * u);
+    }
+    return 1.0;
+}
+
 
 // 像素在水面上覆盖的世界尺寸（米）—— 与 CPU 的 water::WaveFootprintM 同一公式。
 float WaveFootprint(vec3 cam_pos, vec3 ray_dir, float level_y, float pixel_angle) {
@@ -131,17 +173,8 @@ void WaveSlopeTensor(float footprint, out float sxx, out float sxz, out float sz
             }
             float k = uWaveL[i].x;
             float amp = uWaveL[i].z;          // 完整振幅（方差与几何无关）
-            float lod_amp = 1.0;
-            if (footprint > 1.0e-6) {
-                float wavelength_px = (6.283185307179586 / k) / footprint;
-                if (wavelength_px <= kWaveLodPxMin) {
-                    lod_amp = 0.0;
-                } else if (wavelength_px < kWaveLodPxMax) {
-                    float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
-                    lod_amp = u * u * (3.0 - 2.0 * u);
-                }
-            }
-            float geom = lod_amp;             // 仍在几何里的比例
+            // 几何里还剩多少（谱截断）：w = ½(kA)²·(1 − geom²) 是被去掉的那部分。
+            float geom = WaveLodAmp(k, footprint, uWaveTruncatePxMain);
             float a = amp * k;
             float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDir[i];
@@ -156,17 +189,7 @@ void WaveSlopeTensor(float footprint, out float sxx, out float sxz, out float sz
             }
             float k = uWaveDetailL[i].x;
             float amp = uWaveDetailL[i].y;    // 完整振幅
-            float lod_amp = 1.0;
-            if (footprint > 1.0e-6) {
-                float wavelength_px = (6.283185307179586 / k) / footprint;
-                if (wavelength_px <= kWaveLodPxMin) {
-                    lod_amp = 0.0;
-                } else if (wavelength_px < kWaveLodPxMax) {
-                    float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
-                    lod_amp = uu * uu * (3.0 - 2.0 * uu);
-                }
-            }
-            float geom = lod_amp;
+            float geom = WaveLodAmp(k, footprint, uWaveTruncatePxDetail);
             float a = amp * k;
             float w = 0.5 * a * a * (1.0 - geom * geom);
             vec2 d = uWaveDetailDir[i];
@@ -204,7 +227,9 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
         return;
     }
 
-    vec2 flow = WaveFlowAt(p);
+    // flow map 是**世界空间**的纹理（图案不随相机移动）⇒ 采样前把局部坐标还原成世界坐标。
+    // 其余一切（相位、warp）都用传进来的 p（V2 是局部坐标，V1/天球是世界坐标）。
+    vec2 flow = WaveFlowAt(p + uWaveOriginXZ);
     float flen = length(flow);
     vec2 fdir = (flen > 1.0e-6) ? flow / flen : vec2(0.0);
     float blend = (flen > 1.0e-6) ? clamp(uWaveFlowAlign * flen, 0.0, 1.0) : 0.0;
@@ -236,16 +261,9 @@ void WaveSampleAt(vec2 p, float t, float footprint, bool need_grad,
         float omega = L.y;
         // 按像素足迹做谱截断（不是 mip）：细于 2 px 的波必须消失，
         // 否则远处波峰交界处的法线逐像素乱跳 ⇒ 反射/碎光变麻点。
-        float lod_amp = 1.0;
-        if (footprint > 1.0e-6) {
-            float wavelength_px = (6.283185307179586 / k) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
-                lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
-                lod_amp = u * u * (3.0 - 2.0 * u);
-            }
-        }
+        // 主波用 uWaveTruncatePxMain（与 WaveSlopeTensor / WaveAmplitudeSum 必须同口径，
+        // 否则方差、二分区间与场本身会各说各话）。
+        float lod_amp = WaveLodAmp(k, footprint, uWaveTruncatePxMain);
         float amp = L.z * amp_gain * lod_amp;
         if (amp == 0.0) {
             continue;   // 亚像素（足迹截断）整条消失：省掉下面的 sin/cos
@@ -288,16 +306,7 @@ void WaveDetailGrad(vec2 p, float t, float footprint,
         float dl = length(d);
         d = (dl > 1.0e-6) ? d / dl : vec2(1.0, 0.0);
         float k = L.x;
-        float lod_amp = 1.0;
-        if (footprint > 1.0e-6) {
-            float wavelength_px = (6.283185307179586 / k) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
-                lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float uu = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
-                lod_amp = uu * uu * (3.0 - 2.0 * uu);
-            }
-        }
+        float lod_amp = WaveLodAmp(k, footprint, uWaveTruncatePxDetail);
         float amp = L.y * lod_amp;
         if (amp == 0.0) {
             continue;   // 亚像素（lod_amp=0）或已淡出：省掉下面的 cos
@@ -317,20 +326,26 @@ vec3 WaveNormalFromGrad(vec2 grad) {
     return normalize(vec3(-grad.x, 1.0, -grad.y));
 }
 
-// 采样射线参数 tt 处的完整法线（主波梯度 + 细节波梯度）。
+// **平面上任意一点**的完整法线（主波梯度 + 细节波梯度）。
+// 唯一出处：WaveNormalAt 与 V2 水皮（按采样点求法线）都走这里。
+vec3 WaveNormalAtXZ(vec2 p_xz, float footprint) {
+    float h;
+    vec2 grad;
+    WaveSampleAt(p_xz, uWaveTime, footprint, /*need_grad=*/true, h, grad);
+    vec2 wu, wdux, wduz;
+    WaveWarpAt(p_xz, /*need_grad=*/true, wu, wdux, wduz);
+    vec2 dgrad;
+    WaveDetailGrad(p_xz, uWaveTime, footprint, wu, wdux, wduz, dgrad);
+    return WaveNormalFromGrad(grad + dgrad);
+}
+
+// 采样射线参数 tt 处的完整法线（= 交点 xz 上的 WaveNormalAtXZ）。
 // ⚠️ **必须与“求交怎么定 t”解耦**：细节波不进求交，主波被足迹截断后它们仍在几何里。
 //    旧版把法线求值塞在二分成功之后，一旦走进兜底分支就整片退化成平法线
 //    （2026-11-23 报障的「波在固定距离硬消失」）。与 CPU 的 sample_at/finish 同口径。
 vec3 WaveNormalAt(vec3 cam, vec3 ray_dir, float tt, float footprint) {
     vec3 p = cam + ray_dir * tt;
-    float h;
-    vec2 grad;
-    WaveSampleAt(p.xz, uWaveTime, footprint, /*need_grad=*/true, h, grad);
-    vec2 wu, wdux, wduz;
-    WaveWarpAt(p.xz, /*need_grad=*/true, wu, wdux, wduz);
-    vec2 dgrad;
-    WaveDetailGrad(p.xz, uWaveTime, footprint, wu, wdux, wduz, dgrad);
-    return WaveNormalFromGrad(grad + dgrad);
+    return WaveNormalAtXZ(p.xz, footprint);
 }
 
 // f(t) = (cam.y + rd.y·t − level) − h(p.xz)
@@ -358,16 +373,8 @@ float WaveAmplitudeSum(float footprint) {
         if (i >= uWaveCount) {
             break;
         }
-        float lod_amp = 1.0;
-        if (footprint > 1.0e-6) {
-            float wavelength_px = (6.283185307179586 / uWaveL[i].x) / footprint;
-            if (wavelength_px <= kWaveLodPxMin) {
-                lod_amp = 0.0;
-            } else if (wavelength_px < kWaveLodPxMax) {
-                float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
-                lod_amp = u * u * (3.0 - 2.0 * u);
-            }
-        }
+        // 必须与场同口径（主波 T），否则二分区间可能撑不住真实振幅 ⇒ 落到平面兜底。
+        float lod_amp = WaveLodAmp(uWaveL[i].x, footprint, uWaveTruncatePxMain);
         float aa = uWaveL[i].z * lod_amp * gain;
         s += aa;
         if (uWaveStokes2 != 0) {
