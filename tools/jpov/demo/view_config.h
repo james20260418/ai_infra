@@ -38,7 +38,7 @@ struct ViewConfig {
 
     // 最小 / 最大相机距离（米），滚轮 clamp。
     static constexpr double kRMin = 0.1;
-    static constexpr double kRMax = 300.0;
+    static constexpr double kRMax = 900.0;   // 2026-11-26：从 300 抬到 900（高空看海验收）
 
     // 目标点：恒定 (0,0,0)。
     static jpov::Vec3f Target() { return {0.0f, 0.0f, 0.0f}; }

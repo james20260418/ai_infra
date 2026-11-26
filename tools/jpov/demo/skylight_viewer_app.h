@@ -585,7 +585,7 @@ public:
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
-        cmds->camera.far      = 1000.0f;
+        cmds->camera.far      = 3000.0f;   // R 最大 900（2026-11-26 ×3）
 
         // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
