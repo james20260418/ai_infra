@@ -350,13 +350,16 @@ public:
     // V2 验收旋钮（见 interface/render_command.h 的注释）：
     //   T = 谱截断乘数（0 = 不截断，1 = 与 V1 同一条线 3~8 px）；
     //   2×2 = 屏幕空间四分子像素采样（与 Hammersley 互斥）。
-    float water_v2_truncate_px_ = 0.0f;
+    // 两个截断乘数：主波 / 细节波分开（0 = 该族不截断，1 = 与 V1 同线）。
+    float water_v2_truncate_main_ = 0.0f;
+    float water_v2_truncate_detail_ = 0.0f;
     bool water_v2_screen2x2_ = false;
     void SetWaterSkinV2(bool on) { water_v2_ = on; }
     void SetWaterSkinV2Samples(int sample_count) {
         water_v2_samples_f_ = static_cast<float>(sample_count);
     }
-    void SetWaterSkinV2TruncatePx(float t) { water_v2_truncate_px_ = t; }
+    void SetWaterSkinV2TruncateMain(float t) { water_v2_truncate_main_ = t; }
+    void SetWaterSkinV2TruncateDetail(float t) { water_v2_truncate_detail_ = t; }
     void SetWaterSkinV2Screen2x2(bool on) { water_v2_screen2x2_ = on; }
 
     // ── 水下验收物体：蓝人（skinned）──
@@ -861,7 +864,8 @@ public:
             // 滑条是 float ⇒ 四舍五入成 int；范围不在这里夹（Renderer 的 CHECK 会拦住）。
             w.waves.v2 = water_v2_;
             w.waves.v2_sample_count = static_cast<int>(std::lround(water_v2_samples_f_));
-            w.waves.v2_truncation_px = water_v2_truncate_px_;
+            w.waves.v2_truncate_px_main = water_v2_truncate_main_;
+            w.waves.v2_truncate_px_detail = water_v2_truncate_detail_;
             w.waves.v2_sample_pattern = water_v2_screen2x2_
                                                 ? jpov::WaterWaves::kV2PatternScreen2x2
                                                 : jpov::WaterWaves::kV2PatternHammersley;
@@ -930,7 +934,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 15;   // 场景4：row(0,0..13) + row(1,0..14)
+        constexpr int kOceanLabPanelRows = 16;   // 场景4：row(0,0..13) + row(1,0..15)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
                         : IsWaterScene() ? kWaterPanelRows
@@ -1048,20 +1052,21 @@ private:
                 ui_.Checkbox("水皮 V2（多法线采样）", &water_v2_, row(1, 4));
                 ui_.SliderFloat("水皮 S 采样数（V2）", &water_v2_samples_f_, row(1, 5),
                                 1.0f, 16.0f, 0);
-                // 谱截断旋钮 T：0 = 不截断（V2 原本口径），1 = 与 V1 同一条线（3~8 px），
-                // >1 更早截断。只用来找「摩尔纹从多远开始」；V2 截断后没有 V1 那套补偿 ⇒
-                // T > 0 时远场会变暗变平，那是能量缺口，不是 bug。
-                ui_.SliderFloat("水皮 V2 截断 T（×3~8px，0=关）", &water_v2_truncate_px_,
+                // 谱截断：**主波 / 细节波分开**。0 = 该族不截断，1 = 与 V1 同一条线（3~8 px）。
+                // 主波管几何/剪影，细节波只进法线 —— 噪点来自哪一族，用这两根分开归因。
+                ui_.SliderFloat("水皮 截断 T 主波（×3~8px，0=关）", &water_v2_truncate_main_,
                                 row(1, 6), 0.0f, 4.0f, 2);
+                ui_.SliderFloat("水皮 截断 T 细节波（×3~8px，0=关）", &water_v2_truncate_detail_,
+                                row(1, 7), 0.0f, 4.0f, 2);
                 // 采样图案：屏幕 2×2 子像素（box 4-tap，S 被忽略）↔ Hammersley 椭圆抖动。
-                ui_.Checkbox("水皮 V2 采样用屏幕 2×2", &water_v2_screen2x2_, row(1, 7));
-                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 8));
-                ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 9),
+                ui_.Checkbox("水皮 V2 采样用屏幕 2×2", &water_v2_screen2x2_, row(1, 8));
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 9));
+                ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 10),
                                 0.0f, 3.0f, 2);
-                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 10), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 11), 0.0f, 120.0f,
+                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 11), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 12), 0.0f, 120.0f,
                                 2);
-                if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 12))) {
+                if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 13))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
@@ -1072,13 +1077,13 @@ private:
                                   static_cast<double>(lab_readout_.hs_wind_m),
                                   static_cast<double>(lab_readout_.hs_swell_m),
                                   static_cast<double>(lab_readout_.hs_total_m));
-                    ui_.Text(buf, row(1, 13));
+                    ui_.Text(buf, row(1, 14));
                     std::snprintf(buf, sizeof(buf), "Tp %.1f s   λp %.0f m  坡度 %.0f°",
                                   static_cast<double>(lab_readout_.period_s),
                                   static_cast<double>(lab_readout_.lambda_peak_m),
                                   static_cast<double>(
                                       std::atan(lab_readout_.rms_slope) * 57.29577951308232));
-                    ui_.Text(buf, row(1, 14));
+                    ui_.Text(buf, row(1, 15));
                 }
                 // 场景 4 的面板到这里就结束：**必须早退**，否则会继续画下面那套
                 // 「SSR / 天光自由度」通用面板，它们用的也是 row(0,1..15) / row(1,0..)，

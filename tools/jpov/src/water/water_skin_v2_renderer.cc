@@ -244,8 +244,8 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
     wp.debug = in.wave_debug;
     wp.displacement = (in.waves != nullptr) && in.waves->displacement;
     wp.has_flow_tex = in.wave_flow_tex != 0u;
-    wp.no_truncation = trunc.no_truncation;
-    wp.truncate_px = trunc.truncate_px;
+    wp.truncate_px_main = trunc.truncate_px_main;
+    wp.truncate_px_detail = trunc.truncate_px_detail;
     wp.origin_x = origin_x;
     wp.origin_z = origin_z;
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);

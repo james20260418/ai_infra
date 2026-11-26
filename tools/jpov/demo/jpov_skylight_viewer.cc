@@ -1040,7 +1040,8 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
 
         app.SetWaterSkinV2(true);
         app.SetWaterSkinV2Screen2x2(false);
-        app.SetWaterSkinV2TruncatePx(0.0f);
+        app.SetWaterSkinV2TruncateMain(0.0f);
+        app.SetWaterSkinV2TruncateDetail(0.0f);
         app.SetWaterSkinV2Samples(4);
         app.RunOnce(input, winfo, (base + "2_hammer_s4.png").c_str());
 
@@ -1052,9 +1053,22 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
         app.RunOnce(input, winfo, (base + "4_hammer_s16.png").c_str());
 
         app.SetWaterSkinV2Samples(4);
-        app.SetWaterSkinV2TruncatePx(1.0f);
-        app.RunOnce(input, winfo, (base + "5_trunc_t1.png").c_str());
-        app.SetWaterSkinV2TruncatePx(0.0f);
+        // 截断归因扫：主波 T / 细节波 T 四个组合（谁是噪点的来源，一眼分开）。
+        {
+            struct TS { float main_t; float detail_t; const char* suffix; };
+            const TS kTs[4] = {{1.0f, 1.0f, "5_trunc_main1_detail1.png"},
+                               {1.0f, 0.0f, "6_trunc_main1_detail0.png"},
+                               {0.0f, 1.0f, "7_trunc_main0_detail1.png"},
+                               {0.0f, 0.0f, "8_trunc_off.png"}};
+            for (const TS& ts : kTs) {
+                app.SetWaterSkinV2TruncateMain(ts.main_t);
+                app.SetWaterSkinV2TruncateDetail(ts.detail_t);
+                app.RunOnce(input, winfo, (base + ts.suffix).c_str());
+            }
+            app.SetWaterSkinV2TruncateMain(0.0f);
+            app.SetWaterSkinV2TruncateDetail(0.0f);
+        }
+
         app.SetWaterSkinV2(false);
     }
     LOG(INFO) << "water skin v2 A/B captured to " << out_dir;
@@ -2263,8 +2277,9 @@ int main(int argc, char** argv) {
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
     bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
-    float water_truncate_px = 0.0f;   // --water-truncate T：V2 谱截断乘数（0 = 不截断）
-    bool water_screen2x2 = false;     // --water-2x2：V2 采样用屏幕 2×2 子像素
+    float water_truncate_main = -1.0f;    // --water-truncate-main T：主波截断乘数（<0 = 不动）
+    float water_truncate_detail = -1.0f;  // --water-truncate-detail T：细节波截断乘数
+    bool water_screen2x2 = false;         // --water-2x2：V2 采样用屏幕 2×2 子像素
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
     std::string box_cut_out_dir;
@@ -2309,8 +2324,10 @@ int main(int argc, char** argv) {
             water_v2 = true;
         } else if (std::strcmp(argv[i], "--water-samples") == 0 && i + 1 < argc) {
             water_samples = std::atoi(argv[i + 1]);
-        } else if (std::strcmp(argv[i], "--water-truncate") == 0 && i + 1 < argc) {
-            water_truncate_px = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-truncate-main") == 0 && i + 1 < argc) {
+            water_truncate_main = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-truncate-detail") == 0 && i + 1 < argc) {
+            water_truncate_detail = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-2x2") == 0) {
             water_screen2x2 = true;
         } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
@@ -2482,8 +2499,11 @@ int main(int argc, char** argv) {
         app.SetWaterSkinV2Samples(water_samples);
     }
     // V2 的两个验收旋钮（谱截断 T / 屏幕 2×2 采样图案）。
-    if (water_truncate_px > 0.0f) {
-        app.SetWaterSkinV2TruncatePx(water_truncate_px);
+    if (water_truncate_main >= 0.0f) {
+        app.SetWaterSkinV2TruncateMain(water_truncate_main);
+    }
+    if (water_truncate_detail >= 0.0f) {
+        app.SetWaterSkinV2TruncateDetail(water_truncate_detail);
     }
     if (water_screen2x2) {
         app.SetWaterSkinV2Screen2x2(true);

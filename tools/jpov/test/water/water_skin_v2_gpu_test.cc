@@ -611,7 +611,9 @@ TEST(WaterSkinV2Gpu, V2TruncationKnobKillsSubPixelWaves) {
 
     const auto lateral_delta = [&](float truncate_px) {
         jpov::WaterWaves w = waves;
-        w.v2_truncation_px = truncate_px;
+        // 这条用例只关心「截断有没有生效」，两个族给同一个 T。
+        w.v2_truncate_px_main = truncate_px;
+        w.v2_truncate_px_detail = truncate_px;
         s.waves = &w;
         f.DrawV2(s, 4);
         const std::vector<float> a = ReadRgba(f.v2.layer().accum_tex);
@@ -635,6 +637,79 @@ TEST(WaterSkinV2Gpu, V2TruncationKnobKillsSubPixelWaves) {
     // T=1（同一对阈值的乘 1）必须与“不截断”不同 —— 否则区别不了 0 与 1 的语义。
     const double d_t1 = lateral_delta(1.0f);
     EXPECT_LT(d_t1, d_off) << "T=1 与不截断完全一样（远处本应已经截断）";
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
+
+// ⑦ 两个截断旋钮**互相独立**（Danis 2026-11-26：主波 T / 细节波 T 分开）。
+//
+// 判据不用「删掉一族波」（那样 wave uploader 会因为 num_waves = 0 整体关掉，测出来是假通过），
+// 而是利用**两族波长差一个数量级**：
+//   镜头贴在 0.55 m 高、近乎垂直俯视，取 T = 10 ⇒ 阈值 30~80 px：
+//     主波最短 3 m ≈ 131 px ⇒ **仍在线上**（余量 1.6×），主波 T 不该有任何影响；
+//     细节波 0.5 m ≈ 21 px ⇒ **被线扫到**，细节波 T 必须有效。
+//   ⚠️ 两个坑（都踩过）：① T 取太大（如 20）会把 3 m 主波也扫进去，判据失效；
+//      ② 本用例的视口只有 48×32 ⇒ `pixel_angle ≈ 0.036 rad`，是 1280×720 的 **20 倍**，
+//         所以“近场”得把相机摆到 0.5 m 高，否则 footprint 已经是 0.25 m（3 m 波只有 12 px）。
+// 反过来，掠射机位下主波 T 必须有效（细节波在这里也全在线上，不影响结论）。
+TEST(WaterSkinV2Gpu, V2TruncationKnobsAreIndependent) {
+    Fixture f;
+    f.SetUp();
+    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.wave_debug = 1;   // 法线可视化：只看几何
+    s.waves = &waves;
+
+    const auto render = [&](float main_t, float detail_t) {
+        jpov::WaterWaves w = waves;
+        w.v2_truncate_px_main = main_t;
+        w.v2_truncate_px_detail = detail_t;
+        s.waves = &w;
+        f.DrawV2(s, 4);
+        return ReadRgba(f.v2.layer().accum_tex);
+    };
+    const auto mean_abs_diff = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            for (int c = 0; c < 3; ++c) {
+                sum += std::fabs(a[i + c] - b[i + c]);
+            }
+            n += 3;
+        }
+        return n > 0 ? sum / static_cast<double>(n) : 0.0;
+    };
+
+    // ── 近场：几乎垂直俯视（视场内 EVERY 像素的 footprint 都小），这样主波不可能被扫到 ──
+    // ⚠️ 别用 30° 俯视：取景里包含远处几行，那里主波照样被截断 ⇒ 测出来的“主波 T 有影响”
+    //    是真的但与本判据无关（这是第一版写成 0.09 的原因）。
+    s.cam.position = {0.01f, 0.55f, 0.01f};
+    s.cam.target = {0.0f, 0.0f, 0.0f};
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+
+    const std::vector<float> n_base = render(0.0f, 0.0f);
+    const std::vector<float> n_main = render(10.0f, 0.0f);
+    const std::vector<float> n_detail = render(0.0f, 10.0f);
+    // 主波几乎不该动：只要求「≤ FP16 噪声量级」。不写 0 是因为视场角落的 footprint
+    // 仍有 ~2× 余量差，3 m 主波会在那里被轻轻削一点（实测 1.6e-5，而细节波那边是 1e-2 量级）。
+    EXPECT_LT(mean_abs_diff(n_base, n_main), 1.0e-4)
+        << "近场时主波全在截断线上方，主波 T=10 却明显改变了结果 —— 两支没分开";
+    EXPECT_GT(mean_abs_diff(n_base, n_detail), 1.0e-3)  // T=10：细节波必须被扫掉
+        << "近场时细节波 T=10 没有任何影响 —— 细节波那一支没接上";
+
+    // ── 掠射：主波 T 必须有效（这条同时验证「主波支路仍活着」）──
+    s.cam.position = {0.0f, 3.0f, -30.0f};
+    s.cam.target = {0.0f, 0.0f, -200.0f};
+    const std::vector<float> g_base = render(0.0f, 0.0f);
+    const std::vector<float> g_main = render(1.0f, 0.0f);
+    EXPECT_GT(mean_abs_diff(g_base, g_main), 1.0e-4)
+        << "掠射时主波 T=1 没有任何影响 —— 主波那一支没接上";
+
     glDeleteTextures(1, &s.depth_tex);
     f.TearDown();
 }

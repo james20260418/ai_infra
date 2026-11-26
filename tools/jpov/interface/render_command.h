@@ -1052,19 +1052,18 @@ struct WaterWaves {
     // 非 [1, 16] 由 Renderer CHECK 拦住（不静默夹取：S=0 会画出全黑，S=32 会让帧卡死）。
     int v2_sample_count = 4;
 
-    // ── V2 的两个验收旋钮（2026-11-26 Danis 定）───────────────────────────────
-    // ① 谱截断旋钮 T（**乘数**，无量纲，>= 0；默认 0 = 不截断）。
-    //    V1 的阈值是「一个波长占几个像素」的一对常量：< 3 px 消失、> 8 px 满幅
-    //    （kWaveLodPxMin / kWaveLodPxMax，中段 smoothstep）。T **同时乘这两个阈值**：
-    //      T = 0    ⇒ 不截断（V2 原本的口径）
-    //      T = 1    ⇒ 与 V1 **同一条线**（3~8 px）
-    //      T = 2    ⇒ 6~16 px（更早截断，远场更平）
-    //    为什么用乘数而不是分别给两个端点：验收要看的是「这条线在哪」，两点各拖会
-    //    变成两个变量；乘数只平移整条线，T=1 还能与 V1 逐字节对齐。
-    //    ⚠️ V2 截断后**不做 V1 的那套补偿**（var_p / env_lod / 导数项都退休了）⇒
-    //        T > 0 时远场会变暗变平，这是预期的能量缺口，不是 bug：这个旋钮只用来
-    //        找「摩尔纹从多远开始」，不是产品外观。
-    float v2_truncation_px = 0.0f;
+    // ① 谱截断乘数（**主波 / 细节波分开**，Danis 2026-11-26）：把阈值对
+    //    (kWaveLodPxMin, kWaveLodPxMax) = (3, 8) px 同时乘 T。
+    //      T = 0  ⇒ 这一族不截断
+    //      T = 1  ⇒ 与 V1 **同一条线**（乘 1.0 是 IEEE 精确的 ⇒ V1/天球逐字节不变）
+    //      T = 2  ⇒ 6~16 px（更早截断）
+    //    为什么分两个：主波还管几何/剪影（求交、层深），细节波只进法线 ——
+    //    噪点到底来自哪一族要能单独归因，一个旋钮一起动就分不清。
+    //    ⚠️ V2 截断后**不做 V1 那套补偿**（var_p / env_lod / 导数项都退休了）⇒
+    //        T > 0 时远场能量会变，这是预期的缺口：这两个是验收旋钮，不是产品外观。
+    //    ⚠️ 天球折射（Snell 窗缘）必须同口径 —— 由 water::ResolveWaveTruncation() 统一给。
+    float v2_truncate_px_main = 0.0f;
+    float v2_truncate_px_detail = 0.0f;
 
     // ② 采样图案（只对 V2 生效）：
     //      kHammersley（0，默认）= 像素足迹椭圆内的 Hammersley 静态抖动，S 个样本；
@@ -1077,6 +1076,7 @@ struct WaterWaves {
     static constexpr int kV2PatternHammersley = 0;
     static constexpr int kV2PatternScreen2x2 = 1;
     int v2_sample_pattern = kV2PatternHammersley;
+
 };
 
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。
