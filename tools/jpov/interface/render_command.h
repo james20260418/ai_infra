@@ -1067,7 +1067,13 @@ struct WaterWaves {
     float v2_truncate_px_main = 0.0f;
     float v2_truncate_px_detail = 1.0f;
 
-
+    // ② 方差系的两个消费点开关（Danis 2026-11-26：交互式调优用）。
+    //    σ² 的口径已改成「按谱截断自动推导」（= V1 的 WaveSlopeTensor 迹，含 MSS + 被裁的波）。
+    //    · `v2_env_lod`  false ⇒ 探针 LOD 恒 0（不模糊；看纯采样能撑到多远）
+    //    · `v2_sun_lobe` false ⇒ 太阳 lobe 只剩盘角带宽（不叠加 2σ²；看 M1 单独做会暗多少）
+    //    ⚠️ F_eff（⇒ α / 透射率）**没有开关**：那是菲涅尔的物理口径，关掉就不是水了。
+    bool v2_env_lod = true;
+    bool v2_sun_lobe = true;
 };
 
 // 水体命令：介质（体积）+ 界面层（水皮）共用这一份配置。

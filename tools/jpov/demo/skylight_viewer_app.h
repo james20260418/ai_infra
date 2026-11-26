@@ -352,12 +352,17 @@ public:
     // 两个截断乘数：主波 / 细节波分开（0 = 该族不截断，1 = 与 V1 同线）。
     float water_v2_truncate_main_ = 0.0f;     // 验收样貌：主波不截断
     float water_v2_truncate_detail_ = 1.0f;   // 细节波走 V1 那条 3~8 px 线
+    // 方差系两个消费点的开关（调优用；F_eff 没有开关）。
+    bool water_v2_env_lod_ = true;
+    bool water_v2_sun_lobe_ = true;
     void SetWaterSkinV2(bool on) { water_v2_ = on; }
     void SetWaterSkinV2Samples(int sample_count) {
         water_v2_samples_f_ = static_cast<float>(sample_count);
     }
     void SetWaterSkinV2TruncateMain(float t) { water_v2_truncate_main_ = t; }
     void SetWaterSkinV2TruncateDetail(float t) { water_v2_truncate_detail_ = t; }
+    void SetWaterSkinV2EnvLod(bool on) { water_v2_env_lod_ = on; }
+    void SetWaterSkinV2SunLobe(bool on) { water_v2_sun_lobe_ = on; }
 
     // ── 水下验收物体：蓝人（skinned）──
     // 用 InstancedInstanceState 的静态语义（pose_a = pose_b = 0 = 恒等 pose）：一次 instanced
@@ -863,6 +868,8 @@ public:
             w.waves.v2_sample_count = static_cast<int>(std::lround(water_v2_samples_f_));
             w.waves.v2_truncate_px_main = water_v2_truncate_main_;
             w.waves.v2_truncate_px_detail = water_v2_truncate_detail_;
+            w.waves.v2_env_lod = water_v2_env_lod_;
+            w.waves.v2_sun_lobe = water_v2_sun_lobe_;
             cmds->water = w;
         }
 
@@ -928,7 +935,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 17;   // 场景4：row(0,0..13) + row(1,0..16)
+        constexpr int kOceanLabPanelRows = 19;   // 场景4：row(0,0..13) + row(1,0..18)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
                         : IsWaterScene() ? kWaterPanelRows
@@ -1089,6 +1096,10 @@ private:
                 if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 14))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
+                // 方差系两个消费点（σ² 本身已按谱截断自动推导，没有开关）
+                ui_.Checkbox("V2 探针模糊 (env LOD←σ²)", &water_v2_env_lod_, row(1, 17));
+                ui_.Checkbox("V2 太阳 lobe (a2←2σ²)", &water_v2_sun_lobe_, row(1, 18));
+
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();
                 {

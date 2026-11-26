@@ -97,6 +97,9 @@ uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 
 // 每像素法线采样数 S ∈ [1, 16]（renderer 已 CHECK）。S = 1 ⇒ 只取中心法线。
 uniform int uSampleCount;
+// 方差系两个消费点的开关（交互调优用；F_eff 没有开关，见 render_command.h）。
+uniform int uEnvLodOn;    // 0 ⇒ 探针 LOD 恒 0
+uniform int uSunLobeOn;   // 0 ⇒ 太阳 lobe 只剩盘角带宽
 
 const int   kMaxSkinSamples = 16;
 const float kBackgroundDepth = 0.999999;
@@ -330,9 +333,19 @@ SkinV2SampleGeom SkinV2SampleAt(WaterSurfaceV2 s, int i, int sample_count) {
     return g;
 }
 
-// MSS（Cox–Munk 短波）的各向同性斜率方差 σ²：**唯一**的 σ 来源（表内波全部采样）。// uShortWaveMss = along + cross（张量迹）⇒ 各向同性平均 = 0.5·迹。
-float SkinV2MssSlopeVariance() {
-    return 0.5 * max(uShortWaveMss, 0.0);
+// ── σ²：**按谱截断自动推导**（照 V1 的经验，Danis 2026-11-26）──
+// = `0.5·trace(WaveSlopeTensor)`，与 V1 的 `var_p_mean` **同口径、同函数**：
+//   Σ_fp = Σ_i ½(k_iA_i)²·(1 − geom_i²)   （geom = WaveLodAmp，即"这条波还剩多少几何"）
+//        + MSS 张量（Cox–Munk，沿风/横风 2.7:1；它永远采样不到，geom 恒 0 ⇒ 全额计入）。
+// 三个消费者共用这一份：F_eff（⇒ α）、env_lod、太阳 a2。**逐像素算一次**（只依赖 footprint，
+// 与 S 无关），放在样本循环外。
+// ⚠️ 与 V1 的差别只有两处，都是 V2 的结构性选择：
+//   ① 主波 / 细节波按**各自的 T** 算 geom（V1 只有一个 T）—— `T=0` 的族贡献恒 0（不双计）；
+//   ② V1 还叠加屏幕导数项（normal_var_px / footprint_a2），V2 没有 dFdx ⇒ 不存在。
+float SkinV2SlopeVariance(float footprint) {
+    float sxx, sxz, szz;
+    WaveSlopeTensor(footprint, sxx, sxz, szz);
+    return 0.5 * max(sxx + szz, 0.0);
 }
 
 // WBO 发射（生产程序唯一出口）。att3 必须是**射线距离** t（见 water_skin_shader.h 顶部）。
@@ -378,22 +391,27 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
         return vec3(0.0);
     }
     float NoH = max(dot(H, N), 0.0);
-    float a2 = GgxDiskBandwidthA2(uSunAngularRadius) + 2.0 * sigma2;
+    // 调优开关：关掉 = 只剩盘角带宽（不叠加 2σ²）。M1 单独做会变暗（缺 M2 多散射补偿）。
+    float a2 = GgxDiskBandwidthA2(uSunAngularRadius) +
+               ((uSunLobeOn != 0) ? 2.0 * sigma2 : 0.0);
     float D = GgxDistribution(NoH, a2);
     float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
     return uSunIrradiance * (F * D * G / max(4.0 * NoV * NoL, 1.0e-6)) * NoL;
 }
 
 void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
-    float sigma2 = SkinV2MssSlopeVariance();
+    float sigma2 = SkinV2SlopeVariance(s.footprint);
     // 探针 LOD：V2 里唯一的模糊来源就是 MSS 的斜率方差（表内波由采样自己平均）。
     // 镜面反射把斜率放大 2× ⇒ 需要的模糊角 ≈ 2σ；128² 探针的 texel 角 = (π/2)/128 · 2^lod。
-    // ⚠️ σ 是**各向同性斜率标准差** = √sigma2（sigma2 = 0.5·迹，见 SkinV2MssSlopeVariance）：
-    //    V1 的 `2√var_p` 在 MSS 各向同性时恰好等于 `2√sigma2`（var_p 是投影方差，迹/2），
-    //    所以这条与 V1 同口径。**不要**写成 2√(uShortWaveMss)（那是 √2 倍，重复计迹）。
+    // ⚠️ σ 是**各向同性斜率标准差** = √sigma2（sigma2 = 0.5·迹，见 SkinV2SlopeVariance）：
+    //    V1 的 `2√var_p` 在 var_p 取各向同性平均时恰好等于 `2√sigma2`，所以这条与 V1 同口径。
+    //    **不要**写成 2√(uShortWaveMss)（那是 √2 倍，重复计迹）。
     // 上限 1.5（docs §6 的直接口径；V1 那个随仰角放开的 env_lod_cap 已退休）。
     const float kEnvTexelAngle = 1.5707963268 / 128.0;
     float env_lod = clamp(log2(max(2.0 * sqrt(sigma2), 1.0e-6) / kEnvTexelAngle), 0.0, 1.5);
+    if (uEnvLodOn == 0) {
+        env_lod = 0.0;   // 调优开关：关掉 = 探针不模糊（纯采样靠自己平均）
+    }
 
     int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);

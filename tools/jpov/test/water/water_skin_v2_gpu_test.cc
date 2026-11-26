@@ -748,4 +748,98 @@ TEST(WaterSkinV2Gpu, V2HorizonClampCoversTheSeam) {
     f.TearDown();
 }
 
+
+// ⑨ σ² 必须是**按谱截断自动推导**的（不是只有 MSS），且两个消费点各有开关。
+//    判据用 debug 11（输出 `env_lod / 1.5`）：
+//    ① 细节波 T=1（真截断）的 env_lod **必须大于** T=0（只有 MSS）—— 这就是"自动量"接上了；
+//    ② 关掉 `v2_env_lod` ⇒ debug 11 全 0（开关真的断开了）；
+//    ③ 关掉 `v2_sun_lobe` ⇒ 图像与开着不同（a2 那条同样接上了）。
+TEST(WaterSkinV2Gpu, V2SigmaComesFromTruncationAndTogglesWork) {
+    Fixture f;
+    f.SetUp();
+    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.cam.position = {0.0f, 3.0f, -30.0f};
+    s.cam.target = {0.0f, 0.0f, -200.0f};   // 掠射：足迹大 ⇒ 细节波真被截断
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.has_sun = true;
+    // 太阳要在**相机前方**（相机朝 −z）：否则水面收不到日盘像，lobe 开关测不出差异
+    //（2026-11-26 踩过：太阳放在 +z ⇒ 全图 sun_spec≈0 ⇒ 用例假通过）。
+    s.sun_toward = Normalized(Vec3f{-0.10f, 0.28f, -0.95f});
+    // ⚠️ 必须给辐照度：默认是 0 ⇒ sun_spec 恒 0 ⇒ 太阳 lobe 的开关测出来是"没差异"。
+    s.sun_irradiance = {2.0f, 1.9f, 1.7f};
+
+    const auto render = [&](float wind_ms, int wave_debug, float detail_t, bool env_lod,
+                            bool sun_lobe) {
+        jpov::WaterWaves w = waves;
+        w.short_wave.wind_speed_ms = wind_ms;
+        w.v2_truncate_px_main = 0.0f;
+        w.v2_truncate_px_detail = detail_t;
+        w.v2_env_lod = env_lod;
+        w.v2_sun_lobe = sun_lobe;
+        s.waves = &w;
+        s.wave_debug = wave_debug;
+        f.DrawV2(s, 4);
+        return ReadRgba(f.v2.layer().accum_tex);
+    };
+    // 只统计**水面覆盖到**的像素（accum.a > 0）：否则天空那半边会把均值稀释，
+    // 而且 env_lod 在 clamp 1.5 处饱和时，稀释比例会掩盖"有没有变大"（踩过）。
+    const auto mean_rgb_covered = [](const std::vector<float>& a) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            if (!(a[i + 3] > 0.0f)) {
+                continue;
+            }
+            for (int c = 0; c < 3; ++c) {
+                sum += a[i + c];
+            }
+            n += 3;
+        }
+        return n > 0 ? sum / static_cast<double>(n) : 0.0;
+    };
+    const auto mean_abs_diff = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            for (int c = 0; c < 3; ++c) {
+                sum += std::fabs(a[i + c] - b[i + c]);
+            }
+            n += 3;
+        }
+        return n > 0 ? sum / static_cast<double>(n) : 0.0;
+    };
+
+    // ① 自动量：**MSS = 0** 时，σ² 只能来自截断带 ⇒ T=1 必须 > T=0（=0）。
+    const double lod_w0_t1 = mean_rgb_covered(render(0.0f, 11, 1.0f, true, true));
+    const double lod_w0_t0 = mean_rgb_covered(render(0.0f, 11, 0.0f, true, true));
+    // ①b MSS 那一半：**无截断**（T=0）时有风就必须非 0。
+    const double lod_w8_t0 = mean_rgb_covered(render(8.0f, 11, 0.0f, true, true));
+    SCOPED_TRACE(testing::Message() << "debug11(水面像素均值): 风0+T1=" << lod_w0_t1
+                                   << " 风0+T0=" << lod_w0_t0 << " 风8+T0=" << lod_w8_t0);
+    EXPECT_GT(lod_w0_t1, 1.0e-3)
+        << "MSS=0 时细节波截断没有产生任何 env_lod —— σ² 还没接谱截断的自动量";
+    EXPECT_LT(lod_w0_t0, 1.0e-6)
+        << "MSS=0 且 T=0 时 env_lod 仍非 0 —— 有东西在凭空造方差";
+    EXPECT_GT(lod_w8_t0, 1.0e-3)
+        << "T=0 有风时 env_lod 是 0 —— MSS 那一半没进 σ²";
+
+    // ② 开关断开：关掉 ⇒ 全 0。
+    const double lod_off = mean_rgb_covered(render(8.0f, 11, 1.0f, /*env_lod=*/false, true));
+    EXPECT_LT(lod_off, 1.0e-6) << "关掉 v2_env_lod 后 debug 11 仍然非 0 —— 开关没接上";
+
+    // ③ 太阳 lobe 开关：开着/关掉必须不同。
+    const std::vector<float> lobe_on = render(8.0f, 0, 1.0f, true, /*sun_lobe=*/true);
+    const std::vector<float> lobe_off = render(8.0f, 0, 1.0f, true, /*sun_lobe=*/false);
+    EXPECT_GT(mean_abs_diff(lobe_on, lobe_off), 1.0e-4)
+        << "v2_sun_lobe 开关对画面没有影响 —— a2 那条没接上";
+
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
 }  // namespace
