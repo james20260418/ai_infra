@@ -38,6 +38,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/interface/water_config.h"
+#include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
@@ -207,6 +208,27 @@ public:
     static constexpr int kSceneOceanLab = 4;
     bool IsOceanLab() const { return scene_index_ == kSceneOceanLab; }
 
+    // ── 场景 5：水下照明（衰减）—— 2026-11-26 ──
+    // 海面**直接用场景 4 的默认海面**（同一份 WaterConfig / 谱 / 介质），只把水位抬到 3 m：
+    // 这样 ViewConfig 的 target（恒为原点）落在水下、海底在 −0.5 m，物体落在画面中部；
+    // 不必改 ViewConfig 的「target 恒为原点」约定。
+    // 场景内容：三个实心 pass 各至少一件（object3d 方块 / instanced 橡树 / skinned 蓝人）+
+    // 镜面材质 + 两条条带（折线 / 平滑各一条，都开天光 ⇒ 都会被衰减）。
+    static constexpr int kSceneUnderwater = 5;
+    bool IsUnderwater() const { return scene_index_ == kSceneUnderwater; }
+    // 两个独立开关（面板）。只在本场景写进 WaterCommand，其它场景保持默认 false ⇒ 零回归。
+    bool water_atten_ambient_ = true;
+    bool water_atten_sun_ = true;
+    void SetWaterAttenuation(bool ambient, bool sun) {
+        water_atten_ambient_ = ambient;
+        water_atten_sun_ = sun;
+    }
+
+    // instanced pass 用的橡树（InstallModels 里顺手存下；asset 只加载一次）。
+    uint32_t oak_mesh_ = 0;
+    jpov::PBRMaterial oak_material_;
+    float oak_scale_ = 1.0f;   // 已按「6 m 高」归一过的缩放
+
     jpov::water::WaterConfig water_cfg_;
     jpov::water::WaterQuality water_quality_;
     // 派生缓存：只有 WaterConfig 变化时才重算（每帧重算 80 条波是浪费，也会拖慢 UI）。
@@ -225,12 +247,9 @@ public:
     // 选型场默认值 = 上轮实验的胜出者（B 谱结构：4~8 主波 + 64 条各向同性细节，无 warp）：
     // U=8 m/s、吹向 34°（= 方位 214° − 180°，即相机朝太阳那侧）、风区 250 km、
     // σa 0.50/0.054/0.014、σs 0.04、曝光 0.6、45° 俯视 5 m。
-    void SetOceanLab(bool on) {
-        if (!on) {
-            scene_index_ = 0;
-            return;
-        }
-        scene_index_ = kSceneOceanLab;
+    // 海面默认值（场景 4 选型场 / 场景 5 水下共用同一份）：
+    // U=8 m/s、吹向 34°、风区 250 km、无涌、σa/σs、曝光 0.6。
+    void ApplyOceanLabWaterDefaults() {
         water_waves_on_ = true;
         water_skin_on_ = true;
         water_medium_on_ = true;
@@ -248,6 +267,39 @@ public:
         water_cfg_.level_y = 0.0f;
         exposure_ = 0.6f;
         InvalidateLabWater();
+    }
+
+    // 水下场景：同一份默认海面，水位抬到 3 m；相机在水面下 ≈1.45 m（phi=18°，R=5）。
+    void SetUnderwaterScene(bool on) {
+        if (!on) {
+            scene_index_ = 0;
+            return;
+        }
+        scene_index_ = kSceneUnderwater;
+        ApplyOceanLabWaterDefaults();
+        // 水位 3 m：海底在 −0.5 m（target 原点附近），相机在水面下 ~1.5 m 平视 ——
+        // 物体落在画面中部，而不是缩在底部；同时相机离波面足够远（波幅 ~0.5 m）。
+        water_cfg_.level_y = 3.0f;
+        water_cfg_.depth_m = 3.5f;   // 海底 y = −0.5
+        SetUnderwaterView();
+    }
+
+    void SetUnderwaterView() {
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        view_ = jpov_viewer::DefaultView();
+        view_.phi = 18.0 * kDegToRad;                 // 相机 y = 5·sin18° ≈ 1.55（水面下 1.45 m）
+        view_.theta = 34.0 * kDegToRad;               // 与海面默认风向/太阳同一侧
+        view_.R = 5.0;
+    }
+
+    void SetOceanLab(bool on) {
+        if (!on) {
+            scene_index_ = 0;
+            return;
+        }
+        scene_index_ = kSceneOceanLab;
+        ApplyOceanLabWaterDefaults();
+        water_cfg_.level_y = 0.0f;
         SetOceanLabView();
     }
 
@@ -392,6 +444,61 @@ public:
             water_people_.push_back(inst);
         }
     }
+    // 场景 5 的两条竖直条带：折线 / 平滑各一条，都消费天光（sky_light）。
+    // 为什么竖直：相机在水下平视，水平条带几乎侧看（看不见）；竖直片正好面向相机。
+    // 两条带各自一个批（两个 type 的 program 不同）；点色近黑，颜色几乎全部来自天光注入。
+    void EmitUnderwaterStrips(jpov::RenderCommandList* cmds, float bed_y,
+                              const SkyLighting& lighting) const {
+        jpov::StripSkyLight sl;
+        sl.tricolor = lighting.sky.AmbientTricolor();
+        sl.ambient_scale = lighting.ambient.intensity;
+        sl.sun_direction = lighting.sky.sun_dir;
+        const jpov::Color sun_c = lighting.sky.SunDirectionalColor();
+        sl.sun_color = {sun_c.r, sun_c.g, sun_c.b};
+        sl.sun_intensity = lighting.sky.SunDirectionalIntensity();
+        sl.injection = 0.35f;   // 1.0 会把条带打到饱和（255）⇒ 衰减看不出来
+
+        auto fill = [&](bool arc, float x0, float z0, float half_w, jpov::Strip16* out) {
+            out->point_count = jpov::kStripSampleCount;
+            // 点色压到近黑：条带的颜色几乎全部来自「天光注入」⇒ 水下衰减才看得出来
+            //（白色点色会盖过注入项，条带就变成不受光照的发光片）。
+            for (jpov::Color& c : out->point_color) {
+                c = {0.05f, 0.05f, 0.05f, 1.0f};
+            }
+            for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+                const float t = static_cast<float>(i) /
+                                static_cast<float>(jpov::kStripSampleCount - 1);
+                float x = x0;
+                float y = bed_y + 0.15f + 2.2f * t;
+                if (arc) {
+                    // 竖直半圆拱：脚在海底，顶在 bed_y + 1.4 m。
+                    const float th = (t - 0.5f) * 3.14159265358979323846f;
+                    x = x0 + 1.25f * std::sin(th);
+                    y = bed_y + 0.15f + 1.25f * std::cos(th);
+                }
+                out->left[i] = {x, y, z0 + half_w};
+                out->right[i] = {x, y, z0 - half_w};
+            }
+        };
+
+        jpov::TranslucentStrip16Batch polyline;
+        polyline.geometry = jpov::StripInterpolation::kPolyline;
+        polyline.sky_light = sl;
+        jpov::Strip16 straight;
+        fill(/*arc=*/false, -3.0f, 1.6f, 0.28f, &straight);
+        polyline.strips.push_back(straight);
+
+        jpov::TranslucentStrip16Batch smooth;
+        smooth.geometry = jpov::StripInterpolation::kSmooth;
+        smooth.sky_light = sl;
+        jpov::Strip16 arch;
+        fill(/*arc=*/true, 2.9f, 1.6f, 0.28f, &arch);
+        smooth.strips.push_back(arch);
+
+        cmds->DrawStrip16Batch(std::move(polyline));
+        cmds->DrawStrip16Batch(std::move(smooth));
+    }
+
     void SetWaterMedium(bool on) { water_medium_on_ = on; }
     void SetWaterSkin(bool on) { water_skin_on_ = on; }
     void SetSlabDepth(float m) { slab_top_depth_m_ = m; }
@@ -602,6 +709,7 @@ public:
         const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         const bool water_scene = IsWaterScene();
         const bool ocean_lab = IsOceanLab();
+        const bool underwater = IsUnderwater();
         jpov::SkyCommand sky = nl.sky;
         // 地平线以下的填充色与探针下半球**不在这里配**：Renderer 在有水面时统一按
         // 「深海渐近色 + 水面 Fresnel」自动填（单一出处，见 renderer.cc 的天空段）。
@@ -635,10 +743,11 @@ public:
         //    「有水面却没 env_specular / sky_scale=0 / 探针没建」直接 CHECK（宁可崩也不静默
         //    退化成黑水面）。所以这里在水场景强制打开并把消费量抬到 (0,1]，避免用户在面板上
         //    一勾就把进程打挂。
-        if (env_specular_on_ || water_scene || ocean_lab) {
+        if (env_specular_on_ || water_scene || ocean_lab || underwater) {
             jpov::EnvSpecular es;
-            es.sky_scale = (water_scene || ocean_lab) ? std::max(env_specular_scale_, 0.05f)
-                                                      : env_specular_scale_;
+            es.sky_scale = (water_scene || ocean_lab || underwater)
+                               ? std::max(env_specular_scale_, 0.05f)
+                               : env_specular_scale_;
             cmds->env_specular = es;
         }
 
@@ -673,6 +782,59 @@ public:
                                {0.0f, bed_y, 0.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f},
                                /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ 5.0f);
+        } else if (draw_scene && underwater) {
+            const float bed_y = water_cfg_.level_y - water_cfg_.depth_m;   // −0.5 m
+            // 海底（object3d）：40×40 m 中性沙色。颜色的任何变化只能来自光/水。
+            cmds->DrawObject3D(ground_mesh_, jpov_skylight::SeabedMaterial(1.0f),
+                               /*center*/ {0.0f, bed_y, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  1.0f);
+            // 实心 pass ①：object3d。三件同规格方块 —— 低反 / **镜面金属** / 高光。
+            // 镜面材质是必件的验收工件：水下它仍会反射**未折射**的天光探针（本轮已知缺口）。
+            cmds->DrawObject3D(box_mesh_, mat_low_, {-1.9f, bed_y + 0.7f, 1.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 1.4f);
+            cmds->DrawObject3D(box_mesh_, mat_metal_, {0.0f, bed_y + 0.7f, 1.4f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 1.4f);
+            cmds->DrawObject3D(box_mesh_, mat_high_, {1.9f, bed_y + 0.7f, 1.0f},
+                               /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 1.4f);
+            // 实心 pass ②：instanced（同一棵橡树 ×3 === 一次 instanced draw）。
+            // 目标高 2.6 m：海底只有 3.5 m 深，6 m 的树会穿出水面。
+            if (oak_mesh_ != 0) {
+                const float tree_scale = oak_scale_ * (2.6f / 6.0f);
+                const float tx[3] = {-5.2f, 0.0f, 5.2f};
+                const float tz[3] = {-3.2f, -4.6f, -3.4f};
+                std::vector<jpov::InstanceState> trees;
+                trees.reserve(3);
+                for (int i = 0; i < 3; ++i) {
+                    jpov::InstanceState inst;
+                    inst.transform.center = {tx[i], bed_y, tz[i]};
+                    inst.transform.up = {0.0f, 1.0f, 0.0f};
+                    inst.transform.front = {0.0f, 0.0f, 1.0f};
+                    inst.transform.scale = tree_scale;
+                    trees.push_back(inst);
+                }
+                cmds->DrawInstancedObject(oak_mesh_, oak_material_, std::move(trees));
+            }
+            // 实心 pass ③：skinned（蓝人，三个人 **一次** instanced draw）。
+            if (person_mesh_ != 0 && !water_people_.empty()) {
+                std::vector<jpov::SkinnedInstanceState> people = water_people_;
+                const float px[3] = {-3.0f, 3.1f, -0.5f};
+                const float pz[3] = {0.0f, 0.2f, -2.2f};
+                for (size_t i = 0; i < people.size(); ++i) {
+                    const size_t k = i % 3;
+                    people[i].transform.center = {px[k],
+                                                  bed_y - person_scale_ * person_min_y_,
+                                                  pz[k]};
+                }
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           person_material_, people);
+            }
+            // 条带：折线 / 平滑各一条（两个 type 都开天光 ⇒ 都会被水下衰减）。
+            EmitUnderwaterStrips(cmds, bed_y, nl);
         } else if (draw_scene && water_scene) {
             // 水下岩板（30×30 m）：顶面在「水位 − 深度」，随两条滑条升降。
             // 材质中性（无彩灰）⇒ 颜色的任何变化都只能来自水体。
@@ -800,16 +962,21 @@ public:
         //   · **界面层**（水皮）只要在水场景就有（它是世界的一部分）；
         //   · **介质**才受 `水体介质` 开关控制。
         // 两者分开 ⇒ A/B 的语义是「界面不变、只切介质」，不会把界面一起关掉。
-        if (water_scene || ocean_lab) {
+        if (water_scene || ocean_lab || underwater) {
+            // 场景 5 与选型场共用同一份 WaterConfig（默认海面）；只有场景 3 用手配滑条。
+            const bool lab_water = ocean_lab || underwater;
             jpov::WaterCommand w;
-            w.level_y = ocean_lab ? water_cfg_.level_y : water_level_y_;
+            w.level_y = lab_water ? water_cfg_.level_y : water_level_y_;
+            // 水下照明衰减（照明侧）：只在本场景打开（其它场景默认 false ⇒ 零回归）。
+            w.attenuate_ambient = underwater && water_atten_ambient_;
+            w.attenuate_sun = underwater && water_atten_sun_;
             // 水面时钟：**唯一出处**（WaterWaves 里已经没有 time_s）。
             // 选型场走真实时钟（"动态的海"）；冻结时用滑条秒数（可复现对帧）。
             {
                 // 时间倍率对「冻结 / 实时」**都生效**：冻结时它只是把同一个时刻按倍率缩放
                 //（= 慢动作/快进到同一相位），否则 --capture-ocean-report 的 speed 配置
                 // 会变成空操作（曾经就是这样：冻结时直接走 water_wave_time_s_）。
-                const float base_t = ocean_lab
+                const float base_t = lab_water
                                          ? (water_wave_time_freeze_ ? water_wave_time_s_
                                                                     : OceanLabTime())
                                          : (water_wave_time_freeze_
@@ -817,24 +984,24 @@ public:
                                                 : static_cast<float>(frame_count) / 60.0f);
                 w.time_s = static_cast<double>(base_t * ocean_time_speed_);
             }
-            w.depth_m = ocean_lab ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
-            w.ior = ocean_lab ? water_cfg_.ior : water_ior_;
+            w.depth_m = lab_water ? water_cfg_.depth_m : jpov::water::kOceanDeepDepthM;
+            w.ior = lab_water ? water_cfg_.ior : water_ior_;
             w.skin = water_skin_on_;
             // 面板允许把 σ 全拖到 0；那等价于「没有介质」，不能让它撞 renderer 的 CHECK
             //（CHECK 是给 API 误用准备的，UI 不该能触发）。全 0 ⇒ 按关闭处理。
-            const jpov::Vec3f sa = ocean_lab ? water_cfg_.sigma_a
+            const jpov::Vec3f sa = lab_water ? water_cfg_.sigma_a
                                              : jpov::Vec3f{water_sigma_a_r_, water_sigma_a_g_,
                                                            water_sigma_a_b_};
-            const float ss = ocean_lab ? water_cfg_.sigma_s : water_sigma_s_;
+            const float ss = lab_water ? water_cfg_.sigma_s : water_sigma_s_;
             const bool sigma_nonzero =
                 sa.x() > 0.0f || sa.y() > 0.0f || sa.z() > 0.0f || ss > 0.0f;
             w.medium.enabled = water_medium_on_ && sigma_nonzero;
             w.medium.sigma_a = sa;
             w.medium.sigma_s = {ss, ss, ss};
-            w.medium.phase_g = ocean_lab ? water_cfg_.phase_g : water_phase_g_;
+            w.medium.phase_g = lab_water ? water_cfg_.phase_g : water_phase_g_;
             // 波浪：只改界面几何（求交/法线）；介质仍按 level_y 半空间。
-            if (ocean_lab) {
-                // 选型场：谱整份由 WaterConfig 推出来（缓存，不每帧重算）。
+            if (lab_water) {
+                // 选型场 / 水下：谱整份由 WaterConfig 推出来（缓存，不每帧重算）。
                 EnsureLabWater();
                 jpov::WaterWaves wv = lab_waves_;
                 for (int i = 0; i < wv.num_waves; ++i) {
@@ -960,7 +1127,9 @@ private:
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
         constexpr int kOceanLabPanelRows = 21;   // 场景4：row(0,0..13) + row(1,0..20)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
+        constexpr int kUnderwaterRows    = 9;    // 场景5：row(0,0..8)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
+                        : IsUnderwater() ? kUnderwaterRows
                         : IsWaterScene() ? kWaterPanelRows
                                          : 17;
         const float top      = h - kBottom
@@ -981,7 +1150,8 @@ private:
                                                      "场景1 镜面地板+随机模型",
                                                      "场景2 只天空",
                                                      "场景3 水凝胶（水体介质）",
-                                                     "场景4 海面选型（WaterConfig）"};
+                                                     "场景4 海面选型（WaterConfig）",
+                                                     "场景5 水下照明（衰减 A/B）"};
             int sel = scene_index_;
             if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
@@ -990,6 +1160,11 @@ private:
                     view_.phi = 0.21;   // ≈12° 仰角
                     view_.theta = 0.0;
                     view_.R = 45.0;
+                } else if (sel == kSceneUnderwater) {
+                    // 水下：同一份默认海面 + 抬水位 + 水下机位（见 SetUnderwaterScene）。
+                    // BuildWaterPeople：交互切场景时 blue-man 的站位也要补（否则 skinned pass 是空的）。
+                    SetUnderwaterScene(true);
+                    BuildWaterPeople();
                 } else if (sel == kSceneWater) {
                     // 水场景：俯视看岩板（深度 × 颜色的梯度最好看），太阳偏侧。
                     view_.phi = 0.62;   // ≈35° 仰角
@@ -1144,6 +1319,57 @@ private:
                 // 「SSR / 天光自由度」通用面板，它们用的也是 row(0,1..15) / row(1,0..)，
                 // 两套控件叠在同一批行上 ⇒ 文字互相重叠、完全不可读
                 //（2026-11-24 Danis 报障：「场景4 UI 重叠，字都混在一起」）。
+                return;
+            }
+
+            if (IsUnderwater()) {
+                // 水下场景的面板只留：天体光照 + 两个衰减开关 + 介质/水皮 + 时间。
+                // 海面参数直接用场景 4 的默认值（Danis：这样海水相关滑条都省了）。
+                ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                                row(0, 1), -90.0f, 90.0f, 0);
+                ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 2), 0.0f, 360.0f, 0);
+                ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 3),
+                                kTurbidityMin, kTurbidityMax, 1);
+                ui_.Checkbox("ambient 衰减（水下）", &water_atten_ambient_, row(0, 4));
+                ui_.Checkbox("平行光衰减（水下）", &water_atten_sun_, row(0, 5));
+                // 刻意**不**给「水体介质 / 水皮」开关：相机在水下时介质是硬依赖
+                //（Renderer 的 CHECK：水下关介质会把画面盖成黑环），给个能点崩的
+                // 开关只会制造"一点就崩"的 bug。它们由场景固定为开。
+                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(0, 6), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(0, 7), 0.0f, 120.0f,
+                                2);
+                // 只读：海底深度处的两个逐通道增益（让「开关改了什么」可核对，
+                // 观感上的差异大部分被水体的注入色吃掉了，数字不会骗人）。
+                {
+                    const float water_depth_m = water_cfg_.depth_m;
+                    const float bed_y = water_cfg_.level_y - water_depth_m;
+                    const SkyLighting lighting = MakeSkyLighting(deg_, tricolor_ambient_);
+                    jpov::water::WaterMediumSample ms;
+                    ms.level_y = water_cfg_.level_y;
+                    ms.ior = water_cfg_.ior;
+                    ms.sigma_a = water_cfg_.sigma_a;
+                    ms.sigma_s = {water_cfg_.sigma_s, water_cfg_.sigma_s, water_cfg_.sigma_s};
+                    ms.phase_g = water_cfg_.phase_g;
+                    ms.has_sun = true;
+                    ms.sun_toward = lighting.sky.sun_dir.Unit();
+                    const jpov::water::UnderwaterAttenuation att =
+                        jpov::water::BuildUnderwaterAttenuation(
+                            ms, water_atten_ambient_, water_atten_sun_);
+                    jpov::Vec3f amb_gain;
+                    jpov::Vec3f sun_gain;
+                    jpov::water::UnderwaterGains(att, {0.0f, bed_y, 0.0f}, &amb_gain, &sun_gain);
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf),
+                                  "海底 %.1fm gain 直射 %.2f/%.2f/%.2f 环境 %.2f/%.2f/%.2f",
+                                  static_cast<double>(water_depth_m),
+                                  static_cast<double>(sun_gain.x()),
+                                  static_cast<double>(sun_gain.y()),
+                                  static_cast<double>(sun_gain.z()),
+                                  static_cast<double>(amb_gain.x()),
+                                  static_cast<double>(amb_gain.y()),
+                                  static_cast<double>(amb_gain.z()));
+                    ui_.Text(buf, row(0, 8));
+                }
                 return;
             }
 

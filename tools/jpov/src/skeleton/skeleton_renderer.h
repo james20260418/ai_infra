@@ -28,6 +28,7 @@
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/src/env_specular.h"
+#include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
@@ -451,7 +452,7 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     float NdotL = max(dot(N, L), 0.0);
     return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
 }
-)glsl") + kEnvSpecularGlsl + R"glsl(
+)glsl") + kEnvSpecularGlsl + water::kUnderwaterAttenGlsl + R"glsl(
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -522,6 +523,12 @@ void main() {
     } else {
         ambient = uAmbientColor * uAmbientIntensity;
     }
+    // 水下照明衰减（照明侧）：逐片元按深度乘增益，水上/开关关 = 1。
+    vec3 w_amb_atten;
+    vec3 w_sun_atten;
+    WaterAttenuation(vWorldPos, w_amb_atten, w_sun_atten);
+    ambient *= w_amb_atten;
+
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 
@@ -533,7 +540,7 @@ void main() {
         if (NdotL > 0.0) {
             float frag_dist = length(uCameraPos - vWorldPos);
             float shadow = computeSunShadow(vWorldPos, N, L, frag_dist);
-            vec3 light_col = uSunColor * uSunIntensity * shadow;
+            vec3 light_col = uSunColor * uSunIntensity * shadow * w_sun_atten;
 
             // diffuse（Lambert + 菲涅尔去金属部分）
             vec3 Hd = normalize(L + V);

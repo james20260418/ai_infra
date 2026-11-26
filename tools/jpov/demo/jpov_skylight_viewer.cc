@@ -117,6 +117,13 @@ void InstallModels(jpov_skylight::SkylightApp& app) {
     // 高模橡树：放到右侧，目标高 ~6 m（成熟橡树）。
     jpov::GltfObject oak = load(kOakModelPath);
     const float oak_scale = scale_to_height(oak, 6.0f);
+    // 场景 5（水下）的 instanced pass 要复用这份网格：存下第一个 primitive 的句柄。
+    // （GltfObject 的所有权随后交给 models_；mesh/material 句柄仍然有效。）
+    if (!oak.primitives.empty()) {
+        app.oak_mesh_ = oak.primitives[0].mesh_id;
+        app.oak_material_ = oak.primitives[0].material;
+        app.oak_scale_ = oak_scale;
+    }
     app.AddModel(std::move(oak), /*center*/ {3.2f, 0.0f, -0.6f},
                  /*up*/ {0, 1, 0}, /*front*/ {-1, 0, 0}, oak_scale);
 }
@@ -2256,6 +2263,60 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 用法：jpov_skylight_viewer --capture-underwater <out_dir>
+//
+// 场景 5（水下照明衰减）的四张 A/B：两个开关的全排列。
+// 判据：四张图只有两个开关不同（时间已冻结）；每一项单独打开时只改它自己那一份，
+// 打开后按水柱深度变暗、红通道先掉（水色）。
+int RunCaptureUnderwater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水下照明衰减（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetUnderwaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 冻结时间：四张图只有两个开关不同（否则每张的海面波相位都在走，A/B 不可比）。
+    app.SetWaterWaveTime(7.0f);
+
+    struct Shot {
+        const char* name;
+        bool ambient;
+        bool sun;
+    };
+    const Shot shots[4] = {
+        {"underwater_atten_off", false, false},
+        {"underwater_atten_ambient", true, false},
+        {"underwater_atten_sun", false, true},
+        {"underwater_atten_both", true, true},
+    };
+    for (const Shot& shot : shots) {
+        app.SetWaterAttenuation(shot.ambient, shot.sun);
+        app.RunOnce(input, winfo, (out_dir + "/" + shot.name + ".png").c_str());
+    }
+
+    LOG(INFO) << "underwater attenuation A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
@@ -2267,6 +2328,8 @@ int main(int argc, char** argv) {
     std::string water_out_dir;
     std::string water_waves_out_dir;
     std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/V2/截断组合）
+    std::string water_underwater_out_dir;   // --capture-underwater：场景 5 的四张 A/B
+    bool start_underwater = false;    // --underwater：直接进场景 5（水下照明）
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
@@ -2312,6 +2375,10 @@ int main(int argc, char** argv) {
             water_waves_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-skin-v2") == 0 && i + 1 < argc) {
             water_skin_v2_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-underwater") == 0 && i + 1 < argc) {
+            water_underwater_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--underwater") == 0) {
+            start_underwater = true;
         } else if (std::strcmp(argv[i], "--water-waves") == 0) {
             start_water_waves = true;
         } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
@@ -2395,6 +2462,9 @@ int main(int argc, char** argv) {
     }
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir);
+    }
+    if (!water_underwater_out_dir.empty()) {
+        return RunCaptureUnderwater(water_underwater_out_dir);
     }
     if (!water_skin_v2_out_dir.empty()) {
         return RunCaptureWaterSkinV2(water_skin_v2_out_dir);
@@ -2482,6 +2552,10 @@ int main(int argc, char** argv) {
     if (start_ocean_lab) {
         app.SetOceanLab(true);
     }
+    if (start_underwater) {
+        app.SetUnderwaterScene(true);
+        app.BuildWaterPeople();
+    }
     if (start_water_waves) {
         app.SetWaterScene(true);
         app.BuildWaterPeople();
@@ -2519,7 +2593,7 @@ int main(int argc, char** argv) {
     // 海面选型场自己已经摆好机位（SetOceanLab→SetOceanLabView）：不要被这里的
     // 通用默认机位覆盖（否则 --ocean-lab 进去看到的是 phi=0.25/theta=45°/R=9.5，
     // 与场景 4 下拉里的那台机位不一致）。
-    if (!start_ocean_lab) {
+    if (!start_ocean_lab && !start_underwater) {
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = 0.25;                       // 略俯视（~14°）
         app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位

@@ -30,6 +30,7 @@ cc_library(
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",
         "//tools/jpov/src:texture_units",
+        "//tools/jpov/src/water:water_underwater_shading",
         "//tools/jpov/src/wbo:wbo_shader",
         "//tools/jpov/src/wbo:wbo_target",
         "@glog_static//:glog",

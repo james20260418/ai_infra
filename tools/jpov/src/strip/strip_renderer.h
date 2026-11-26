@@ -63,6 +63,7 @@
 #ifndef JPOV_SRC_STRIP_STRIP_RENDERER_H_
 #define JPOV_SRC_STRIP_STRIP_RENDERER_H_
 
+#include <optional>
 #include <vector>
 
 #include "tools/jpov/interface/camera.h"
@@ -71,6 +72,7 @@
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/strip/strip_geometry.h"
 #include "tools/jpov/src/texture_manager.h"
+#include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
@@ -517,13 +519,17 @@ vec3 SkyLightRadiance(vec3 N) {
     // 天际线是中继）。下半球有地色兜底，不会死黑。
     vec3 ambient = (n.y >= 0.0) ? mix(uSkyHorizon, uSkyZenith, n.y)
                                 : mix(uSkyHorizon, uSkyGround, -n.y);
-    vec3 sky = ambient * uSkyAmbientScale;
+    // 水下照明衰减（照明侧）：条带是单层片、双面可见，逐片元按自己的世界位置衰减。
+    vec3 w_amb_atten;
+    vec3 w_sun_atten;
+    WaterAttenuation(vWorld, w_amb_atten, w_sun_atten);
+    vec3 sky = ambient * uSkyAmbientScale * w_amb_atten;
     // 太阳项只在真的给了强度时才算：否则每个片元白付一次 shadow map 采样 + 两次 mat4×vec4
     // （纯天光 / 入夜就是这条路径）。条件全是 uniform ⇒ 全屏一致，不会有 warp 分歧。
     // 条带是**单层片**，两面都受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
     if (uSunIntensity > 0.0) {
         float shadow = CsmShadow(vWorld, length(uCamPos - vWorld), uHasCsm);
-        sky += uSunColor * (abs(dot(n, uSunDir)) * uSunIntensity * shadow);
+        sky += uSunColor * (abs(dot(n, uSunDir)) * uSunIntensity * shadow) * w_sun_atten;
     }
     return sky;
 }
@@ -544,6 +550,16 @@ void ApplySkyLight(vec3 N, inout vec3 color) {
     // 所以这个值必须由调用方在 Begin 时就知道（它决定 FBO 的附件数量）。
     // Pre-condition: Init 已调用；with_additive 必须覆盖本帧所有 Draw 的需求
     //                （有 kEmissive 批就必须 true；只画覆盖批时 true 也无害）。
+    // 水下照明衰减：**逐帧一次**（Renderer 每帧调；不调 = 关）。
+    // 只影响开天光（sky_light）的批 —— 无光照的条带本来就不消费 ambient/平行光。
+    void SetUnderwaterAttenuation(const water::UnderwaterAttenuation* atten) {
+        if (atten != nullptr && atten->enabled()) {
+            underwater_atten_ = *atten;
+        } else {
+            underwater_atten_.reset();
+        }
+    }
+
     void Begin(int full_w, int full_h, bool with_additive);
 
     // 把一批条带累加画进本渲染器的 1× WBO 目标（不 clear）。
@@ -663,6 +679,16 @@ private:
         int shadow_bias_override = -1;
         int shadow_fade_start = -1;
         int shadow_fade_end = -1;
+        // 水下照明衰减（2026-11-26；同样只在 lit program 里存在，unlit 全是 -1）。
+        int water_atten_on = -1;
+        int water_atten_ambient = -1;
+        int water_atten_sun = -1;
+        int water_atten_level_y = -1;
+        int water_atten_ior = -1;
+        int water_atten_sigma_t = -1;
+        int water_atten_kd = -1;
+        int water_atten_sun_toward = -1;
+        int water_atten_ambient_t = -1;
     };
     struct CompositeUniforms {
         int accum = -1;
@@ -724,6 +750,7 @@ private:
     unsigned int prog_smooth_lit_ = 0;
     CommonUniforms draw_uniforms_;
     CommonUniforms draw_lit_uniforms_;
+    std::optional<water::UnderwaterAttenuation> underwater_atten_;
     CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点（两种档位共用：顶点布局相同）

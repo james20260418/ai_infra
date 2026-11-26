@@ -23,6 +23,7 @@
 #include "tools/jpov/src/lights_texture.h"
 #include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/water/water_medium_math.h"
+#include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/src/water/water_medium_shader.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
@@ -1540,6 +1541,10 @@ void Renderer::Render(const RenderCommandList& cmds,
         const bool water_present = cmds.water.has_value();
         const bool water_skin_on = water_present && cmds.water->skin;
         const bool water_medium_on = water_present && cmds.water->medium.enabled;
+        // 照明侧衰减（与「画不画水体体积」独立）：两个开关各自独立。
+        const bool water_atten_ambient = water_present && cmds.water->attenuate_ambient;
+        const bool water_atten_sun = water_present && cmds.water->attenuate_sun;
+        const bool water_atten_on = water_atten_ambient || water_atten_sun;
 
         // 体积消费者（雾场 / 水体介质 / 水皮的深海积分）的**照明唯一出处**：
         //   直射 = cmds.sun，环境 = cmds.ambient —— 与 object3d 的 PBR 是同一份数据。
@@ -1561,7 +1566,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 不合法直接 crash（不静默退化）。
         water::WaterMediumSample water_medium;
         const water::WaterMediumSample* water_medium_ptr = nullptr;
-        if (water_medium_on) {
+        // 衰减也要 σ ⇒ 只开衰减、不开介质时同样要构建这份样本。
+        if (water_medium_on || water_atten_on) {
             const WaterMedium& wm = cmds.water->medium;
             CHECK_GE(wm.sigma_a.x(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
             CHECK_GE(wm.sigma_a.y(), 0.0f) << "WaterMedium::sigma_a 必须 >= 0";
@@ -1577,9 +1583,16 @@ void Renderer::Render(const RenderCommandList& cmds,
             CHECK_GE(cmds.water->ior, 1.0f)
                 << "WaterCommand::ior 必须 >= 1（水不得比空气疏；纯水 1.333；1.0 = 无界面/调试用）";
             // σ 全 0 = 「忘了填参数」（enabled=false 才是「关」）：静默跑一趟恒等合成很误导。
-            CHECK(wm.sigma_a.x() > 0.0f || wm.sigma_a.y() > 0.0f || wm.sigma_a.z() > 0.0f ||
-                  wm.sigma_s.x() > 0.0f || wm.sigma_s.y() > 0.0f || wm.sigma_s.z() > 0.0f)
-                << "WaterMedium::enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 enabled=false";
+            const bool sigma_nonzero =
+                wm.sigma_a.x() > 0.0f || wm.sigma_a.y() > 0.0f || wm.sigma_a.z() > 0.0f ||
+                wm.sigma_s.x() > 0.0f || wm.sigma_s.y() > 0.0f || wm.sigma_s.z() > 0.0f;
+            if (!sigma_nonzero) {
+                CHECK(!water_medium_on)
+                    << "WaterMedium::enabled=true 但 sigma_a/sigma_s 全为 0：要关请用 enabled=false";
+                CHECK(!water_atten_on)
+                    << "WaterCommand::attenuate_ambient/sun=true 但 medium σ 全为 0："
+                       "衰减没有参数（要关请把开关置 false）";
+            }
             water_medium.level_y = cmds.water->level_y;
             water_medium.ior = cmds.water->ior;
             water_medium.sigma_a = wm.sigma_a;
@@ -1600,7 +1613,17 @@ void Renderer::Render(const RenderCommandList& cmds,
                                               eff_sun->color.b * eff_sun->intensity};
                 }
             }
-            water_medium_ptr = &water_medium;
+            // 介质消费者（合成趟 / 水皮）只认 enabled；衰减单独走下面的指针。
+            water_medium_ptr = water_medium_on ? &water_medium : nullptr;
+        }
+        water::UnderwaterAttenuation water_atten;
+        const water::UnderwaterAttenuation* water_atten_ptr = nullptr;
+        if (water_atten_on) {
+            CHECK(water_medium.has_sun || !water_atten_sun)
+                << "attenuate_sun=true 但没有 cmds.sun：水下直射衰减没有太阳方向";
+            water_atten = water::BuildUnderwaterAttenuation(
+                water_medium, water_atten_ambient, water_atten_sun && water_medium.has_sun);
+            water_atten_ptr = &water_atten;
         }
 
         // ---- 第 0.5 步：天光背景（有 sky 指令时）----
@@ -1792,6 +1815,25 @@ void Renderer::Render(const RenderCommandList& cmds,
                 SkinnedMeshProgCutout(), ambient);
         }
 
+        // 水下照明衰减 uniform：与 ambient/sun 同样的分组（一个 program 都不能漏 ——
+        // 漏掉的 program 会沿用上一帧的开关，A/B 时看起来像"某个 pass 不听话"）。
+        if (!cmds.object3d.empty() || !cmds.instanced_object.empty()) {
+            const unsigned int atten_progs[] = {
+                DrawObject3DProg(),        DrawObject3DProgFull(),
+                DrawObject3DProgCutout(),  DrawObject3DProgFullCutout(),
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+            };
+            for (unsigned int p : atten_progs) {
+                water::UploadUnderwaterAttenuation(shader_mgr_, p, water_atten_ptr);
+            }
+        }
+        if (!cmds.skinned_mesh.empty()) {
+            water::UploadUnderwaterAttenuation(shader_mgr_, SkinnedMeshProg(), water_atten_ptr);
+            water::UploadUnderwaterAttenuation(shader_mgr_, SkinnedMeshProgCutout(),
+                                               water_atten_ptr);
+        }
+
         // 环境镜面（IBL specular）uniform。
         //
         // ⚠️ **只要本帧有会用到该 program 的命令就必须上传**（无论开没开）：
@@ -1959,6 +2001,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // CSM 资源：只有「本帧有开天光的条带批」时才整理这份拷贝（几个 POD + ≤5 个
                 // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
                 // StripRenderer::Draw（与 fog 的 FogLighting 同一模式）。
+                // 水下照明衰减：条带是 effect pass，参数由主链路逐帧给一次。
+                strip_renderer_.SetUnderwaterAttenuation(water_atten_ptr);
                 const bool strips_need_csm = StripBatchesNeedCsm(cmds);
                 StripCsmShadow strips_csm;
                 if (strips_need_csm && cmds.sun.has_value() && !shadow_fbos_.empty()) {
