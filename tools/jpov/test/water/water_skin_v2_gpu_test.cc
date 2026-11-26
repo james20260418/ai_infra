@@ -915,4 +915,5 @@ TEST(WaterSkinV2Gpu, V2SunLobeOnlyWidensWherePixelsCannotResolve) {
     f.TearDown();
 }
 
+
 }  // namespace

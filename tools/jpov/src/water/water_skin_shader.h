@@ -167,6 +167,7 @@ struct WaterShade {
     float alpha;           // 层遮挡率
     float fresnel_debug;   // 调试用（uWaveDebug=13）：水上=F，水下=0
     float env_lod_debug;   // 调试用（uWaveDebug=11）：水上=env_lod，水下=0
+    float a2_debug;        // 调试用（uWaveDebug=14）：水上=太阳 lobe 的 a2，水下=0
     vec3  refl_debug;      // 调试用（uWaveDebug=12）：水上=refl，水下=0
 };
 
@@ -308,6 +309,7 @@ void ShadeAbove(WaterSurface s, out WaterShade o) {
             if (uSunLobeOn != 0) {
                 a2 = min(a2 + uSunFootprint * s.footprint_a2 + 2.0 * s.normal_var_px, 0.25);
             }
+            o.a2_debug = a2;   // 调试 14：与 V2 的同一口径对比用
             float D = GgxDistribution(NoH, a2);
             float G = GgxSmithG1(NoV, a2) * GgxSmithG1(NoL, a2);
             float Fw = F;
@@ -431,6 +433,13 @@ void EmitDebug(WaterSurface s, WaterShade o, int mode) {
     if (mode == 13) {
         // 反射率 F
         oAccum  = vec4(vec3(o.fresnel_debug), 1.0);
+        oReveal = 1.0;
+        oDepth  = 1.0;
+        return;
+    }
+    if (mode == 14) {
+        float v = clamp(o.a2_debug / 0.25, 0.0, 1.0);
+        oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
         oDepth  = 1.0;
         return;
