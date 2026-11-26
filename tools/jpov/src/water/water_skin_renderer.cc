@@ -175,6 +175,12 @@ void WaterSkinRenderer::UploadCommonUniforms(unsigned int prog, const Inputs& in
     glUniform1f(shader_mgr_->GetUniform(prog, "uEnvScale"), in.env_scale);
     glUniform1f(shader_mgr_->GetUniform(prog, "uHorizonClampSin"), water::kHorizonClampSin);
     glUniform1f(shader_mgr_->GetUniform(prog, "uDepthBiasM"), water::kDepthBiasM);
+    // 方差系两个消费点的开关：**与 V2 共用同一份 WaterWaves 字段**（面板上 A/B 才是同一件事）。
+    // waves == nullptr（没开波浪）时按默认 1/1 上传 ⇒ 与历史行为逐字节相同。
+    glUniform1i(shader_mgr_->GetUniform(prog, "uEnvLodOn"),
+                ((in.waves == nullptr) || in.waves->v2_env_lod) ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSunLobeOn"),
+                ((in.waves == nullptr) || in.waves->v2_sun_lobe) ? 1 : 0);
 
     // ── 介质 uniform（水下支路的 S_P(∞) 与水平面/折射率）──
     // 水平面高度与 ior 总是上传（即使没有介质也要能画界面）；
