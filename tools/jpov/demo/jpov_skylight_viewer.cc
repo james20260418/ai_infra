@@ -976,7 +976,7 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 水皮 V2 验收（2026-11-26）：同一机位 A/B —— V1 / Hammersley / 屏幕 2×2 / 截断旋钮 T。
+// 水皮 V2 验收（2026-11-26）：同一机位 A/B —— V1 / V2(S=4,S=16) / 两个截断旋钮的组合。
 //
 // 用法：jpov_skylight_viewer --capture-skin-v2 <out_dir>
 //
@@ -2267,7 +2267,7 @@ int main(int argc, char** argv) {
     std::string mat_out_dir;
     std::string water_out_dir;
     std::string water_waves_out_dir;
-    std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/Hammer/2×2/T）
+    std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/V2/截断组合）
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
     bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
@@ -2490,7 +2490,7 @@ int main(int argc, char** argv) {
         // 不夹范围：非法值交给 Renderer 的 CHECK（CLI 手误要看得到报错）。
         app.SetWaterSkinV2Samples(water_samples);
     }
-    // V2 的两个验收旋钮（谱截断 T / 屏幕 2×2 采样图案）。
+    // V2 的两个验收旋钮（谱截断：主波 T / 细节波 T）。
     if (water_truncate_main >= 0.0f) {
         app.SetWaterSkinV2TruncateMain(water_truncate_main);
     }
