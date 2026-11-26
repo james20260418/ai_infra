@@ -58,6 +58,8 @@ public:
 
     // ── 场景静态资源（Init() 后装配一次，不在 OneIteration 里重复构造/上传）──
     uint32_t box_mesh_ = 0;              // 1×1×1 方块（三块共用）
+    // 方形立柱（1.2 × 12 × 1.2 m）：给水面投一条影，用来验收 CSM（2026-11-26）。
+    uint32_t pillar_mesh_ = 0;
     uint32_t ground_mesh_ = 0;           // 40×40 地面 quad
     // 材质阶梯用的长条（20×200）：四段沿 X 并排，见 skylight_scene.h 的 kLadder*。
     uint32_t ground_strip_mesh_ = 0;
@@ -343,7 +345,6 @@ public:
     // ── 水皮 V2（docs/jpov_water_skin_v2_design.md）──
     // V1 / V2 是**两份独立的 pass**；这里只给两个旋钮（选哪一版 + 每像素采样数 S），
     // 其余滑条（风/涌/介质/机位/时间）两版**共用**。
-    bool water_v2_ = false;
     // SliderFloat 只能收 float；写进 WaterCommand 时四舍五入成 int。
     // 非法值不在这里夹：交给 Renderer 的 CHECK（CLI 写错要看得到报错）。
     float water_v2_samples_f_ = 4.0f;
@@ -357,7 +358,6 @@ public:
     bool water_v2_m1_ = true;    // lobe 拉宽
     bool water_v2_m2_ = true;    // 多散射能量对账
     bool water_v2_m3_ = false;   // glints（各向异性 + 颗粒）
-    void SetWaterSkinV2(bool on) { water_v2_ = on; }
     void SetWaterSkinV2Samples(int sample_count) {
         water_v2_samples_f_ = static_cast<float>(sample_count);
     }
@@ -411,6 +411,9 @@ public:
     // 装配「镜面地板」场景所需的最小资源（地面 + 散布方块）。不装模型/蓝人：
     // 本验收不需要外部资产（拍摄与单测都能直接跑）。
     void InstallMirrorFloorScene() {
+        if (pillar_mesh_ == 0) {
+            pillar_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.6f, 6.0f, 0.6f));
+        }
         if (box_mesh_ == 0) {
             box_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(
                 jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
@@ -658,6 +661,14 @@ public:
         if (draw_scene && ocean_lab) {
             const float bed_y = water_cfg_.level_y - water_cfg_.depth_m;
             // 海底只画这一块。浅海靠"水深滑条 + 沙底本身的明暗"表达，不再加装饰几何。
+            // 方形立柱：立在海底、露出水面 ⇒ 水面（以及水下）应当被它切出阴影。
+            // 位置在相机与太阳的连线上（相机 +x+z、太阳在 −x−z）⇒ 影子朝相机方向拉。
+            if (pillar_mesh_ != 0) {
+                cmds->DrawObject3D(pillar_mesh_, jpov_skylight::SlabMaterial(),
+                                   {-6.0f, bed_y + 6.0f, -6.0f},
+                                   /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                                   /*scale*/ 1.0f);
+            }
             cmds->DrawObject3D(ground_mesh_, jpov_skylight::SeabedMaterial(1.0f),
                                {0.0f, bed_y, 0.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f},
@@ -683,6 +694,12 @@ public:
             cmds->DrawObject3D(box_mesh_, mat_metal_, {1.0f, top + 1.4f, -6.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
                                /*scale*/ 2.2f);
+            // 方形立柱（露出水面）：水面应当被它切出一道阴影（CSM 验收）。
+            if (pillar_mesh_ != 0) {
+                cmds->DrawObject3D(pillar_mesh_, mat_low_, {-8.0f, top + 6.0f, -8.0f},
+                                   /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                                   /*scale*/ 1.0f);
+            }
             // 蓝人（skinned pass）：三个人站在岩板上 —— 水下看人的轮廓/颜色最能暴露
             // 「水的消光是否作用在正确的地方」。
             if (person_mesh_ != 0 && !water_people_.empty()) {
@@ -868,7 +885,7 @@ public:
             // 水皮版本（V1 / V2 二选一）+ V2 采样数：**两版共用同一个开关**，所以放在
             // 分支之后统一写（波浪关着时也照写：开关就是开关，不因“反正平面一样”而失效）。
             // 滑条是 float ⇒ 四舍五入成 int；范围不在这里夹（Renderer 的 CHECK 会拦住）。
-            w.waves.v2 = water_v2_;
+            w.waves.v2 = true;   // 2026-11-26：V1 开关已移除，水皮固定走 V2
             w.waves.v2_sample_count = static_cast<int>(std::lround(water_v2_samples_f_));
             w.waves.v2_truncate_px_main = water_v2_truncate_main_;
             w.waves.v2_truncate_px_detail = water_v2_truncate_detail_;
@@ -1063,29 +1080,27 @@ private:
                 ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 2), kTurbidityMin,
                                 kTurbidityMax, 1);
                 ui_.Checkbox("水皮界面层 (WBO)", &water_skin_on_, row(1, 3));
-                // 水皮版本：V1 ↔ V2 直接 A/B。两份**独立的 pass**，其余滑条共用；
-                // S 只对 V2 生效（S=1 = 只取中心法线，但仍不截断谱）。
-                ui_.Checkbox("水皮 V2（多法线采样）", &water_v2_, row(1, 4));
-                ui_.SliderFloat("水皮 S 采样数（V2）", &water_v2_samples_f_, row(1, 5),
+                // 水皮固定走 V2（V1 开关已于 2026-11-26 移除）。S = 每像素法线采样数。
+                ui_.SliderFloat("水皮 S 采样数", &water_v2_samples_f_, row(1, 4),
                                 1.0f, 16.0f, 0);
                 // 谱截断：**主波 / 细节波分开**。0 = 该族不截断，1 = 与 V1 同一条线（3~8 px）。
                 // 主波管几何/剪影，细节波只进法线 —— 噪点来自哪一族，用这两根分开归因。
                 ui_.SliderFloat("水皮 截断 T 主波（×3~8px，0=关）", &water_v2_truncate_main_,
-                                row(1, 6), 0.0f, 4.0f, 2);
+                                row(1, 5), 0.0f, 4.0f, 2);
                 ui_.SliderFloat("水皮 截断 T 细节波（×3~8px，0=关）", &water_v2_truncate_detail_,
-                                row(1, 7), 0.0f, 4.0f, 2);
+                                row(1, 6), 0.0f, 4.0f, 2);
                 // 谱的离散条数（WaterQuality）：主波贵（每条都要参与求交二分），细节波便宜。
                 // 改了就重建谱（BuildWater 有范围 CHECK，面板这里先夹到合法区间）。
                 {
                     float main_n = static_cast<float>(water_quality_.main_waves);
-                    if (ui_.SliderFloat("谱 主波条数 (1~8)", &main_n, row(1, 8), 1.0f, 8.0f, 0)) {
+                    if (ui_.SliderFloat("谱 主波条数 (1~8)", &main_n, row(1, 7), 1.0f, 8.0f, 0)) {
                         water_quality_.main_waves =
                             std::clamp(static_cast<int>(std::lround(main_n)), 1,
                                        jpov::WaterWaves::kMaxWaves);
                         InvalidateLabWater();
                     }
                     float detail_n = static_cast<float>(water_quality_.detail_waves);
-                    if (ui_.SliderFloat("谱 细节波条数 (0~64)", &detail_n, row(1, 9), 0.0f,
+                    if (ui_.SliderFloat("谱 细节波条数 (0~64)", &detail_n, row(1, 8), 0.0f,
                                         64.0f, 0)) {
                         water_quality_.detail_waves =
                             std::clamp(static_cast<int>(std::lround(detail_n)), 0,
@@ -1093,20 +1108,21 @@ private:
                         InvalidateLabWater();
                     }
                 }
-                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 10));
-                ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 11),
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(1, 9));
+                ui_.SliderFloat("主波波幅倍率（调试）", &water_wave_amp_scale_, row(1, 10),
                                 0.0f, 3.0f, 2);
-                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 12), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 13), 0.0f, 120.0f,
+                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(1, 11), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(1, 12), 0.0f, 120.0f,
                                 2);
-                if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 14))) {
+                if (ui_.Checkbox("冻结时间", &water_wave_time_freeze_, row(1, 13))) {
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
                 // 亚像素补偿三条通道（σ² 本身按谱截断自动推导，没有开关）
-                ui_.Checkbox("V2 探针模糊 (env LOD←σ²)", &water_v2_env_lod_, row(1, 17));
-                ui_.Checkbox("V2 M1 lobe 拉宽 (a2←2σ²)", &water_v2_m1_, row(1, 18));
-                ui_.Checkbox("V2 M2 多散射对账", &water_v2_m2_, row(1, 19));
-                ui_.Checkbox("V2 M3 glints (各向异性+颗粒)", &water_v2_m3_, row(1, 20));
+                ui_.Checkbox("V2 探针模糊 (env LOD←σ²)", &water_v2_env_lod_, row(1, 16));
+                ui_.Checkbox("V2 M1 lobe 拉宽 (a2←2σ²)", &water_v2_m1_, row(1, 17));
+                ui_.Checkbox("V2 M2 多散射对账", &water_v2_m2_, row(1, 18));
+                ui_.Checkbox("V2 M3 glints (各向异性+颗粒)", &water_v2_m3_, row(1, 19));
+                ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(1, 20));
 
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();
@@ -1116,13 +1132,13 @@ private:
                                   static_cast<double>(lab_readout_.hs_wind_m),
                                   static_cast<double>(lab_readout_.hs_swell_m),
                                   static_cast<double>(lab_readout_.hs_total_m));
-                    ui_.Text(buf, row(1, 15));
+                    ui_.Text(buf, row(1, 14));
                     std::snprintf(buf, sizeof(buf), "Tp %.1f s   λp %.0f m  坡度 %.0f°",
                                   static_cast<double>(lab_readout_.period_s),
                                   static_cast<double>(lab_readout_.lambda_peak_m),
                                   static_cast<double>(
                                       std::atan(lab_readout_.rms_slope) * 57.29577951308232));
-                    ui_.Text(buf, row(1, 16));
+                    ui_.Text(buf, row(1, 15));
                 }
                 // 场景 4 的面板到这里就结束：**必须早退**，否则会继续画下面那套
                 // 「SSR / 天光自由度」通用面板，它们用的也是 row(0,1..15) / row(1,0..)，
@@ -1167,8 +1183,8 @@ private:
 
 
                 // 时间：冻结 + 精确秒数（报障复现用）
-                ui_.Checkbox("波浪 冻结时间", &water_wave_time_freeze_, row(1, 14));
-                ui_.SliderFloat("波浪 时间 s", &water_wave_time_s_, row(1, 15), 0.0f, 120.0f, 2);
+                ui_.Checkbox("波浪 冻结时间", &water_wave_time_freeze_, row(1, 13));
+                ui_.SliderFloat("波浪 时间 s", &water_wave_time_s_, row(1, 14), 0.0f, 120.0f, 2);
                 return;
             }
             ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
@@ -1228,11 +1244,11 @@ private:
         // ② / ③ 贴边：P（倒影显示位置）和 Q（反射源）各自一条缓冲带。
         ui_.SliderFloat("A 淡出·预算带 px", &ssr_fade_budget_px_, row(1, 4), 0.0f, 120.0f, 0);
         ui_.SliderFloat("A 淡出·反射体贴边 px", &ssr_fade_edge_px_, row(1, 5), 0.0f, 240.0f, 0);
-        ui_.SliderFloat("A 淡出·命中点贴边 px", &ssr_fade_hit_edge_px_, row(1, 6), 0.0f, 240.0f, 0);
+        ui_.SliderFloat("A 淡出·命中点贴边 px", &ssr_fade_hit_edge_px_, row(1, 5), 0.0f, 240.0f, 0);
 
         // ── 右列 7..8：遮丑滤波器 ③（2026-11-13）──
-        ui_.Checkbox("遮丑③ 边缘保持小波", &ssr_filter_atrous_, row(1, 7));
-        ui_.SliderFloat("小波趟数 (1..3)", &ssr_filter_atrous_iters_, row(1, 8), 1.0f, 3.0f, 0);
+        ui_.Checkbox("遮丑③ 边缘保持小波", &ssr_filter_atrous_, row(1, 6));
+        ui_.SliderFloat("小波趟数 (1..3)", &ssr_filter_atrous_iters_, row(1, 7), 1.0f, 3.0f, 0);
 
         // ── 右列 2..3：背面命中的两个正交 flag（2026-11-13）──
         // ① 来源：关 = 交回 env（旧行为）；开 = 用 SSR 给出的那份颜色。
@@ -1251,26 +1267,26 @@ private:
                                             jpov_skylight::kFloorPresetNames
                                                 + jpov_skylight::kFloorPresetCount);
             int fp = floor_preset_;
-            if (ui_.Combo("地面材质", &fp, floors, row(1, 9))) {
+            if (ui_.Combo("地面材质", &fp, floors, row(1, 8))) {
                 floor_preset_ = fp;
             }
             // 降采样倍率滑条 N（1..4）：分辨率 = 1/N。N=3 也能跑（整数格 + 加权，不要求 2 的幂）。
             float n_f = static_cast<float>(ssr_downscale_n_);
-            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 10), 1.0f, 4.0f, 0)) {
+            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 9), 1.0f, 4.0f, 0)) {
                 ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
                 ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
                 ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
             }
-            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 12), 1.0f, 24.0f, 1);
+            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 11), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
-            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 13), 40.0f, 800.0f, 0)) {
+            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 12), 40.0f, 800.0f, 0)) {
                 ssr_max_ray_px_ = static_cast<int>(mrp);
             }
             // 磨砂强度：roughness² × 该值 = 采样的 mip 级。0 = 永远锐利（旧行为）。
-            ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 14),
+            ui_.SliderFloat("SSR 磨砂强度 (模糊斜率)", &ssr_rough_to_lod_, row(1, 13),
                             0.0f, 8.0f, 2);
             // 发射线门槛：超过它的粗糙度直接用 env（省射线，且本来也糊得看不出形状）。
-            ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 15),
+            ui_.SliderFloat("SSR 发射线门槛 roughness", &ssr_rough_cutoff_, row(1, 14),
                             0.2f, 1.0f, 2);
         }
     }

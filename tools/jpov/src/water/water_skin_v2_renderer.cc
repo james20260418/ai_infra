@@ -32,6 +32,7 @@
 #endif
 
 #include "tools/jpov/src/water/water_medium_shader.h"   // kWaterInterfaceUniformsGlsl + kWaterMediumUniformsGlsl + kWaterMediumGlsl
+#include "tools/jpov/src/csm_shadow_glsl.h"           // kCsmSingleTapGlsl（与 fog/strip 同一份）
 #include "tools/jpov/src/water/water_skin_shader.h"       // kWaterSkinVs（全屏三角形，与 V1 同一份）
 #include "tools/jpov/src/water/water_skin_v2_shader.h"
 #include "tools/jpov/src/water/water_wave_math.h"      // WaterWaves / WavePhaseOriginM
@@ -40,6 +41,10 @@
 
 namespace jpov {
 namespace {
+
+// CSM 级联纹理占用的纹理单元起点（0 场景深度 / 1 天光探针 / 2 flow map 已占用）。
+// 5 个级联 ⇒ 8..12；与 strip 的 kShadowUnitBase 不冲突（不同 pass，用完即还）。
+constexpr int kCsmTexUnitBase = 8;
 
 using water::WaterMediumSample;
 
@@ -77,6 +82,8 @@ void WaterSkinV2Renderer::Init(ShaderManager* shader_mgr) {
     above_fs += water::kWaterInterfaceUniformsGlsl;
     above_fs += water::kWaterWaveGlsl;
     above_fs += lighting::kGgxSpecularGlsl;
+    // CSM（阴影只作用在太阳的像上；实现是 csm_shadow_glsl.h 的唯一一份）。
+    above_fs += kCsmSingleTapGlsl;
     above_fs += water::kWaterSkinV2CommonGlsl;
     above_fs += water::kWaterSkinV2AboveGlsl;
 
@@ -149,7 +156,7 @@ void WaterSkinV2Renderer::Begin(int full_w, int full_h) {
 }
 
 void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& in,
-                                               int sample_count) {
+                                               int sample_count, const WaterCsmShadow* csm) {
     // ⚠️ 四个 program 各只声明自己需要的 uniform（水上无介质、水下无 env/太阳），这里**统一全传**：
     //    未声明的 uniform 在 GetUniform 返回 -1，glUniform* 对 -1 是静默 no-op（GL 惯例）。
     //    与 V1 的差异共四条：S、谱不截断、相位局部原点 + 局部系相机 xz；
@@ -238,6 +245,42 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
     // M1 的足迹带宽开关（与 V1 同一个字段；GPU 对拍测试传 0 关掉）。
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunFootprint"), in.sun_footprint);
 
+    // ── CSM 阴影（只影响太阳的像；环境反射不吃阴影）──
+    // 级联纹理绑到 8..12 号单元（0 场景深度 / 1 天光探针 / 2 flow map 已被占用）。
+    const bool has_csm = (csm != nullptr) && csm->IsValid();
+    glUniform1i(shader_mgr_->GetUniform(prog, "uHasCsm"), has_csm ? 1 : 0);
+    if (has_csm) {
+        const int n = std::min(csm->cfg.cascade_count, ShadowConfig::kMaxCascades);
+        CHECK_GT(n, 0) << "WaterCsmShadow: cascade_count 必须 > 0（没有级联就别传 csm）";
+        CHECK_EQ(static_cast<int>(csm->fbos.size()), n)
+            << "WaterCsmShadow: fbos.size() 必须等于 cascade_count";
+        glUniform1i(shader_mgr_->GetUniform(prog, "uCascadeCount"), n);
+        glUniform1fv(shader_mgr_->GetUniform(prog, "uCascadeRanges"),
+                     ShadowConfig::kMaxCascades, csm->cfg.cascade_ranges);
+        glUniform1fv(shader_mgr_->GetUniform(prog, "uShadowTexelWorld"),
+                     ShadowConfig::kMaxCascades, csm->texel_world);
+        glUniform1fv(shader_mgr_->GetUniform(prog, "uShadowBiasCascade"),
+                     ShadowConfig::kMaxCascades, csm->cfg.cascade_bias);
+        glUniform1i(shader_mgr_->GetUniform(prog, "uShadowBiasOverride"),
+                    csm->cfg.override_cascade_bias ? 1 : 0);
+        glUniform1f(shader_mgr_->GetUniform(prog, "uShadowFadeStart"), csm->cfg.fade_start);
+        glUniform1f(shader_mgr_->GetUniform(prog, "uShadowFadeEnd"), csm->cfg.fade_end);
+        for (int c = 0; c < n; ++c) {
+            const int unit = kCsmTexUnitBase + c;
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, csm->fbos[static_cast<size_t>(c)].tex);
+            const std::string idx = "[" + std::to_string(c) + "]";
+            glUniform1i(shader_mgr_->GetUniform(prog, ("uShadowMap" + idx).c_str()), unit);
+            glUniformMatrix4fv(
+                shader_mgr_->GetUniform(prog, ("uShadowVP" + idx).c_str()), 1, GL_FALSE,
+                csm->vp[c]);
+            glUniformMatrix4fv(
+                shader_mgr_->GetUniform(prog, ("uShadowDepthVP" + idx).c_str()), 1, GL_FALSE,
+                csm->depth_vp[c]);
+        }
+        glActiveTexture(GL_TEXTURE0);   // 复位（后续 texture unit 0 = 场景深度）
+    }
+
     // 波浪谱：口径由 WaterWaves::{v2_truncation_px} 决定（V1 = 3/8 px，V2 默认不截断）
     // + 相位局部原点（float 精度手段）。与天球折射共用同一份上传实现。
     const water::WaveTruncation trunc =
@@ -256,7 +299,8 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
 }
 
-void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count) {
+void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count,
+                               const WaterCsmShadow* csm) {
     CHECK(initialized_) << "WaterSkinV2Renderer::Draw: 未 Init";
     CHECK_GE(sample_count, kMinSamples)
         << "WaterSkinV2Renderer::Draw: sample_count 必须 >= " << kMinSamples;
@@ -281,7 +325,7 @@ void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count) {
     glDisable(GL_CULL_FACE);
     const unsigned int prog = SelectProgram(in);
     glUseProgram(prog);
-    UploadCommonUniforms(prog, in, sample_count);
+    UploadCommonUniforms(prog, in, sample_count, csm);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, in.scene_depth_tex);

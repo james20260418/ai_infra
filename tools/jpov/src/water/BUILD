@@ -103,6 +103,7 @@ cc_library(
         ":water_wave_math",
         ":water_wave_uniforms",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src:csm_shadow_glsl",   # CSM 单次采样（与 fog/strip 同一份）
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",
         "//tools/jpov/src/lighting:ggx_specular",
@@ -136,6 +137,7 @@ cc_library(
         ":water_wave_math",
         ":water_wave_uniforms",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src:csm_shadow_glsl",   # CSM 单次采样（与 fog/strip 同一份）
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:transparent_layer",
         "//tools/jpov/src/lighting:ggx_specular",

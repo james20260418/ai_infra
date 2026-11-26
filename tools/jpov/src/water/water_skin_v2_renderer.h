@@ -24,6 +24,23 @@
 
 namespace jpov {
 
+// CSM 阴影输入（与 StripCsmShadow 同构；由 Renderer 填 —— 阴影 pass 属于主链路，
+// 水皮只是消费者，不该反过来持有 shadow_fbos_ / 级联矩阵）。
+//
+// 语义：只有 `sun` 有值且 fbos 非空时**可能**有阴影；具体吃不吃由 `uHasCsm` 决定。
+// 水皮是纯镜面（无 diffuse albedo）⇒ 阴影只作用在**太阳的像**上：阴影里的水面不该有
+// 太阳闪点（船影/立柱影会切断高光带）。环境反射（天光探针）不吃阴影。
+struct WaterCsmShadow {
+    std::optional<DirectionalLight> sun;
+    ShadowConfig cfg{};
+    std::vector<CascadeFBO> fbos;      // 长度 = cfg.cascade_count（仅 sun 时有效）
+    float vp[ShadowConfig::kMaxCascades][16] = {};
+    float depth_vp[ShadowConfig::kMaxCascades][16] = {};
+    float texel_world[ShadowConfig::kMaxCascades] = {};
+
+    bool IsValid() const { return sun.has_value() && !fbos.empty(); }
+};
+
 class WaterSkinV2Renderer {
 public:
     // 输入契约与 V1 完全相同（同一份 Camera / 介质 / 波浪 / 太阳 / 探针）。
@@ -56,7 +73,7 @@ public:
     //               camera.fbo_3d_* 与 full_w/h 一致；sample_count ∈ [kMinSamples, kMaxSamples]；
     //               `inputs.waves == nullptr || inputs.waves->v2`（谱口径必须与天球折射同值，
     //               否则 Snell 窗缘错位 —— 见 water_wave_uniforms.h 顶部的不变式）。
-    void Draw(const Inputs& inputs, int sample_count);
+    void Draw(const Inputs& inputs, int sample_count, const WaterCsmShadow* csm = nullptr);
 
     // 本帧这一层的三张附件（交给合成器的 TransparentLayerSet）。
     // 未 Begin / 没画过内容时返回的层 invalid()。
@@ -64,7 +81,8 @@ public:
 
 private:
     void EnsureTarget(int w, int h);
-    void UploadCommonUniforms(unsigned int prog, const Inputs& inputs, int sample_count);
+    void UploadCommonUniforms(unsigned int prog, const Inputs& in, int sample_count,
+                              const WaterCsmShadow* csm);
     // 按「水上/水下 × 生产/调试」选 program（水上水下由相机 y vs level 决定，每帧常量）。
     unsigned int SelectProgram(const Inputs& inputs) const;
 

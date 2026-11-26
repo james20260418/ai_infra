@@ -57,6 +57,8 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.box_mesh_    = app.RegisterMesh(jpov::MeshData::MakeBox(
         jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
         jpov_skylight::kBoxHalf));
+    // 方形立柱（1.2 × 12 × 1.2 m）：给水面投一条影，验收 CSM 用。
+    app.pillar_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.6f, 6.0f, 0.6f));
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
     app.ground_strip_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad(
         jpov_skylight::kLadderStripHalfWidth, jpov_skylight::kLadderStripHalfDepth));
@@ -981,7 +983,7 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 // 用法：jpov_skylight_viewer --capture-skin-v2 <out_dir>
 //
 // 两组机位（近场俯视 / 掠射远场），每组同一帧拍下面 5 张：
-//   1_v1.png           V1（3~8 px 截断 + 那套补偿）
+//   1_v2_default.png   V2 默认样貌（V1 开关已移除）
 //   2_hammer_s4.png    V2 + Hammersley 4 样本（不截断）
 //   3_hammer_s16.png   V2 + Hammersley 16 样本（看 S 的趋势）
 //   4..7_ trunc_*      截断的四组合（主波 T / 细节波 T × 开/关）
@@ -1035,10 +1037,8 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
         app.view_.R     = shot.radius;
 
         const std::string base = out_dir + "/" + shot.prefix + "_";
-        app.SetWaterSkinV2(false);
-        app.RunOnce(input, winfo, (base + "1_v1.png").c_str());
+        app.RunOnce(input, winfo, (base + "1_v2_default.png").c_str());
 
-        app.SetWaterSkinV2(true);
         app.SetWaterSkinV2TruncateMain(0.0f);
         app.SetWaterSkinV2TruncateDetail(0.0f);
         app.SetWaterSkinV2Samples(4);
@@ -1064,7 +1064,6 @@ int RunCaptureWaterSkinV2(const std::string& out_dir) {
             app.SetWaterSkinV2TruncateDetail(0.0f);
         }
 
-        app.SetWaterSkinV2(false);
     }
     LOG(INFO) << "water skin v2 A/B captured to " << out_dir;
     app.Finalize();
@@ -2270,7 +2269,6 @@ int main(int argc, char** argv) {
     std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/V2/截断组合）
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
-    bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
     int water_env_lod = -1;               // --water-env-lod 0|1：V2 探针模糊（σ²⇒env LOD）
     int water_m1 = -1;                    // --water-m1 0|1：V2 lobe 拉宽
@@ -2318,8 +2316,6 @@ int main(int argc, char** argv) {
             start_water_waves = true;
         } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
             wave_time_s = std::strtof(argv[i + 1], nullptr);
-        } else if (std::strcmp(argv[i], "--water-v2") == 0) {
-            water_v2 = true;
         } else if (std::strcmp(argv[i], "--water-samples") == 0 && i + 1 < argc) {
             water_samples = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--water-env-lod") == 0 && i + 1 < argc) {
@@ -2495,9 +2491,6 @@ int main(int argc, char** argv) {
         app.SetWaterWaveTime(wave_time_s);
     }
     // 水皮版本：V2 是独立的一整份 pass（见 docs/jpov_water_skin_v2_design.md）。
-    if (water_v2) {
-        app.SetWaterSkinV2(true);
-    }
     if (water_samples >= 0) {
         // 不夹范围：非法值交给 Renderer 的 CHECK（CLI 手误要看得到报错）。
         app.SetWaterSkinV2Samples(water_samples);

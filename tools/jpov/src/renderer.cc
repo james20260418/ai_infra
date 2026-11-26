@@ -2073,8 +2073,24 @@ void Renderer::Render(const RenderCommandList& cmds,
                 if (cmds.water->waves.v2) {
                     // 采样数的范围由 Draw 的 CHECK 拦住（单一执法点）。
                     const int samples = cmds.water->waves.v2_sample_count;
+                    // CSM：与 strip 同一套填法（阴影 pass 属于主链路，水皮只是消费者）。
+                    WaterCsmShadow water_csm;
+                    if (eff_sun.has_value() && !shadow_fbos_.empty()) {
+                        water_csm.sun = eff_sun;
+                        water_csm.cfg = shadow_cfg_;
+                        water_csm.fbos = shadow_fbos_;
+                        for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+                            std::memcpy(water_csm.vp[c], shadow_vp_[c],
+                                        sizeof(water_csm.vp[c]));
+                            std::memcpy(water_csm.depth_vp[c], shadow_depth_vp_[c],
+                                        sizeof(water_csm.depth_vp[c]));
+                            water_csm.texel_world[c] = shadow_texel_world_[c];
+                        }
+                    }
+                    const WaterCsmShadow* water_csm_ptr =
+                        water_csm.IsValid() ? &water_csm : nullptr;
                     water_skin_v2_renderer_.Begin(fbo_3d_w, fbo_3d_h);
-                    water_skin_v2_renderer_.Draw(wsi, samples);
+                    water_skin_v2_renderer_.Draw(wsi, samples, water_csm_ptr);
                     if (!cam_underwater) {
                         water_layer_index = layers.count;
                     }

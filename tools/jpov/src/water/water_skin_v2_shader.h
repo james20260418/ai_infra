@@ -109,6 +109,9 @@ uniform int uEnvLodOn;    // 0 ⇒ 探针 LOD 恒 0
 uniform int uM1On;        // lobe 拉宽：a2 = min(盘角² + 2σ², 0.25)
 uniform int uM2On;        // 多散射能量对账（M1 的必要配件）
 uniform int uM3On;        // glints：各向异性 lobe + 静态颗粒
+// CSM：水皮是纯镜面（无 diffuse albedo）⇒ 阴影只作用在**太阳的像**上。
+// 环境反射（天光探针）不吃阴影（那需要 AO，不是 CSM）。
+uniform int uHasCsm;
 
 const int   kMaxSkinSamples = 16;
 const float kBackgroundDepth = 0.999999;
@@ -565,7 +568,13 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         // 否则两块 specular 的能量口径不一致（2026-11-26 补的漏项）。
         float ms_gain = SkinV2MultiScatterGain(cos_i, lobe_a2, F);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        sum_c += F * refl * ms_gain + SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
+        // CSM：把该样本的水面点换算回**世界系**（pos_xz 是波浪局部系）再查阴影。
+        // y 用 level_y：波峰/波谷的高度差 ≤ ΣA（米级），对阴影级联选择没有影响。
+        vec3 wp = vec3(g.pos_xz.x + uWaveOriginXZ.x, uWaterLevelY,
+                       g.pos_xz.y + uWaveOriginXZ.y);
+        float sun_shadow = CsmShadow(wp, s.t, uHasCsm);
+        sum_c += F * refl * ms_gain +
+                 sun_shadow * SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
