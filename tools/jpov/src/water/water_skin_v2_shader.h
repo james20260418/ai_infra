@@ -98,8 +98,9 @@ uniform int   uHasSun;            // 0 = 无太阳 ⇒ 这一项恒 0
 uniform vec3  uSunToward;         // 指向太阳（气侧，单位）
 uniform vec3  uSunIrradiance;     // color × intensity（辐照度语义）
 uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
-// ⚠️ 没有 V1 的 uSunFootprint（像素足迹带宽）—— V2 不靠 dFdx 做 AA，
-//    抗锯齿由 S 个采样本身完成。
+// 像素足迹带宽开关（与 V1 同名同义；GPU 对拍测试传 0 关掉）。
+// M1 从谱方差换成 V1 的 dFdx 口径后，这一项回来了 —— 见 SkinV2LobeA2。
+uniform float uSunFootprint;
 
 // 每像素法线采样数 S ∈ [1, 16]（renderer 已 CHECK）。S = 1 ⇒ 只取中心法线。
 uniform int uSampleCount;
@@ -158,6 +159,9 @@ struct WaterSurfaceV2 {
     vec2  pos_xz;         // 中心交点 xz（**波浪局部系**，含高度置换）—— 采样围绕它铺开
     vec3  rd;             // 视线方向（单位）
     vec3  N;              // 中心法线（S=1 时就是它；也是调试可视化用的那个）
+    vec3  H;              // 中心像素的半向量（太阳像用；**导数也从它求**）
+    float footprint_a2;   // 像素足迹带宽（V1 同口径：0.25·(|dFdx H|²+|dFdy H|²)）
+    float normal_var_px;  // 像素内法线方差（V1 同口径：0.5·|dFdx N|²）
     float cos_i;          // 中心样本的 |dot(rd, N)|
     float footprint;      // 一个像素在水面上的世界尺寸（米，沿地面**径向**；见 SkinV2SampleOffset）
     float graze;          // max(|rd.y|, 护栏)：短半轴 = 0.5·footprint·graze
@@ -238,6 +242,22 @@ void ResolveSurfaceV2(out WaterSurfaceV2 s) {
         }
     }
     s.cos_i = abs(dot(s.rd, s.N));
+
+    // ── 导数项：**必须在这里求**（ResolveSurfaceV2 没有任何 discard ⇒ 控制流一致）──
+    // 与 V1 的 ResolveSurface 逐字同口径：M1 的 lobe 宽度 = 盘角 + 足迹带宽 + 像素内法线方差。
+    // ⚠️ 为什么 V2 也要有这两个量：谱方差（64 条离散波求和）会在中距离给出**环带**
+    //    （每条波跨过 3~8 px 线时跳一下，4~12%），而 dFdx 是图像上的连续量。
+    //    V1 的做法一直是对的，照抄。
+    vec3 Vw = -s.rd;
+    s.H = Vw + uSunToward;
+    float hlen = length(s.H);
+    s.H = (hlen > 1.0e-6) ? (s.H / hlen) : vec3(0.0, 1.0, 0.0);
+    vec3 dHdx = dFdx(s.H);
+    vec3 dHdy = dFdy(s.H);
+    s.footprint_a2 = 0.25 * (dot(dHdx, dHdx) + dot(dHdy, dHdy));
+    // 只用横向差分：水面/天空的边界是水平的，那一行的 2×2 quad 上半是天空（N 无意义）。
+    vec3 dNdx = dFdx(s.N);
+    s.normal_var_px = 0.5 * dot(dNdx, dNdx);
 }
 
 // 唯一 discard 点：命中/求交失败 + 场景深度拒绝。
@@ -406,13 +426,18 @@ float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
 //   sigma2 MSS 斜率方差（**唯一**的带宽来源；V2 没有 footprint/导数项）
 // 带宽 a2 = 盘角² + 2σ²，**无上限**（V1 那个 min(…, 0.25) 是给会爆的 dFdx 兜底的，
 // V2 里没有 dFdx ⇒ 兜底退休）。
-// ── 镜面 lobe 的宽度：M1（lobe 拉宽）──────────────────────────────────────
-// 未解析的斜率方差 σ² 折进 GGX 的 α²：**方差相加**（GGX 的 NDF 与斜率分布都是斜率空间的
-// 分布 ⇒ 卷积 = 方差相加）。上限 0.25 与 V1 的数值兜底同口径（α ≤ 0.5 ⇒ 半角 ≈ 28.6°）。
-float SkinV2LobeA2(float sigma2) {
+// ── 镜面 lobe 的宽度：M1 ─────────────────────────────────────────────────
+// **V1 口径**（2026-11-26 定，替换掉"谱方差"那一版）：
+//   a2 = min(盘角² + uSunFootprint·footprint_a2 + 2·normal_var_px, 0.25)
+// 两项增量都来自 dFdx/dFdy（在 ResolveSurfaceV2 里、discard 之前求），是**图像上的连续量**。
+// ⚠️ 为什么不用谱方差 σ²（虽然它在物理上更"对"）：我们只有 **64 条离散细节波**，
+//    它们逐条跨过 3~8 px 线 ⇒ σ² 一跳 ½(kA)²（在 σ²≈0.02~0.06 区间占 4~12%）⇒
+//    画面上是**一圈一圈的带**；再往外撞 min(…,0.25) 又硬饱和 ⇒ "太平"。
+//    要真走谱方差，得先把细节波换成**连续谱积分**（不是加条数），那是另一件事。
+float SkinV2LobeA2(WaterSurfaceV2 s) {
     float a2 = GgxDiskBandwidthA2(uSunAngularRadius);
     if (uM1On != 0) {
-        a2 = min(a2 + 2.0 * sigma2, 0.25);
+        a2 = min(a2 + uSunFootprint * s.footprint_a2 + 2.0 * s.normal_var_px, 0.25);
     }
     return a2;
 }
@@ -465,7 +490,7 @@ float SkinV2GgxAnisoD(float NoH, float ToH, float BoH, float at, float ab) {
 }
 
 // 单个样本的太阳的像。M1/M2/M3 全部从这里进出。
-vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
+vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float a2) {
     if (uHasSun == 0) {
         return vec3(0.0);
     }
@@ -475,7 +500,6 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float sigma2) {
         return vec3(0.0);
     }
     float NoH = max(dot(H, N), 0.0);
-    float a2 = SkinV2LobeA2(sigma2);
 
     float D;
     if (uM3On != 0) {
@@ -526,6 +550,8 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         env_lod = 0.0;   // 调优开关：关掉 = 探针不模糊（纯采样靠自己平均）
     }
 
+    // lobe 宽度整像素算一次（与 V1 同口径；与样本无关）。
+    float lobe_a2 = SkinV2LobeA2(s);
     int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);
     float sum_a = 0.0;
@@ -544,12 +570,12 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float hlen = length(H);
         H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, sigma2_trunc);
+        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
             o.refl_debug = refl;
-            o.a2_debug = SkinV2LobeA2(sigma2_trunc);
+            o.a2_debug = lobe_a2;
         }
     }
     o.C = sum_c / float(S);

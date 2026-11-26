@@ -235,6 +235,8 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
                 in.has_sun ? in.sun_irradiance.y() : 0.0f,
                 in.has_sun ? in.sun_irradiance.z() : 0.0f);
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunAngularRadius"), in.sun_angular_radius);
+    // M1 的足迹带宽开关（与 V1 同一个字段；GPU 对拍测试传 0 关掉）。
+    glUniform1f(shader_mgr_->GetUniform(prog, "uSunFootprint"), in.sun_footprint);
 
     // 波浪谱：口径由 WaterWaves::{v2_truncation_px} 决定（V1 = 3/8 px，V2 默认不截断）
     // + 相位局部原点（float 精度手段）。与天球折射共用同一份上传实现。
