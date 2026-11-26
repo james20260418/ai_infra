@@ -377,22 +377,6 @@ float SkinV2SlopeVariance(float footprint) {
     return 0.5 * max(sxx + szz, 0.0);
 }
 
-// **只要"被谱截断掉的那部分"**（把 MSS 减出去）= 与 V1 对太阳 lobe 的取舍对齐。
-//
-// 为什么 a2 不能吃全 σ²（2026-11-26 报障：开着 a2 时 V1 透亮、V2 一片糊）：
-//   · V1 的 a2 = 盘角² + `footprint_a2` + `2·normal_var_px`，两项都来自 **dFdx/dFdy**，
-//     近场法线逐像素几乎不变 ⇒ a2 ≈ 盘角²（≈0.8°）⇒ 日盘像"透亮"；
-//     V1 的注释里也写死了「**不再叠加解析 σ_slope**」，理由就是会双计 + 抹平闪光。
-//   · V2 若把全 σ²（含 MSS 0.0297 这种**与距离无关的常数**）加进 lobe ⇒ a2 ≈ 0.06
-//     在任何距离都成立 ⇒ 半角恒 ~14° ⇒ 近场就是"一片糊"，且与 V1 差 12 倍角度。
-//   · 所以 a2 只吃**截断带**：近场 → 0（与 V1 对上），远场 → 长起来（这才是 M1 该管的）。
-//     MSS 仍然进 F_eff 和 env_lod（V1 也是这么分的：var_p_mean 含 MSS，lobe 不含）。
-float SkinV2TruncatedSlopeVariance(float footprint) {
-    // WaveSlopeTensor 里 MSS 是各向同性加的（sxx += 0.5·mss, szz += 0.5·mss）
-    // ⇒ 迹 +mss ⇒ 0.5·迹 +0.5·mss。减回去就只剩表内波被裁掉的部分。
-    return max(SkinV2SlopeVariance(footprint) - 0.5 * max(uShortWaveMss, 0.0), 0.0);
-}
-
 // WBO 发射（生产程序唯一出口）。att3 必须是**射线距离** t（见 water_skin_shader.h 顶部）。
 void EmitWBO(vec3 C, float alpha, float t) {
     oAccum  = vec4(C, alpha);
@@ -533,19 +517,27 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float a2) {
 }
 
 void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
-    // 两份方差，各有各的消费者（与 V1 的分工一致，别合并）：
-    //   sigma2_all   = MSS + 被截断的表内波  → F_eff（⇒ α）、env_lod
-    //   sigma2_trunc = 只有被截断的表内波     → 太阳 a2（MSS 不进 lobe，理由见上）
-    float sigma2 = SkinV2SlopeVariance(s.footprint);
-    float sigma2_trunc = SkinV2TruncatedSlopeVariance(s.footprint);
-    // 探针 LOD：V2 里唯一的模糊来源就是 MSS 的斜率方差（表内波由采样自己平均）。
-    // 镜面反射把斜率放大 2× ⇒ 需要的模糊角 ≈ 2σ；128² 探针的 texel 角 = (π/2)/128 · 2^lod。
-    // ⚠️ σ 是**各向同性斜率标准差** = √sigma2（sigma2 = 0.5·迹，见 SkinV2SlopeVariance）：
-    //    V1 的 `2√var_p` 在 var_p 取各向同性平均时恰好等于 `2√sigma2`，所以这条与 V1 同口径。
-    //    **不要**写成 2√(uShortWaveMss)（那是 √2 倍，重复计迹）。
-    // 上限 1.5（docs §6 的直接口径；V1 那个随仰角放开的 env_lod_cap 已退休）。
+    // 一次张量，两个消费者（与 V1 的分工逐条对齐）：
+    //   sigma2（各向同性迹/2）→ F_eff（⇒ α / 透射率）
+    //   var_p （**按视线方位投影**）→ env_lod —— 反射方向在该方位内摆动，各向同性平均会低估
+    //   （2026-11-26 补：V1 一直这么做，V2 之前用了各向同性，侧风时差 2~4×）
+    float sxx, sxz, szz;
+    WaveSlopeTensor(s.footprint, sxx, sxz, szz);
+    float sigma2 = 0.5 * max(sxx + szz, 0.0);
+    // ── 探针 LOD（V1 口径）──
+    // 模糊角 ≈ 2σ（镜面反射把斜率放大 2×）；σ 取「视线投影方差 + 像素内法线方差」，
+    // 128² 探针的 texel 角 = (π/2)/128 · 2^lod。
+    // 上限**随反射方向仰角放开**（1.5 → 3.0）：越接近天顶，探针越不可能卷进下半球的地色。
+    vec2 td = s.rd.xz;
+    float tdl = length(td);
+    td = (tdl > 1.0e-6) ? (td / tdl) : vec2(1.0, 0.0);
+    float var_p = td.x * td.x * sxx + 2.0 * td.x * td.y * sxz + td.y * td.y * szz;
     const float kEnvTexelAngle = 1.5707963268 / 128.0;
-    float env_lod = clamp(log2(max(2.0 * sqrt(sigma2), 1.0e-6) / kEnvTexelAngle), 0.0, 1.5);
+    float refl_sigma = sqrt(max(var_p, 0.0) + max(s.normal_var_px, 0.0));
+    float env_lod_need = log2(max(2.0 * refl_sigma, 1.0e-6) / kEnvTexelAngle);
+    float env_rdir_y = reflect(s.rd, s.N).y;
+    float env_lod_cap = mix(1.5, 3.0, smoothstep(0.05, 0.35, env_rdir_y));
+    float env_lod = clamp(env_lod_need, 0.0, env_lod_cap);
     if (uEnvLodOn == 0) {
         env_lod = 0.0;   // 调优开关：关掉 = 探针不模糊（纯采样靠自己平均）
     }
@@ -569,8 +561,11 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         vec3 H = uSunToward - g.rd;
         float hlen = length(H);
         H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);
+        // M2：多散射对账必须作用在**整条 specular BRDF** 上（环境反射 + 太阳），
+        // 否则两块 specular 的能量口径不一致（2026-11-26 补的漏项）。
+        float ms_gain = SkinV2MultiScatterGain(cos_i, lobe_a2, F);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
+        sum_c += F * refl * ms_gain + SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
@@ -691,7 +686,7 @@ void EmitDebugV2(WaterSurfaceV2 s, WaterShadeV2 o, int mode) {
         return;
     }
     if (mode == 11) {
-        // 探针 LOD（V2 只由 MSS 决定 ⇒ 全像素常量）：0 = 原图，1 = LOD1.5
+        // 探针 LOD（全像素常量；上限随仰角 1.5→3.0）：0 = 不模糊，1 = LOD1.5，2 = LOD3.0
         float v = o.env_lod_debug / 1.5;
         oAccum  = vec4(v, v, v, 1.0);
         oReveal = 1.0;
