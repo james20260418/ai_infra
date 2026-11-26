@@ -20,27 +20,35 @@
 // │ v2_sample_count          S ∈ [1,16]，默认 4（实测 S≥4 已收敛）              │
 // │ v2_truncate_px_main      主波截断乘数，默认 **0 = 不截断**                   │
 // │ v2_truncate_px_detail    细节波截断乘数，默认 **1 = 走 V1 那条 3~8 px 线**    │
-// │ v2_env_lod / v2_sun_lobe 方差系两个消费点的开关（V1/V2 共用；F_eff 无开关）      │
+// │ v2_env_lod               探针模糊（env LOD ← 方差）；false = LOD 恒 0            │
+// │ v2_m1 / v2_m2 / v2_m3    未解析斜率的三条通道（默认 开/开/关，见下）             │
 // │ 语义：`3T ~ 8T px`；T=1 与 V1 同一条线（乘 1.0 精确 ⇒ 可与 V1 逐字节对比）。   │
 // │ 为什么分开：主波管几何/剪影，细节波只进法线 —— 实测**噪点元凶是细节波**。      │
 // │ 为什么主波默认不截断：截掉主波会把远处的"骨架"拿掉（变平），而它并不产生噪点。  │
-// │ σ² 有两份（与 V1 的分工一致，别合并）：                                        │
-// │   σ²_all   = MSS + 被截断的表内波 → F_eff（⇒ α / 透射率）、env_lod              │
-// │   σ²_trunc = 只有被截断的表内波    → 太阳 a2                                    │
+// │ 方差份额（与 V1 的分工一致，别合并）：                                          │
+// │   σ²（各向同性迹/2）  → F_eff（⇒ α / 透射率）                                  │
+// │   var_p（视线投影）   → env_lod（反射方向在该方位内摆动；各向同性会低估 2~4×）  │
+// │   M1 的 a2            → 盘角² + uSunFootprint·footprint_a2 + 2·normal_var_px    │
+// │                          （V1 同式，cap 0.25）                                  │
 // │ 太阳 a2 **不能**吃 MSS：MSS 是与距离无关的常数（8 m/s 时 σ²≈0.03），加进 lobe   │
 // │ 会让半角恒 ~14°、近场一片糊；V1 的注释里也写死了"不再叠加解析 σ_slope"。         │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // ⭐ 与 V1（water_skin_shader.h）的关系：**独立的一整份 pass**（自己的 renderer /
 //    program / WBO 附件），V1 一行不改、逐字节保留，靠 `WaterWaves::v2` 二选一。
-//    差别只有一条：V1 用「1 个法线 + 若干二阶补偿量（屏幕导数 / 方差）」去近似面积分，
-//    V2 直接采样。V1 的 9 个补偿项（var_p / var_p_mean / normal_var_px / footprint_a2 /
-//    env_lod 的 normal_var 项 / env_lod_cap / a2 的 0.25 兜底 / far 分流 / lod 常量本身）
-//    在这里**全部不存在**。
+//    差别只有一条：V1 用「1 个法线 + 若干二阶补偿量」去近似面积分，V2 **直接采样**。
+//    相对 V1 的净变化：
+//      · 不再有：`far` 二分流、`var_p_mean` 与 `var_p` 两份投影的冗余（V2 各留一个）、
+//        `dFdx` 项直接进 a2 的写法（改由 M1 统一管）；
+//      · 仍然有（而且必须）：`footprint_a2` / `normal_var_px`（M1）、`env_lod` 及其仰角上限、
+//        `a2` 的 0.25 兜底 —— 这些在 V1 里就被证明是对的，照抄；
+//      · 新增：M2 多散射对账（含环境反射）、M3 glints、CSM 阴影、两个截断旋钮、S 个样本。
 //
-// ⭐ 结构性收益：V2 里**没有显式 dFdx/dFdy** ⇒ 历史上反复追的「导数必须先于 discard」
-//    这条不变式整条消失。（唯一残留的隐式导数是 `texture(uSceneDepth, …)` 的 LOD 选择，
-//    但那张深度图是 NEAREST 且无 mip ⇒ 取哪一级都一样；与 V1 同一份代码。）
+// ⭐ 导数纪律（2026-11-26 修正）：V2 **有** dFdx（M1 的 footprint_a2 / normal_var_px），
+//    但它们**只出现在 ResolveSurfaceV2 里**——那里没有任何 discard，控制流必然一致。
+//    历史教训「导数必须先于 discard」因此变成结构性约束：全 pass 只有
+//    `RejectOccludedV2` 一个 discard 点，且在 ResolveSurfaceV2 之后。
+//    （唯一残留的隐式导数是 `texture(uSceneDepth, …)` 的 LOD 选择，深度图 NEAREST 无 mip。）
 //
 // ⭐ MSS（Cox–Munk 短波）**不在波表里** ⇒ 永远不可采样，作为 σ 偏置保留，
 //    参与反射率 F、太阳 lobe 宽度、探针 LOD 三处（见 docs §7）。
@@ -365,21 +373,6 @@ SkinV2SampleGeom SkinV2SampleAt(WaterSurfaceV2 s, int i, int sample_count) {
     return g;
 }
 
-// ── σ²：**按谱截断自动推导**（照 V1 的经验，Danis 2026-11-26）──
-// = `0.5·trace(WaveSlopeTensor)`，与 V1 的 `var_p_mean` **同口径、同函数**：
-//   Σ_fp = Σ_i ½(k_iA_i)²·(1 − geom_i²)   （geom = WaveLodAmp，即"这条波还剩多少几何"）
-//        + MSS 张量（Cox–Munk，沿风/横风 2.7:1；它永远采样不到，geom 恒 0 ⇒ 全额计入）。
-// 三个消费者共用这一份：F_eff（⇒ α）、env_lod、太阳 a2。**逐像素算一次**（只依赖 footprint，
-// 与 S 无关），放在样本循环外。
-// ⚠️ 与 V1 的差别只有两处，都是 V2 的结构性选择：
-//   ① 主波 / 细节波按**各自的 T** 算 geom（V1 只有一个 T）—— `T=0` 的族贡献恒 0（不双计）；
-//   ② V1 还叠加屏幕导数项（normal_var_px / footprint_a2），V2 没有 dFdx ⇒ 不存在。
-float SkinV2SlopeVariance(float footprint) {
-    float sxx, sxz, szz;
-    WaveSlopeTensor(footprint, sxx, sxz, szz);
-    return 0.5 * max(sxx + szz, 0.0);
-}
-
 // WBO 发射（生产程序唯一出口）。att3 必须是**射线距离** t（见 water_skin_shader.h 顶部）。
 void EmitWBO(vec3 C, float alpha, float t) {
     oAccum  = vec4(C, alpha);
@@ -411,8 +404,7 @@ float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
 //   H     半向量（只依赖 rd 与太阳方向 ⇒ 每像素算一次，全样本共享）
 //   F     该样本的反射率
 //   sigma2 MSS 斜率方差（**唯一**的带宽来源；V2 没有 footprint/导数项）
-// 带宽 a2 = 盘角² + 2σ²，**无上限**（V1 那个 min(…, 0.25) 是给会爆的 dFdx 兜底的，
-// V2 里没有 dFdx ⇒ 兜底退休）。
+// 带宽 a2 = min(盘角² + uSunFootprint·footprint_a2 + 2·normal_var_px, 0.25)（= V1 同式）。
 // ── 镜面 lobe 的宽度：M1 ─────────────────────────────────────────────────
 // **V1 口径**（2026-11-26 定，替换掉"谱方差"那一版）：
 //   a2 = min(盘角² + uSunFootprint·footprint_a2 + 2·normal_var_px, 0.25)
@@ -450,9 +442,11 @@ float SkinV2MultiScatterGain(float NoV, float a2, float F) {
     if (uM2On == 0) {
         return 1.0;
     }
-    float e = SkinV2SingleScatterAlbedo(NoV, a2);
+    float e = SkinV2SingleScatterAlbedo(NoV, a2);   // 已夹到 >= 1e-3
     // F̄：把 F 当成单值（掠射时 F→1，法向时 F→0.02），乘在"丢失的那部分能量"上。
-    return 1.0 + F * (1.0 - e) / e;
+    // ⚠️ 安全夹：`e` 的下界 1e-3 意味着 (1−e)/e 可达 999；不夹的话极端粗糙/掠射会爆亮。
+    //    物理上增益不该超过 ~2（α≤0.5 时实测 ≈1.1~1.35），这里给 3 倍余量。
+    return min(1.0 + F * (1.0 - e) / e, 3.0);
 }
 
 // ── M3：glints（各向异性 lobe + 静态颗粒）────────────────────────────────
@@ -477,7 +471,7 @@ float SkinV2GgxAnisoD(float NoH, float ToH, float BoH, float at, float ab) {
 }
 
 // 单个样本的太阳的像。M1/M2/M3 全部从这里进出。
-vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float a2) {
+vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float a2, float sparkle) {
     if (uHasSun == 0) {
         return vec3(0.0);
     }
@@ -510,13 +504,8 @@ vec3 SkinV2SunSpecular(vec3 N, vec3 rd, vec3 H, float F, float a2) {
     // M2：能量对账（与 M1 配套；单独开 M2 就是"在窄 lobe 上凭空加能量"，只作对照）。
     spec *= SkinV2MultiScatterGain(NoV, a2, F);
 
-    // M3：静态颗粒（幅度随 lobe 宽度增长；窄 lobe（近场）几乎为 0）。
-    if (uM3On != 0) {
-        float amp = clamp(1.6 * sqrt(max(a2, 0.0)), 0.0, 0.8);
-        float n = SkinV2Hash12(gl_FragCoord.xy);
-        spec *= 1.0 + amp * (2.0 * n - 1.0);
-    }
-    return spec;
+    // M3 的静态颗粒由调用方算好传入（hash(gl_FragCoord) 与样本无关）。
+    return spec * sparkle;
 }
 
 void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
@@ -545,8 +534,23 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         env_lod = 0.0;   // 调优开关：关掉 = 探针不模糊（纯采样靠自己平均）
     }
 
-    // lobe 宽度整像素算一次（与 V1 同口径；与样本无关）。
+    // lobe 宽度 / CSM / M3 颗粒都是**逐像素**量（与样本无关）⇒ 循环外算一次：
+    //   · CSM：4 个样本的水面点相差亚像素级，级联/纹素都不会变 ⇒ 1 次 trace 而不是 S 次；
+    //   · M3 颗粒：hash(gl_FragCoord) 对所有样本相同 ⇒ 1 次。
     float lobe_a2 = SkinV2LobeA2(s);
+    // M2 的单次散射反照率只依赖 (cos_i, a2)；a2 逐像素固定 ⇒ 把 e 也算一次，
+    // 但 cos_i 逐样本变 ⇒ 只能算增益里的 e(cos_i)（保留在循环内）。
+    // CSM：水面点换回世界系再查（pos_xz 是波浪局部系；y 用 level_y —— 波高 ≤ ΣA 米级，
+    // 对级联选择没有影响）。
+    vec3 csm_wp = vec3(s.pos_xz.x + uWaveOriginXZ.x, uWaterLevelY,
+                       s.pos_xz.y + uWaveOriginXZ.y);
+    float sun_shadow = CsmShadow(csm_wp, s.t, uHasCsm);
+    float sparkle = 1.0;
+    if (uM3On != 0) {
+        float amp = clamp(1.6 * sqrt(max(lobe_a2, 0.0)), 0.0, 0.8);
+        float n = SkinV2Hash12(gl_FragCoord.xy);
+        sparkle = 1.0 + amp * (2.0 * n - 1.0);
+    }
     int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);
     float sum_a = 0.0;
@@ -568,13 +572,8 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         // 否则两块 specular 的能量口径不一致（2026-11-26 补的漏项）。
         float ms_gain = SkinV2MultiScatterGain(cos_i, lobe_a2, F);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        // CSM：把该样本的水面点换算回**世界系**（pos_xz 是波浪局部系）再查阴影。
-        // y 用 level_y：波峰/波谷的高度差 ≤ ΣA（米级），对阴影级联选择没有影响。
-        vec3 wp = vec3(g.pos_xz.x + uWaveOriginXZ.x, uWaterLevelY,
-                       g.pos_xz.y + uWaveOriginXZ.y);
-        float sun_shadow = CsmShadow(wp, s.t, uHasCsm);
         sum_c += F * refl * ms_gain +
-                 sun_shadow * SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2);
+                 sun_shadow * SkinV2SunSpecular(g.N, g.rd, H, F, lobe_a2, sparkle);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
