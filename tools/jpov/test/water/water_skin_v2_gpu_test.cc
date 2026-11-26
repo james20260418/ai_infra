@@ -158,6 +158,7 @@ struct SceneInputs {
     const jpov::WaterWaves* waves = nullptr;
     float wave_time_s = 1.3f;
     float wave_depth_m = 300.0f;
+    int wave_debug = 0;
 };
 
 WaterSkinRenderer::Inputs ToInputs(const SceneInputs& s, unsigned int cube) {
@@ -179,7 +180,7 @@ WaterSkinRenderer::Inputs ToInputs(const SceneInputs& s, unsigned int cube) {
     in.waves = s.waves;
     in.wave_time_s = s.wave_time_s;
     in.wave_depth_m = s.wave_depth_m;
-    in.wave_debug = 0;
+    in.wave_debug = s.wave_debug;
     return in;
 }
 
@@ -286,6 +287,17 @@ TEST(WaterSkinV2Gpu, V2FlatWaterMatchesV1Exactly) {
     const std::vector<float> r2 = ReadRed(f.v2.layer().reveal_tex);
     const std::vector<float> z2 = ReadRed(f.v2.layer().depth_tex);
 
+    // accum 是 **FP16**（wbo_target.h）⇒ 两个数学等价但指令顺序不同的实现（FMA 合并点不同）
+    // 最多差几个 ULP。用「ULP 数」而不是固定相对误差当容差：
+    //   0.47 处 1 ULP = 2.4e-4；写 2e-5 实际等于要求浮点位级相同，一次循环重构就会红。
+    const auto fp16_ulp = [](float v) {
+        const float a = std::fabs(v);
+        if (!(a > 0.0f)) {
+            return 5.96e-8f;   // 最小次正规数（防御）
+        }
+        return std::ldexp(1.0f, std::ilogb(a) - 10);
+    };
+
     int covered = 0;
     for (size_t i = 0; i < a1.size(); i += 4) {
         // 只比水面覆盖到的像素（背景 alpha = 0）。
@@ -294,14 +306,15 @@ TEST(WaterSkinV2Gpu, V2FlatWaterMatchesV1Exactly) {
         }
         ++covered;
         for (int c = 0; c < 4; ++c) {
-            const float scale = std::max(1.0f, std::fabs(a1[i + c]));
+            // 4 ULP 余量：重新安排循环（例如半向量从循环外移到循环内）就会动 1 ULP。
+            // 真正的语义偏差（漏乘 F / 漏除 S / 写错的深度槽）远远大于这个量。
+            const float tol = 4.0f * fp16_ulp(a1[i + c]);
             const float d = std::fabs(a2[i + c] - a1[i + c]);
-            // S 个完全相同的样本求和再除 —— IEEE 允许最后几位不同（3a 的那次进位）。
-            EXPECT_LE(d / scale, 2.0e-5f)
-                << "accum 分量 " << c << " 与 V1 不一致：V1=" << a1[i + c]
-                << " V2=" << a2[i + c];
+            EXPECT_LE(d, tol) << "accum 分量 " << c << " 与 V1 不一致：V1=" << a1[i + c]
+                              << " V2=" << a2[i + c] << "（tol=" << tol << "）";
         }
-        EXPECT_LE(std::fabs(r2[i / 4] - r1[i / 4]), 2.0e-5f) << "reveal 与 V1 不一致";
+        EXPECT_LE(std::fabs(r2[i / 4] - r1[i / 4]), 4.0f * fp16_ulp(r1[i / 4]))
+            << "reveal 与 V1 不一致";
         EXPECT_LE(std::fabs(z2[i / 4] - z1[i / 4]),
                   2.0e-5f * std::max(1.0f, std::fabs(z1[i / 4])))
             << "深度槽与 V1 不一致";
@@ -515,6 +528,113 @@ TEST(WaterSkinV2Gpu, LargerSampleCountReducesPixelToPixelVariance) {
     // 留余量（不写裸 <）：这条是统计性判据，比值够大才算「真的被平均掉了」
     //（S=16 的理论降噪是 1/√16 = 0.25；取 0.7 当门限，只要求"明显变小"）。
     EXPECT_LT(v16_sample, 0.7 * v1_sample) << "S=16 没有明显比 S=1 更平滑";
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
+// ⑤ 屏幕 2×2 图案：它必须是一条**活的新路径**，且 S 在它下而**完全不起作用**。
+//    （Danis 2026-11-26：从像素中心信息推算 2×2 四分后的四个 sub-px 世界坐标，
+//    假设海面是平的，不用中心 N、不对子像素求波浪交点。）
+TEST(WaterSkinV2Gpu, V2Screen2x2PatternIsAliveAndIgnoresS) {
+    Fixture f;
+    f.SetUp();
+    const jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.cam.position = {2.0f, 8.0f, -1.0f};
+    s.cam.target = {2.0f, 0.0f, 4.0f};
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.5f;
+    s.has_sun = true;
+    s.sun_toward = Normalized(Vec3f{0.2f, 0.8f, 0.55f});
+    s.sun_irradiance = {2.0f, 1.9f, 1.7f};
+    s.waves = &waves;
+
+    const auto draw = [&](int pattern, int samples) {
+        jpov::WaterWaves w = waves;
+        w.v2_sample_pattern = pattern;
+        s.waves = &w;
+        f.DrawV2(s, samples);
+        return ReadRgba(f.v2.layer().accum_tex);
+    };
+    const auto mean_abs_diff = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 3 < a.size(); i += 4) {
+            for (int c = 0; c < 3; ++c) {
+                sum += std::fabs(a[i + c] - b[i + c]);
+            }
+            n += 3;
+        }
+        return n > 0 ? sum / static_cast<double>(n) : 0.0;
+    };
+
+    const std::vector<float> hammer4 =
+        draw(jpov::WaterWaves::kV2PatternHammersley, 4);
+    const std::vector<float> quad4 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 4);
+    EXPECT_GT(mean_abs_diff(hammer4, quad4), 1.0e-4)
+        << "2×2 与 Hammersley(S=4) 几乎一样 —— 新图案没接上";
+
+    // S 在 2×2 下而被忽略（恒 4）：S=1 与 S=16 必须**逐位相同**。
+    const std::vector<float> quad_s1 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 1);
+    const std::vector<float> quad_s16 = draw(jpov::WaterWaves::kV2PatternScreen2x2, 16);
+    EXPECT_EQ(mean_abs_diff(quad_s1, quad_s16), 0.0)
+        << "2×2 图案下 S 仍然在起作用 —— 应该恒为 4 个样本";
+    // 而 Hammersley 下 S 必须起作用（否则上一条可能是“全局 S 都失效”的假通过）。
+    const std::vector<float> hammer16 =
+        draw(jpov::WaterWaves::kV2PatternHammersley, 16);
+    EXPECT_GT(mean_abs_diff(hammer4, hammer16), 1.0e-4)
+        << "Hammersley 下 S=4 与 S=16 一样 —— S 整个失效了";
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
+// ⑥ 谱截断旋钮 T：乘数必须真的接在阈值上。
+//    判据用**法线可视化**（debug=1）而不是颜色：截断只影响几何，颜色还混着 F / 探针，
+//    在法线上测才能把“截断生效”与“着色变了”分开。
+//    掠视远处 ⇒ 细节波是亚像素 ⇒ T=2（6~16 px）必须把它杀掉，横向邻差明显变小。
+TEST(WaterSkinV2Gpu, V2TruncationKnobKillsSubPixelWaves) {
+    Fixture f;
+    f.SetUp();
+    jpov::WaterWaves waves = MakeTestWaves(/*v2=*/true);
+    SceneInputs s;
+    s.cam.position = {0.0f, 3.0f, -30.0f};
+    s.cam.target = {0.0f, 0.0f, -200.0f};   // 掠视远处（足迹大）
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.wave_debug = 1;   // 法线可视化（N*0.5+0.5）
+
+    const auto lateral_delta = [&](float truncate_px) {
+        jpov::WaterWaves w = waves;
+        w.v2_truncation_px = truncate_px;
+        s.waves = &w;
+        f.DrawV2(s, 4);
+        const std::vector<float> a = ReadRgba(f.v2.layer().accum_tex);
+        double sum = 0.0;
+        int n = 0;
+        for (int y = 0; y < kHeight; ++y) {
+            for (int x = 0; x + 1 < kWidth; ++x) {
+                const size_t i = static_cast<size_t>(y) * kWidth + x;
+                sum += std::fabs(a[(i + 1) * 4 + 0] - a[i * 4 + 0]);
+                ++n;
+            }
+        }
+        return n > 0 ? sum / static_cast<double>(n) : 0.0;
+    };
+    const double d_off = lateral_delta(0.0f);   // 不截断
+    const double d_t2 = lateral_delta(2.0f);    // 6~16 px
+    SCOPED_TRACE(testing::Message() << "T=0 邻差=" << d_off << " T=2 邻差=" << d_t2);
+    EXPECT_GT(d_off, 0.0) << "T=0 时法线完全平 —— 测试机位没看到波";
+    EXPECT_LT(d_t2, 0.7 * d_off) << "T=2 没有把亚像素波杀掉 —— 旋钮没接到阈值上";
+
+    // T=1（同一对阈值的乘 1）必须与“不截断”不同 —— 否则区别不了 0 与 1 的语义。
+    const double d_t1 = lateral_delta(1.0f);
+    EXPECT_LT(d_t1, d_off) << "T=1 与不截断完全一样（远处本应已经截断）";
     glDeleteTextures(1, &s.depth_tex);
     f.TearDown();
 }

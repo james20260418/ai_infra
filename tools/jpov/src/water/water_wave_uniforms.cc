@@ -62,6 +62,12 @@ void UploadWaterWaveUniforms(ShaderManager& shader_mgr, unsigned int prog,
     CHECK(std::isfinite(p.origin_x) && std::isfinite(p.origin_z))
         << "WaveUniformParams.origin_x/origin_z 必须是有限值";
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveNoTruncate"), p.no_truncation ? 1 : 0);
+    // 截断旋钮 T：<= 0 就当作“不截断”（与 no_truncation 等价，两条路径都关）；
+    // V1 传 1.0 ⇒ 阈值不变 ⇒ 逐字节凒结。
+    CHECK(std::isfinite(p.truncate_px)) << "WaveUniformParams.truncate_px 必须是有限值";
+    CHECK_GE(p.truncate_px, 0.0f)
+        << "WaveUniformParams.truncate_px 必须 >= 0（0 = 不截断，不是负数）";
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveTruncatePx"), p.truncate_px);
     glUniform2f(shader_mgr.GetUniform(prog, "uWaveOriginXZ"), p.origin_x, p.origin_z);
     // 初相预算：φ' = φ + k·dot(d, origin)，**在 double 里算并把结果规范化到 (−2π, 2π)**。
     // 为什么一定要 fmod：origin 会把 φ' 推到 k·|origin| 量级（细节波 k≈21、origin=1e6 ⇒ 2e7），

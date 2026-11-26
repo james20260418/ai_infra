@@ -1,8 +1,9 @@
 // JPOV 水皮 V2（单像素多法线采样）—— GLSL
 //
 // 设计：docs/jpov_water_skin_v2_design.md（2026-11-25 定稿）。
-// 一句话：**一个公式 + 每像素 S 个法线采样 + 平均**。不给距离阈值、不给谱截断、
-// 不给补偿项 —— 像素本来就是面积的积分器。
+// 一句话：**一个公式 + 每像素 S 个法线采样 + 平均**。不给距离阈值、不给补偿项 ——
+// 像素本来就是面积的积分器。（谱截断默认关，但留了一个旋钮 T = WaterWaves::v2_truncation_px
+// 供验收「摩尔纹从多远开始」时做 A/B，见 render_command.h 的注释。）
 //
 // ⭐ 与 V1（water_skin_shader.h）的关系：**独立的一整份 pass**（自己的 renderer /
 //    program / WBO 附件），V1 一行不改、逐字节保留，靠 `WaterWaves::v2` 二选一。
@@ -15,8 +16,9 @@
 //    这条不变式整条消失。（唯一残留的隐式导数是 `texture(uSceneDepth, …)` 的 LOD 选择，
 //    但那张深度图是 NEAREST 且无 mip ⇒ 取哪一级都一样；与 V1 同一份代码。）
 //
-// ⭐ 谱：表内 72 条波（8 主 + 64 细节）**全部采样、不截断**（renderer 上传
-//    uWaveNoTruncate = 1）。物理上等价于「无限分辨率且不截断的真值海」。
+// ⭐ 谱：表内 72 条波（8 主 + 64 细节）默认**全部采样、不截断**（T = 0）；
+//    T > 0 时按「像素足迹」口径截断（与 V1 同一把尺，T 是 3/8 px 的乘数）。
+//    物理上 T = 0 等价于「无限分辨率且不截断的真值海」。
 //    MSS（Cox–Munk 短波）**不在波表里** ⇒ 它永远不可采样，作为 σ 偏置保留：
 //    参与反射率 F、太阳 lobe 宽度、探针 LOD 三处（见 docs §7）。
 //
@@ -90,8 +92,17 @@ uniform float uSunAngularRadius;  // 盘角半径（弧度，> 0）
 // 每像素法线采样数 S ∈ [1, 16]（renderer 已 CHECK）。S = 1 ⇒ 只取中心法线。
 uniform int uSampleCount;
 
+// 采样图案（WaterWaves::v2_sample_pattern）：
+//   0 = Hammersley 椭圆抖动（S 个样本，面积均匀但**四角采不到**）；
+//   1 = 屏幕空间 2×2 子像素（恒 4 个样本，S 被忽略）——像素面积的 box 4-tap，
+//       即「双线性 mip」的定义；每个 sub-px 的世界位置由**平面**推演（见 SkinV2SampleAt）。
+uniform int uSamplePattern;
+
 const int   kMaxSkinSamples = 16;
 const float kBackgroundDepth = 0.999999;
+const int   kSkinV2PatternHammersley = 0;
+const int   kSkinV2PatternScreen2x2  = 1;
+const int   kSkinV2Screen2x2Samples  = 4;   // 2×2
 
 // 无偏振电介质菲涅尔（含全内反射）。与 water_optics.h 的 FresnelDielectric 同源。
 float FresnelDielectric(float cos_i, float n1, float n2) {
@@ -141,6 +152,7 @@ struct WaterSurfaceV2 {
     vec3  N;              // 中心法线（S=1 时就是它；也是调试可视化用的那个）
     float cos_i;          // 中心样本的 |dot(rd, N)|
     float footprint;      // 一个像素在水面上的世界尺寸（米，沿地面**径向**；见 SkinV2SampleOffset）
+    float pixel_angle;    // 一个像素的视角尺寸（弧度，按画面高度）：footprint 的分子
     float graze;          // max(|rd.y|, 护栏)：短半轴 = 0.5·footprint·graze
 };
 
@@ -148,20 +160,25 @@ struct WaterSurfaceV2 {
 struct WaterShadeV2 {
     vec3  C;               // 层色（P 点辐射度，**S 个样本的平均**，未乘相机段衰减）
     float alpha;           // 层遮挡率（S 个样本的平均）
-    float fresnel_debug;   // 调试（13）：**第一个抖动样本**（i=0；S=1 时才是中心）的 F
+    float fresnel_debug;   // 调试（13）：**第一个样本**（i=0；S=1 / 2×2 时它是角上的子像素）的 F
     float env_lod_debug;   // 调试（11）：探针 LOD（全像素常量，只由 MSS 决定）
     vec3  refl_debug;      // 调试（12）：第一个抖动样本的探针反射色（未乘 F）
     // ⚠️ 调试 9（cos_i）/ 默认（法线色）用的是**中心法线** s.N，与 12/13 不是同一个采样点；
     //    S>1 时 i=0 落在离中心 sqrt(0.5/S)·footprint 处。别看混。
 };
 
+// NDC → 视线方向（单位）。相机基约定与文件顶部一致。
+vec3 SkinV2RayDir(vec2 ndc) {
+    return normalize(uCamFwd
+                     + uCamRight * (ndc.x * uTanHalfFov * uAspect)
+                     + uCamUp    * (ndc.y * uTanHalfFov));
+}
+
 // 求交 + 中心法线 + 足迹。**永不 discard**（discard 一律在 RejectOccludedV2）。
 // 与 V1 的 ResolveSurface 相比：少了 H / footprint_a2 / normal_var_px / var_p*（都退休了），
 // 多了 pos_xz（采样原点，**局部系**）与 graze（椭圆短轴因子）。
 void ResolveSurfaceV2(out WaterSurfaceV2 s) {
-    s.rd = normalize(uCamFwd
-                     + uCamRight * (vNdc.x * uTanHalfFov * uAspect)
-                     + uCamUp    * (vNdc.y * uTanHalfFov));
+    s.rd = SkinV2RayDir(vNdc);
 
     // 波浪场的求值一律在「相对 uWaveOriginXZ 的局部 xz」里做；y 保持世界系
     //（高度的基准是 uWaterLevelY，与 xz 无关）。见 uCamPosXZLocal 的注释。
@@ -173,8 +190,8 @@ void ResolveSurfaceV2(out WaterSurfaceV2 s) {
     s.t = max(t_raw, 1.0e-3);   // 不可见的像素用安全值，只为让后续运算有定义
     s.t_plane = s.t;
 
-    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
-    s.footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, pixel_angle);
+    s.pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
+    s.footprint = WaveFootprint(uCamPos, s.rd, uWaterLevelY, s.pixel_angle);
     // 椭圆短轴因子：像素在水面上的足迹是**各向异性**的 ——
     //   径向（视线在水平面的投影方向）被 1/|rd.y| 拉长 ⇒ 整宽 = footprint（半轴 = 1/2）；
     //   横向方向本身就在水面内 ⇒ 整宽 = t·pixel_angle = footprint·|rd.y|。
@@ -262,8 +279,58 @@ vec2 SkinV2SampleOffset(int i, int sample_count, vec3 rd, float footprint, float
     return radial * (disk.x * long_half) + lateral * (disk.y * short_half);
 }
 
-// MSS（Cox–Munk 短波）的各向同性斜率方差 σ²：**唯一**的 σ 来源（表内波全部采样）。
-// uShortWaveMss = along + cross（张量迹）⇒ 各向同性平均 = 0.5·迹。
+// 本像素实际要跑的样本数：2×2 图案恒 4（S 被忽略），Hammersley 用 uSampleCount。
+// 两个 Shade* 与采样函数都用它 ⇒ “写循环的人”只有一个口径。
+int SkinV2SampleCount() {
+    if (uSamplePattern == kSkinV2PatternScreen2x2) {
+        return kSkinV2Screen2x2Samples;
+    }
+    return clamp(uSampleCount, 1, kMaxSkinSamples);
+}
+
+// ── 一个采样点的全部几何（两条图案的唯一汇合点）──
+//
+// ⭐ 纪律（2026-11-26 Danis 定，**不能破**）：
+//   ① 采样点的世界 xz **一律用「海面是平的」推演**：rd_i ∩ (y = uWaterLevelY)；
+//   ② **绝不用中心像素的法线 N** 去把偏移“投影到切平面”上 —— 那会把中心法线自己的
+//      噪声当成采样位置，再采回法线 ⇒ 正反馈，噪声彻底收不住；
+//   ③ 子像素也不做波浪求交（二分在多根/掠射处会跳根）：位置只用平面解，
+//      高度场只经**解析法线**体现。
+// 法线仍然是对该 xz 的解析场求值（WaveNormalAtXZ）⇒ 波浪细节一个没丢，只是“位置”不跟着抖。
+struct SkinV2SampleGeom {
+    vec3  rd;          // 该样本的视线方向（2×2 时逐子像素不同）
+    vec2  pos_xz;      // 波浪局部系 xz
+    vec3  N;           // 该 xz 上的解析法线
+    float footprint;   // 该样本的像素足迹（米）——谱截断用
+};
+
+SkinV2SampleGeom SkinV2SampleAt(WaterSurfaceV2 s, int i, int sample_count) {
+    SkinV2SampleGeom g;
+    if (uSamplePattern == kSkinV2PatternScreen2x2) {
+        // 2×2 子像素中心 = 像素中心 ± 0.25 px；NDC 里 1 px = 2/uViewport。
+        vec2 sub = vec2(((i & 1) != 0) ? 0.25 : -0.25, ((i & 2) != 0) ? 0.25 : -0.25);
+        g.rd = SkinV2RayDir(vNdc + sub * 2.0 / uViewport);
+        float t_plane = (uWaterLevelY - uCamPos.y) / g.rd.y;
+        if (t_plane > 0.0) {
+            g.footprint = WaveFootprint(uCamPos, g.rd, uWaterLevelY, s.pixel_angle);
+            g.pos_xz = vec2(uCamPosXZLocal.x, uCamPosXZLocal.y) + g.rd.xz * t_plane;
+        } else {
+            // 子射线指向地平线以上（只在“中心打到水、角落打到天空”的那一行像素发生）：
+            // 退回中心样本（既不脏数据，也不把 1e6 的假位置喂给法线）。
+            g.pos_xz = s.pos_xz;
+            g.footprint = s.footprint;
+        }
+        g.N = WaveNormalAtXZ(g.pos_xz, g.footprint);
+        return g;
+    }
+    g.rd = s.rd;
+    g.footprint = s.footprint;
+    g.pos_xz = s.pos_xz + SkinV2SampleOffset(i, sample_count, s.rd, s.footprint, s.graze);
+    g.N = WaveNormalAtXZ(g.pos_xz, g.footprint);
+    return g;
+}
+
+// MSS（Cox–Munk 短波）的各向同性斜率方差 σ²：**唯一**的 σ 来源（表内波全部采样）。// uShortWaveMss = along + cross（张量迹）⇒ 各向同性平均 = 0.5·迹。
 float SkinV2MssSlopeVariance() {
     return 0.5 * max(uShortWaveMss, 0.0);
 }
@@ -328,27 +395,25 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
     const float kEnvTexelAngle = 1.5707963268 / 128.0;
     float env_lod = clamp(log2(max(2.0 * sqrt(sigma2), 1.0e-6) / kEnvTexelAngle), 0.0, 1.5);
 
-    // 半向量只依赖 rd 与太阳方向（不含 N）⇒ 每像素算一次。
-    vec3 H = uSunToward - s.rd;
-    float hlen = length(H);
-    H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);
-
-    int S = clamp(uSampleCount, 1, kMaxSkinSamples);
+    int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);
     float sum_a = 0.0;
     for (int i = 0; i < kMaxSkinSamples; ++i) {
         if (i >= S) {
             break;
         }
-        vec2 off = SkinV2SampleOffset(i, S, s.rd, s.footprint, s.graze);
-        vec3 N = WaveNormalAtXZ(s.pos_xz + off, s.footprint);
-        float cos_i = abs(dot(s.rd, N));
+        SkinV2SampleGeom g = SkinV2SampleAt(s, i, S);
+        float cos_i = abs(dot(g.rd, g.N));
         // 反射率：**逐样本** F（掠射时跨度极大，不能平均后再乘）。
         float F = RoughFresnelAlbedo(cos_i, sigma2, uWaterIor);
-        vec3 refl = textureLod(uEnvCube, ClampReflectionAboveHorizon(reflect(s.rd, N)),
+        vec3 refl = textureLod(uEnvCube, ClampReflectionAboveHorizon(reflect(g.rd, g.N)),
                               env_lod).rgb * uEnvScale;
+        // 半向量随 rd 变（2×2 下每个子像素一条）⇒ 逐样本算，不能再提到循环外。
+        vec3 H = uSunToward - g.rd;
+        float hlen = length(H);
+        H = (hlen > 1.0e-6) ? H / hlen : vec3(0.0, 1.0, 0.0);
         // 预乘后累加：mean(F_i·E_i) ≠ mean(E_i)·mean(F_i)。
-        sum_c += F * refl + SkinV2SunSpecular(N, s.rd, H, F, sigma2);
+        sum_c += F * refl + SkinV2SunSpecular(g.N, g.rd, H, F, sigma2);
         sum_a += 1.0 - (1.0 - F) / (uWaterIor * uWaterIor);
         if (i == 0) {
             o.fresnel_debug = F;
@@ -369,24 +434,22 @@ inline constexpr const char* kWaterSkinV2BelowGlsl = R"glsl(
 const float kSkinV2DeepSeaRayT = 1.0e6;
 
 void ShadeBelowV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
-    int S = clamp(uSampleCount, 1, kMaxSkinSamples);
+    int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);
     float sum_a = 0.0;
     for (int i = 0; i < kMaxSkinSamples; ++i) {
         if (i >= S) {
             break;
         }
-        vec2 off = SkinV2SampleOffset(i, S, s.rd, s.footprint, s.graze);
-        vec2 pxz = s.pos_xz + off;
-        vec3 N = WaveNormalAtXZ(pxz, s.footprint);
-        float cos_i = abs(dot(s.rd, N));
+        SkinV2SampleGeom g = SkinV2SampleAt(s, i, S);
+        float cos_i = abs(dot(g.rd, g.N));
         // 水→空气菲涅尔（含全内反射）：逐样本（环内/环外的边界正是逐样本变的）。
         float F = FresnelDielectric(cos_i, uWaterIor, 1.0);
 
         // 采样点在水面下 1 mm：介质是 **level_y 的水平半空间**（波浪不改介质，见 known_issue
         // §11.5），所以这里用 level_y 而不是该样本自己的置换高度 —— 与介质的几何口径一致。
-        vec3 P = vec3(pxz.x, uWaterLevelY - 1.0e-3, pxz.y);
-        vec3 mirror = reflect(s.rd, N);
+        vec3 P = vec3(g.pos_xz.x, uWaterLevelY - 1.0e-3, g.pos_xz.y);
+        vec3 mirror = reflect(g.rd, g.N);
         // 法线把镜像方向倾斜到水面之上时，半空间介质会立刻"出水" ⇒ S = 0 ⇒ 环内纯黑。
         // 钳到水面以下（极小负 y）：那片区域回到正常的水体自发光（与 V1 同一条）。
         if (mirror.y > -1.0e-3) {

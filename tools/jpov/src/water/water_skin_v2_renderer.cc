@@ -185,6 +185,15 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
                 static_cast<float>(static_cast<double>(cam.position.x()) - origin_x),
                 static_cast<float>(static_cast<double>(cam.position.z()) - origin_z));
 
+    // 采样图案：0 = Hammersley，1 = 屏幕 2×2 子像素。非法值直接拦住（不是静默回退）。
+    const int pattern = (in.waves != nullptr) ? in.waves->v2_sample_pattern
+                                              : WaterWaves::kV2PatternHammersley;
+    CHECK(pattern == WaterWaves::kV2PatternHammersley ||
+          pattern == WaterWaves::kV2PatternScreen2x2)
+        << "WaterWaves::v2_sample_pattern 只能是 " << WaterWaves::kV2PatternHammersley
+        << "（Hammersley）或 " << WaterWaves::kV2PatternScreen2x2 << "（屏幕 2×2）";
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSamplePattern"), pattern);
+
     // ── 介质 uniform（水下支路的 S_P(∞) 与水平面/折射率）──
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaterLevelY"), in.level_y);
     glUniform1f(shader_mgr_->GetUniform(prog, "uWaterIor"), in.ior);
@@ -224,15 +233,19 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
                 in.has_sun ? in.sun_irradiance.z() : 0.0f);
     glUniform1f(shader_mgr_->GetUniform(prog, "uSunAngularRadius"), in.sun_angular_radius);
 
-    // 波浪谱：**不截断**（V2 的核心口径）+ 相位局部原点（float 精度手段）。
-    // 与天球折射共用同一份上传实现 ⇒ 两边的 v2 口径必须同值（sky_renderer 读 WaterWaves::v2）。
+    // 波浪谱：口径由 WaterWaves::{v2_truncation_px} 决定（V1 = 3/8 px，V2 默认不截断）
+    // + 相位局部原点（float 精度手段）。与天球折射共用同一份上传实现。
+    const water::WaveTruncation trunc =
+        in.waves != nullptr ? water::ResolveWaveTruncation(*in.waves)
+                            : water::WaveTruncation{};
     water::WaveUniformParams wp;
     wp.time_s = in.wave_time_s;
     wp.depth_m = in.wave_depth_m;
     wp.debug = in.wave_debug;
     wp.displacement = (in.waves != nullptr) && in.waves->displacement;
     wp.has_flow_tex = in.wave_flow_tex != 0u;
-    wp.no_truncation = true;
+    wp.no_truncation = trunc.no_truncation;
+    wp.truncate_px = trunc.truncate_px;
     wp.origin_x = origin_x;
     wp.origin_z = origin_z;
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
@@ -244,9 +257,8 @@ void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count) {
         << "WaterSkinV2Renderer::Draw: sample_count 必须 >= " << kMinSamples;
     CHECK_LE(sample_count, kMaxSamples)
         << "WaterSkinV2Renderer::Draw: sample_count 必须 <= " << kMaxSamples;
-    // 本 pass 永远按 V2 口径（不截断）上传谱。天球折射读的是 `WaterWaves::v2` ——
-    // 两者必须同值，否则 Snell 窗缘会用另一套几何（漏色）。这条以前只是"约定"，
-    // 现在由这里炸出来（Pre-condition 写进头文件）。
+    // 本 pass 按 `WaterWaves::v2_truncation_px` 上传谱口径（默认不截断，T>0 时按像素足迹截断）。
+    // 天球折射读的是同一个字段 —— 两者必须同口径，否则 Snell 窗缘会用另一套几何（漏色）。
     CHECK(in.waves == nullptr || in.waves->v2)
         << "WaterSkinV2Renderer::Draw: 传进来的波浪谱必须标了 v2=true "
            "（否则天球那边会按 V1 截断谱，Snell 窗缘会错位）";

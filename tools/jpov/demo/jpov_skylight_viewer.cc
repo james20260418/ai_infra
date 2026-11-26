@@ -976,6 +976,93 @@ int RunCaptureWaterWaves(const std::string& out_dir) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 水皮 V2 验收（2026-11-26）：同一机位 A/B —— V1 / Hammersley / 屏幕 2×2 / 截断旋钮 T。
+//
+// 用法：jpov_skylight_viewer --capture-skin-v2 <out_dir>
+//
+// 两组机位（近场俯视 / 掠射远场），每组同一帧拍下面 5 张：
+//   1_v1.png           V1（3~8 px 截断 + 那套补偿）
+//   2_hammer_s4.png    V2 + Hammersley 4 样本（不截断）
+//   3_screen2x2.png    V2 + 屏幕 2×2 子像素（不截断）
+//   4_hammer_s16.png   V2 + Hammersley 16 样本（看 S 的趋势）
+//   5_trunc_t1.png     V2 + Hammersley 4 样本 + 截断 T=1（与 V1 **同一条线**，但无补偿）
+// 验收点：①② 的近场差别应该很小（远处才分家）；③ 四角覆盖 ⇒ 比 ② 更均匀；
+//          ⑤ 应该明显变暗变平（能量缺口 = V2 没有 V1 的补偿，这是预期的）。
+int RunCaptureWaterSkinV2(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水皮 V2 验收（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetWaterScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.BuildWaterPeople();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    app.SetWaterMedium(true);
+    app.SetSlabDepth(2.0f);
+    app.SetWaterWaves(true);
+    app.SetWaterLevel(0.0f);
+    app.SetWaterWaveAmplitudeScale(1.0f);
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 18.0f;
+    app.deg_.sun_azim_deg    = 214.0f;   // 与相机朝向同侧 ⇒ 水面能收到日盘像
+
+    struct Shot { const char* prefix; float phi; float theta; float radius; };
+    const Shot kShots[2] = {
+        {"near", 0.30f, 0.6f, 20.0f},   // ≈17° 俯视：近场波纹/碎光
+        {"graze", 0.06f, 0.6f, 40.0f},  // ≈3.4° 掠射：足迹大 ⇒ 摩尔纹最先在这里出现
+    };
+    for (const Shot& shot : kShots) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = shot.phi;
+        app.view_.theta = shot.theta;
+        app.view_.R     = shot.radius;
+
+        const std::string base = out_dir + "/" + shot.prefix + "_";
+        app.SetWaterSkinV2(false);
+        app.RunOnce(input, winfo, (base + "1_v1.png").c_str());
+
+        app.SetWaterSkinV2(true);
+        app.SetWaterSkinV2Screen2x2(false);
+        app.SetWaterSkinV2TruncatePx(0.0f);
+        app.SetWaterSkinV2Samples(4);
+        app.RunOnce(input, winfo, (base + "2_hammer_s4.png").c_str());
+
+        app.SetWaterSkinV2Screen2x2(true);
+        app.RunOnce(input, winfo, (base + "3_screen2x2.png").c_str());
+
+        app.SetWaterSkinV2Screen2x2(false);
+        app.SetWaterSkinV2Samples(16);
+        app.RunOnce(input, winfo, (base + "4_hammer_s16.png").c_str());
+
+        app.SetWaterSkinV2Samples(4);
+        app.SetWaterSkinV2TruncatePx(1.0f);
+        app.RunOnce(input, winfo, (base + "5_trunc_t1.png").c_str());
+        app.SetWaterSkinV2TruncatePx(0.0f);
+        app.SetWaterSkinV2(false);
+    }
+    LOG(INFO) << "water skin v2 A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 海面报告（4 合 1）：同一套配置拍 4 个固定机位，用于「像不像大海」的横向比较。
 //
 // 用法：jpov_skylight_viewer --capture-ocean-report <out_dir> [--ocean-config <file>]
@@ -2171,10 +2258,13 @@ int main(int argc, char** argv) {
     std::string mat_out_dir;
     std::string water_out_dir;
     std::string water_waves_out_dir;
+    std::string water_skin_v2_out_dir;   // --capture-skin-v2：水皮 V2 验收（V1/Hammer/2×2/T）
     bool start_water_waves = false;   // --water-waves：直接进水场景并打开波浪
     float wave_time_s = -1.0f;        // --wave-time：冻结到这个秒数（<0 = 不冻结）
     bool water_v2 = false;            // --water-v2：水皮走 V2（多法线采样）
     int water_samples = -1;           // --water-samples N：V2 每像素采样数（<0 = 用默认 4）
+    float water_truncate_px = 0.0f;   // --water-truncate T：V2 谱截断乘数（0 = 不截断）
+    bool water_screen2x2 = false;     // --water-2x2：V2 采样用屏幕 2×2 子像素
     std::string horizon_repro_out_dir;
     std::string water_coverage_out_dir;
     std::string box_cut_out_dir;
@@ -2209,6 +2299,8 @@ int main(int argc, char** argv) {
             water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-waves") == 0 && i + 1 < argc) {
             water_waves_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-skin-v2") == 0 && i + 1 < argc) {
+            water_skin_v2_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--water-waves") == 0) {
             start_water_waves = true;
         } else if (std::strcmp(argv[i], "--wave-time") == 0 && i + 1 < argc) {
@@ -2217,6 +2309,10 @@ int main(int argc, char** argv) {
             water_v2 = true;
         } else if (std::strcmp(argv[i], "--water-samples") == 0 && i + 1 < argc) {
             water_samples = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-truncate") == 0 && i + 1 < argc) {
+            water_truncate_px = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-2x2") == 0) {
+            water_screen2x2 = true;
         } else if (std::strcmp(argv[i], "--capture-horizon-repro") == 0 && i + 1 < argc) {
             horizon_repro_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-water-coverage") == 0 && i + 1 < argc) {
@@ -2282,6 +2378,9 @@ int main(int argc, char** argv) {
     }
     if (!water_waves_out_dir.empty()) {
         return RunCaptureWaterWaves(water_waves_out_dir);
+    }
+    if (!water_skin_v2_out_dir.empty()) {
+        return RunCaptureWaterSkinV2(water_skin_v2_out_dir);
     }
     if (!water_out_dir.empty()) {
         return RunCaptureWater(water_out_dir);
@@ -2381,6 +2480,13 @@ int main(int argc, char** argv) {
     if (water_samples >= 0) {
         // 不夹范围：非法值交给 Renderer 的 CHECK（CLI 手误要看得到报错）。
         app.SetWaterSkinV2Samples(water_samples);
+    }
+    // V2 的两个验收旋钮（谱截断 T / 屏幕 2×2 采样图案）。
+    if (water_truncate_px > 0.0f) {
+        app.SetWaterSkinV2TruncatePx(water_truncate_px);
+    }
+    if (water_screen2x2) {
+        app.SetWaterSkinV2Screen2x2(true);
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──

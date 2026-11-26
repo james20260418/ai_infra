@@ -30,9 +30,15 @@ uniform vec2  uWaveFlowUvScale;    // p.xz * scale -> uv
 uniform float uWaveFlowStrength;   // flow 整体增益
 uniform int   uWaveDisplace;       // 0 = 法线 only（debug）；1 = 真位移
 // 谱截断开关：0（默认）= V1 口径（按像素足迹去掉亚像素波，见 WaveLodAmp）；
-// 1 = V2 水皮口径（**表内 72 条波全部参与**，面积分交给每像素多法线采样）。
+// 1 = **完全不截断**（表内 72 条波全部参与，面积分交给每像素多法线采样）。
 // 为什么是一个开关而不是删掉：V1 是 A/B 对照与 gold 基线，必须逐字节保留。
 uniform int   uWaveNoTruncate;
+// 谱截断旋钮 T（**乘数**，>= 0）：把阈值对 (kWaveLodPxMin, kWaveLodPxMax) 同时乘 T。
+//   T = 1（默认）⇒ 与 V1 完全同一条线（乘 1.0 是 IEEE 精确的 ⇒ 逐字节不变）；
+//   T = 0     ⇒ 不截断（调用方也可以直接用 uWaveNoTruncate = 1，两条路径等价）；
+//   T > 1     ⇒ 线往长波方向平移（更早截断）。
+// V1 与天球折射永远传 1.0；只有 V2 水皮会动它（WaterWaves::v2_truncation_px）。
+uniform float uWaveTruncatePx;
 // 相位局部原点（xz，米）—— **帧约定**：V2 水皮传进来的 `p` 已经是「相对本原点的局部
 // xz」（见 water_skin_v2_shader.h::ResolveSurfaceV2），所以本片段所有相位都直接用 p。
 // 本 uniform 只有一处用途：把**flow map 的采样位置**还原回世界系（flow 图案必须世界锚定，
@@ -70,20 +76,24 @@ const float kWaveGrazeFloorSin = 1.0e-4;
 const float kWaveMaxFootprintM = 1.0e6;
 
 // 一条波在当前像素足迹下还剩多少振幅（谱截断 / 抗锯齿）：
-//   · uWaveNoTruncate != 0 ⇒ 恒 1（V2：不截断，靠采样做面积分）；
-//   · footprint == 0     ⇒ 恒 1（未给足迹：不截断）；
-//   · 波长 > kWaveLodPxMax 像素 ⇒ 1；≤ kWaveLodPxMin ⇒ 0；中间 smoothstep。
+//   · uWaveNoTruncate != 0 ⇒ 恒 1（不截断，靠采样做面积分）；
+//   · uWaveTruncatePx <= 0 ⇒ 恒 1（T=0 与上一条等价，两条路径任选其一都能关）；
+//   · footprint == 0    ⇒ 恒 1（未给足迹：不截断）；
+//   · 波长 > T·kWaveLodPxMax 像素 ⇒ 1；≤ T·kWaveLodPxMin ⇒ 0；中间 smoothstep。
 // 唯一出处：WaveSampleAt / WaveDetailGrad / WaveAmplitudeSum / WaveSlopeTensor 都调它。
 float WaveLodAmp(float k, float footprint) {
-    if (uWaveNoTruncate != 0 || footprint <= 1.0e-6) {
+    if (uWaveNoTruncate != 0 || !(uWaveTruncatePx > 0.0) || footprint <= 1.0e-6) {
         return 1.0;
     }
+    // ⚠️ 这里是普通 float（不是 const）：GLSL 的 const 必须编译期常量，而 T 是 uniform。
+    float lod_px_min = kWaveLodPxMin * uWaveTruncatePx;
+    float lod_px_max = kWaveLodPxMax * uWaveTruncatePx;
     float wavelength_px = (6.283185307179586 / k) / footprint;
-    if (wavelength_px <= kWaveLodPxMin) {
+    if (wavelength_px <= lod_px_min) {
         return 0.0;
     }
-    if (wavelength_px < kWaveLodPxMax) {
-        float u = (wavelength_px - kWaveLodPxMin) / (kWaveLodPxMax - kWaveLodPxMin);
+    if (wavelength_px < lod_px_max) {
+        float u = (wavelength_px - lod_px_min) / (lod_px_max - lod_px_min);
         return u * u * (3.0 - 2.0 * u);
     }
     return 1.0;
