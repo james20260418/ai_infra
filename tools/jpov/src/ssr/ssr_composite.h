@@ -81,9 +81,12 @@ struct SsrCompositeInputs {
 //   · 输入纹理（hdr/attr/attr_mat/scene_depth/reflection/backface/raw）—— **调用方所有**，
 //     只借不解绑不解缚；
 //   · dst_fbo —— 调用方所有，本 pass 只写它的 COLOR_ATTACHMENT0（返回前恢复 draw buffer）；
-//     ⚠️ `hdr_tex` 必须**就是** dst_fbo 的 COLOR_ATTACHMENT0（Run 会校验 —— 读副本、
-//     写回原图全靠这一点，传糊了就是“合成到别的图上”）；
-//   · copy_tex_/copy_fbo_ —— 本类所有（HDR 副本，避免同张纹理又读又写），Finalize 释放。
+//     `hdr_tex` 与 dst_fbo 通常是**同一张图的两种说法**（3D FBO 的颜色附件）：本 pass
+//     从 hdr_tex 拷一份、合成后写回 dst_fbo。刻意不去查“它俩是不是同一张”，
+//     因为跨平台（mingw 的 GL loader 没有 glGetFramebufferAttachmentParameteriv）；
+//     传成两张不同的图不会崩，但语义就变成“把 hdr 的倒影画到另一张图上”；
+//   · copy_tex_/copy_fbo_/src_fbo_ —— 本类所有（HDR 副本，避免同张纹理又读又写），
+//     Finalize 释放。
 class SsrComposite {
 public:
     SsrComposite();
@@ -102,7 +105,8 @@ private:
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_ = 0;
     unsigned int copy_tex_ = 0;
-    unsigned int copy_fbo_ = 0;
+    unsigned int copy_fbo_ = 0;   // blit 的**写**端
+    unsigned int src_fbo_ = 0;    // blit 的**读**端（每帧临时挂 hdr_tex，用完摘掉）
     int width_ = 0;
     int height_ = 0;
 };

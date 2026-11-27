@@ -199,6 +199,11 @@ void SsrComposite::Init(ShaderManager* shader_mgr) {
 }
 
 void SsrComposite::Finalize() {
+    if (src_fbo_ != 0) {
+        // 删掉 FBO 本身就会放掉对 hdr_tex 的引用（每次 Run 末尾也主动脱钩，双保险）。
+        glDeleteFramebuffers(1, &src_fbo_);
+        src_fbo_ = 0;
+    }
     if (copy_fbo_ != 0) {
         glDeleteFramebuffers(1, &copy_fbo_);
         copy_fbo_ = 0;
@@ -244,6 +249,9 @@ void SsrComposite::EnsureCopyTarget(int w, int h) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, copy_tex_, 0);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
         << "SSR copy FBO 不完整";
+    // 读端 FBO：每帧把调用方的 hdr_tex 临时挂上去做 blit 源。刻意**不在**这里挂，
+    // 因为 hdr_tex 可能换（换场景/换分辨率），而挂着的引用会让调用方删不掉那张纹理。
+    glGenFramebuffers(1, &src_fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
 }
 
@@ -306,23 +314,18 @@ void SsrComposite::Run(const SsrCompositeInputs& in) {
 
     // ── HDR 副本：blit（不采样、不重建，纯拷贝）──
     // 合成要**读** hdr 又**写** hdr（同一张纹理 = 反馈环）⇒ 先拷一份。
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, in.dst_fbo);
-    // hdr_tex 与 dst_fbo 的附件 0 必须是**同一张纹理**：本 pass 的"读副本、写回原图"
-    // 全靠这一点。调用方传糊了（例如换了 FBO 却没换 tex）会得到"合成到错误的图上"，
-    // 比崩溃更难查 ⇒ 这里显式对一次（每帧一次查询，开销可忽略）。
-    {
-        GLint attached = 0;
-        glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &attached);
-        CHECK_EQ(attached, static_cast<GLint>(in.hdr_tex))
-            << "SsrCompositeInputs::hdr_tex 不是 dst_fbo 的 COLOR_ATTACHMENT0"
-               "（合成必须写回它读的那张图）";
-    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo_);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, in.hdr_tex, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_READ_FRAMEBUFFER),
+             static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
+        << "SSR copy 的读端 FBO 不完整（hdr_tex 不能作为 blit 源，检查格式/尺寸）";
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copy_fbo_);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glBlitFramebuffer(0, 0, in.full_w, in.full_h, 0, 0, in.full_w, in.full_h,
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    // 摘掉引用：否则调用方以后删 hdr_tex 时，本类还攥着它（GL 会让纹理名字存活到脱钩）。
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
 
     glBindFramebuffer(GL_FRAMEBUFFER, in.dst_fbo);
     glViewport(0, 0, in.full_w, in.full_h);
