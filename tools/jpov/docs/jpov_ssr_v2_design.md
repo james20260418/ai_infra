@@ -911,3 +911,21 @@ SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并�
 ① 只翻**查询**法线 ⇒ 反射图必须变；② 只改**查询**深度 ⇒ 必须变；
 ③ 只翻**源**法线（朝相机 → 背相机）⇒ 背面 flag 从 0 变成几乎全覆盖。
 三条都做过负向验证（把着色器里 query 采样换成 source、或把朝向判据换成 query 侧 ⇒ 立刻红）。
+
+### 19.7 资源与生命周期（谁持有、谁释放）
+
+| 资源 | 持有者 | 释放者 | 备注 |
+|---|---|---|---|
+| `SsrSource` / `SsrQuery` 的纹理 | **调用方** | 调用方 | 装置只借用，不解绑、不删除；生命周期需覆盖本次 Render |
+| `SsrChainResult`（reflection / backface / raw） | `SsrChain` | `SsrChain::Finalize` | 下一次 Render 改写；**不要**把 id 存到下一帧 |
+| 装置内部中间目标（两套降采样、柱体、slice、mip 链、升采样） | `SsrChain` | 同上 | 懒创建；尺寸或 scale 变化才重建（Render 里零分配） |
+| 不透明场景的属性纹理 / 3D FBO | `Renderer` | `Renderer` | `SsrOpaqueReflection` 只借用（它在 3D pass 那一侧） |
+| HDR 副本（合成用） | `SsrComposite` | `SsrComposite::Finalize` | 避免同张纹理又读又写；`hdr_tex` 必须**就是** dst_fbo 的附件 0（Run 里校验） |
+| GLSL program | `ShaderManager` | `ShaderManager` | 各模块只持 id，按名字缓存 |
+
+两套降采样（源 / 查询）是**两个对象、两份目标**：实心→实心时它们内容逐字节相同，
+但"源与查询可以不同"正是这套接口存在的理由，代码里不为同源情形留特例分支。
+
+状态洁净：装置与它的每一趟都自己保存/恢复 FBO、viewport、program、纹理绑定与
+blend/depth/cull/scissor —— 调用方不需要收拾，也不应依赖"进 Render 之前绑着什么"。
+

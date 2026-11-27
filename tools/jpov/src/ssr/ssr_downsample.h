@@ -95,7 +95,10 @@ enum class SsrDownsampleKind {
 // GL 侧：拥有降采样目标纹理与 FBO，一趟把全分辨率图降到 SSR 分辨率。
 //
 // 生命周期：Init(shader_mgr, kind) → 每帧 Run(inputs) → Finalize()。
-// Run 会保存/恢复调用方的 FBO、viewport、活动纹理单元与纹理绑定。
+// Run 自己保存/恢复调用方的全部相关 GL 状态（FBO、viewport、program、活动纹理单元与
+// 纹理绑定、blend/depth/cull/scissor）—— 调用方不需要收拾。
+// 纹理所有权：输入纹理是**调用方的**（只借不解绑）；输出三张是本类持有的（Finalize 释放，
+// 下一次 Run 改写），只借给调用方读。
 class SsrDownsample {
 public:
     // 一趟的全部输入（只读）。各字段的"未设置 = 0"一律 FATAL，不做兜底。
@@ -123,7 +126,6 @@ public:
     // 跑一趟。尺寸 / scale 变化时内部重建目标（Render 热路径上零分配）。
     void Run(const Inputs& in);
 
-    SsrDownsampleKind kind() const { return kind_; }
     unsigned int color_tex() const { return color_tex_; }    // RGBA16F（kSource 才有）
     // R32F，**w = 1/z_view**（0 = 天空/无几何）。SSR 链路内部一律用 w。
     unsigned int w_tex() const { return w_tex_; }

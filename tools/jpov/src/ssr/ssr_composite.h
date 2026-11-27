@@ -76,6 +76,14 @@ struct SsrCompositeInputs {
 
 // 生命周期：Init(shader_mgr) → 每帧 Run(inputs) → Finalize()。
 // Run 会保存/恢复调用方的 FBO、viewport、program、活动纹理单元与纹理绑定。
+//
+// 资源所有权：
+//   · 输入纹理（hdr/attr/attr_mat/scene_depth/reflection/backface/raw）—— **调用方所有**，
+//     只借不解绑不解缚；
+//   · dst_fbo —— 调用方所有，本 pass 只写它的 COLOR_ATTACHMENT0（返回前恢复 draw buffer）；
+//     ⚠️ `hdr_tex` 必须**就是** dst_fbo 的 COLOR_ATTACHMENT0（Run 会校验 —— 读副本、
+//     写回原图全靠这一点，传糊了就是“合成到别的图上”）；
+//   · copy_tex_/copy_fbo_ —— 本类所有（HDR 副本，避免同张纹理又读又写），Finalize 释放。
 class SsrComposite {
 public:
     SsrComposite();

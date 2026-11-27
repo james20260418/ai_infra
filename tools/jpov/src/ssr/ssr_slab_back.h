@@ -27,6 +27,8 @@ class ShaderManager;
 class SsrSlabBack {
 public:
     // 一趟的全部输入（只读）。全部必填：0 = 未设置 ⇒ FATAL。
+    // 数值参数越界（面板拖出了范围）会被**钳到合法区间**，不 FATAL —— 它们是观感旋钮，
+    // 钳位的本意是"不要让 0 厚柱体/误判把整屏打成无命中"。
     struct Inputs {
         unsigned int w_tex = 0;       // R32F，SSR 分辨率 w = 1/z（0 = 天空）
         unsigned int normal_tex = 0;  // RGBA16F，SSR 分辨率视空间法线（rgb 三分量）

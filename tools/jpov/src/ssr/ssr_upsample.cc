@@ -76,14 +76,13 @@ vec3 NormalOf(vec4 attr) {
     return normalize(attr.xyz);
 }
 
-// 该 texel 有没有深度数据（1.0 = 清空值 = 天空）。与 ssr_math.h::HasDepthData 同一条规则。
-bool HasDepthAt(ivec2 p) {
-    return texelFetch(uQueryDepth, p, 0).r < 1.0;
-}
-
-// 某 texel 的 w = 1/z（视距倒数）。
-float WAtPx(ivec2 p) {
-    return 1.0 / max(ZView(texelFetch(uQueryDepth, p, 0).r), 1.0e-4);
+// 一次取值同时给出「有没有数据」和 w。
+// 原来 HasDepthAt + WAtPx 对**同一格**各取一次纹理（梯度最多 4 次取 → 8 次）；
+// 两条都是纯函数、同一个 texel，合并后结果逐位相同。
+float WOf(ivec2 p, out bool has) {
+    float depth = texelFetch(uQueryDepth, p, 0).r;
+    has = depth < 1.0;
+    return 1.0 / max(ZView(depth), 1.0e-4);
 }
 
 // 全分辨率 w = 1/z 在屏幕上的**每像素梯度**（差分，边界 clamp）。
@@ -102,21 +101,25 @@ float WAtPx(ivec2 p) {
 //    得到的是**同一个斜率**，所以回退是无损的。两侧都没有数据才归零（退回旧的固定阈值）。
 vec2 WScreenGrad(ivec2 ip, float w_hi) {
     ivec2 hi = uFullRes - 1;
-    ivec2 px = clamp(ip + ivec2(1, 0), ivec2(0), hi);
-    ivec2 py = clamp(ip + ivec2(0, 1), ivec2(0), hi);
+    bool has_x = false;
+    bool has_y = false;
     float wx = 0.0;
-    if (HasDepthAt(px)) {
-        wx = WAtPx(px) - w_hi;
-    } else {
-        ivec2 mx = clamp(ip - ivec2(1, 0), ivec2(0), hi);
-        wx = HasDepthAt(mx) ? (w_hi - WAtPx(mx)) : 0.0;   // 单侧退回另一侧
-    }
     float wy = 0.0;
-    if (HasDepthAt(py)) {
-        wy = WAtPx(py) - w_hi;
+    float w_px = WOf(clamp(ip + ivec2(1, 0), ivec2(0), hi), has_x);
+    if (has_x) {
+        wx = w_px - w_hi;
     } else {
-        ivec2 my = clamp(ip - ivec2(0, 1), ivec2(0), hi);
-        wy = HasDepthAt(my) ? (w_hi - WAtPx(my)) : 0.0;
+        bool has_mx = false;
+        float w_mx = WOf(clamp(ip - ivec2(1, 0), ivec2(0), hi), has_mx);
+        wx = has_mx ? (w_hi - w_mx) : 0.0;   // 单侧退回另一侧
+    }
+    float w_py = WOf(clamp(ip + ivec2(0, 1), ivec2(0), hi), has_y);
+    if (has_y) {
+        wy = w_py - w_hi;
+    } else {
+        bool has_my = false;
+        float w_my = WOf(clamp(ip - ivec2(0, 1), ivec2(0), hi), has_my);
+        wy = has_my ? (w_hi - w_my) : 0.0;
     }
     return vec2(wx, wy);
 }

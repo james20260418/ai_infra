@@ -55,16 +55,43 @@
 // 其中 mask/材质项/兜底全部属于消费端 —— 装置只报事实。
 //
 // ───────────────────────────────────────────────────────────────────────────
+// 资源与所有权（谁持有、谁释放）
+// ───────────────────────────────────────────────────────────────────────────
+//   SsrSource / SsrQuery 的纹理  —— **调用方所有**，本类只借用、绝不解绑/删除；
+//                                    生命周期必须覆盖本次 Render（返回后就可以不管）。
+//   SsrChainResult 的纹理       —— **本类所有**。借给调用方用；下一次 Render 会改写它，
+//                                    Finalize() / 析构后全部失效（不要存指针/id）。
+//   内部中间目标（降采样/柱体/slice/mip/升采样）—— 本类所有，对外**不可见**；
+//                                    内部懒创建，尺寸或 scale 变化才重建（Render 热路径零分配）。
+//   GLSL program              —— **ShaderManager 所有**（按名缓存），本类只持 id、不删。
+//   两个 SsrDownsample 实例、柱体/march/滤波/升采样各一份 —— 都在本类里，
+//   Finalize 逐个释放；Init 可重入（先 Finalize 再重建）。
+//
+// 状态洁净：每一趟都自己保存/恢复 FBO、viewport、program、纹理绑定与四个开关
+// （blend/depth/cull/scissor）—— 调用方不需要收拾，也不应该依赖“进 Render 之前的绑定”。
+//
+// ───────────────────────────────────────────────────────────────────────────
 // 生命周期与开销
 // ───────────────────────────────────────────────────────────────────────────
 //   Init(shader_mgr) → 每帧 Render(source, query, params) → Finalize()（析构也会调）
 //   · 所有 GPU 目标**懒创建、尺寸变化才重建**；Render 的热路径上只有绑定 + draw。
-//   · 内部每一趟都自己保存/恢复 GL 状态（FBO / viewport / program / 纹理绑定 / 开关），
-//     调用方不需要收拾，也不必知道里面有几趟。
 //   · 帧成本 ≈ 面积 × (降采样 + 柱体 + march + 滤波 + 升采样)；唯一的成本旋钮是
 //     params.resolution_scale（1/N，全链路同倍率）。
 //
 // 契约：同输入同输出，逐字节。无历史、无抖动、无时序、无随机。
+//
+// ───────────────────────────────────────────────────────────────────────────
+// 最小用法
+// ───────────────────────────────────────────────────────────────────────────
+//   SsrChain chain;
+//   chain.Init(&shader_mgr);                      // GL context 已激活
+//   ...
+//   SsrSource source{scene_color, scene_depth, scene_normal, w, h};
+//   SsrQuery  query {query_depth, query_normal, query_rough};
+//   const SsrChainResult& r = chain.Render(source, query, params);
+//   // 消费端自己决定怎么用（下面是实心→实心的写法，不是本类的契约）：
+//   //   color += mask * ao * (A·L·weight(F0, rough) − A·env_term(F0, rough))
+//   chain.Finalize();
 
 #ifndef JPOV_SRC_SSR_SSR_CHAIN_H_
 #define JPOV_SRC_SSR_SSR_CHAIN_H_
@@ -154,8 +181,9 @@ struct SsrParams {
 };
 
 // ==================== 输出 ====================
-// 模块自持（懒创建，尺寸变化时重建）。**别跨帧缓存这些纹理 id**，也别把下一次
-// Render 的输入指到它们上面（那是反馈环）。
+// 全部**本类所有**（懒创建，尺寸变化时重建），只借给调用方用：
+//   · 下一次 Render 会改写它们；
+//   · Finalize() / 析构后失效（不要把纹理 id 存到下一帧去比）。
 struct SsrChainResult {
     // 全分辨率 RGBA32F。rgb = 命中辐亮度（纯辐亮度，未乘 Fresnel/AO），a = 覆盖率 A。
     // A 已经包含：命中覆盖率（mip 链）+ 掠射/预算/贴边三种淡出 + 升采样的软权。
@@ -187,21 +215,21 @@ public:
     // 释放所有 GL 对象。幂等；析构会调用。
     void Finalize();
 
-    // 跑一遍，返回本次结果（模块自持，别跨帧缓存）。
+    // 跑一遍，返回本次结果（**借用**：下一次 Render 会改写它，Finalize 后失效）。
     //
     // Pre-condition（任一不满足 ⇒ LOG(FATAL)）：
-    //   · 已 Init；Source/Query 的五张纹理都 ≠ 0，且 Source 两张尺寸 == 声明的 w×h，
-    //     Query 三张尺寸 == Source 的尺寸；
+    //   · 已 Init；Source 三张 + Query 三张纹理都 ≠ 0；六张的实际尺寸都 == Source 的 w×h；
     //   · 相机 / 厚度 / 预算 / 升采样参数全部合法（见 SsrParams 每条的范围）；
     //   · resolution_scale ∈ {1, 1/2, 1/3, 1/4}；tile_size ∈ {1,2,4,8}；
-    //   · 输入纹理都不是本类自己的输出（反馈环）。
+    //   · 输入纹理都不是本类自己的输出（reflection / backface / raw）。
     const SsrChainResult& Render(const SsrSource& source, const SsrQuery& query,
-                            const SsrParams& params);
+                                 const SsrParams& params);
 
 private:
     ShaderManager* shader_mgr_ = nullptr;
 
-    // 五段流水（各自拥有一份 GPU 资源）。顺序见 .cc 的 Render —— 那是唯一编排点。
+    // 六个成员（各自拥有一份 GPU 资源；降采样有两个 —— 源与查询各一）。
+    // 顺序见 .cc 的 Render —— 那是唯一编排点。
     SsrDownsample downsample_source_;  // 全分辨率 → SSR 分辨率（源：color + w + normal）
     SsrDownsample downsample_query_;   // 全分辨率 → SSR 分辨率（查询：w + normal + rough）
     SsrSlabBack slab_back_;            // SSR 分辨率：同面并集柱体的 back

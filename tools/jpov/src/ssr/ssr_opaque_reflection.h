@@ -61,6 +61,13 @@ struct SsrPassInputs {
 
 // 生命周期：Init(shader_mgr) → 每帧 Render(inputs, dst_fbo) → Finalize()。
 // Render 画进 dst_fbo 的 COLOR_ATTACHMENT0（= 3D FBO 的颜色）。
+//
+// 资源所有权（别的类容易在这里搞混，所以写死）：
+//   · 本类**不拥有任何纹理**。输入的四张图、以及属性 pass 的 FBO / 属性纹理，全在
+//     Renderer 手里（它们属于 3D pass，跨帧存在）；本类只借用。
+//   · 本类只持有 GLSL program 的 id，而那些 program 归 `ShaderManager`（按名缓存，不删）。
+//   · 真正的 GPU 资源（降采样/柱体/slice/mip 链/反射图）在 SsrChain / SsrComposite 里，
+//     它们自己负责释放。
 class SsrOpaqueReflection {
 public:
     SsrOpaqueReflection();

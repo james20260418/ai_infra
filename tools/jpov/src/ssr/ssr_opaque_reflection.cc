@@ -4,7 +4,6 @@
 
 #include "tools/jpov/src/ssr/ssr_opaque_reflection.h"
 
-#include <algorithm>
 #include <cmath>
 
 #include <GL/gl.h>

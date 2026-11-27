@@ -71,20 +71,24 @@ void MakeTexture(unsigned int* tex, int w, int h, GLint internal_format, GLenum 
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-int TextureWidth(unsigned int tex) {
-    GLint w = 0;
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return w;
-}
+// 查纹理尺寸。⚠️ 自己保存/恢复绑定：本模块不改调用方的任何 GL 状态
+// （进 Render 之前绑着什么是调用方的事，这里顺手改了就是真 bug）。
+// 一次绑定查宽高两个参数（下面 6 张纹理 ⇒ 6 次绑定，不是 12 次）。
+struct TexSize {
+    int width = 0;
+    int height = 0;
+};
 
-int TextureHeight(unsigned int tex) {
-    GLint h = 0;
+TexSize QueryTexSize(unsigned int tex) {
+    GLint prev_bind = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind);
     glBindTexture(GL_TEXTURE_2D, tex);
+    GLint w = 0;
+    GLint h = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return h;
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prev_bind));
+    return TexSize{static_cast<int>(w), static_cast<int>(h)};
 }
 
 }  // namespace
@@ -260,28 +264,29 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         << in.fade_hit_edge_pixels;
 
     // 输入尺寸必须与声明的分辨率一致（不一致会静默采到别的像素）。
-    CHECK_EQ(TextureWidth(in.color_tex), in.width)
-        << "color_tex 的宽度与 SsrInputs::width 不一致";
-    CHECK_EQ(TextureHeight(in.color_tex), in.height)
-        << "color_tex 的高度与 SsrInputs::height 不一致";
-    CHECK_EQ(TextureWidth(in.source_w_tex), in.width) << "source_w_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.source_w_tex), in.height) << "source_w_tex 的高度与 height 不一致";
-    CHECK_EQ(TextureWidth(in.source_normal_tex), in.width)
-        << "source_normal_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.source_normal_tex), in.height)
-        << "source_normal_tex 的高度与 height 不一致";
-    // 查询纹理必须与源**同尺寸**：屏幕参数化（σ、w 对屏幕仿射）只有在同一张屏幕网格上
-    // 才成立；尺寸不同会让射线落点与柱子坐标对不上（症状像"倒影整体平移"）。
-    CHECK_EQ(TextureWidth(in.query_w_tex), in.width) << "query_w_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.query_w_tex), in.height) << "query_w_tex 的高度与 height 不一致";
-    CHECK_EQ(TextureWidth(in.query_normal_tex), in.width)
-        << "query_normal_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.query_normal_tex), in.height)
-        << "query_normal_tex 的高度与 height 不一致";
-    CHECK_EQ(TextureWidth(in.query_rough_tex), in.width)
-        << "query_rough_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.query_rough_tex), in.height)
-        << "query_rough_tex 的高度与 height 不一致";
+    {
+        const TexSize c = QueryTexSize(in.color_tex);
+        const TexSize sw = QueryTexSize(in.source_w_tex);
+        const TexSize sn = QueryTexSize(in.source_normal_tex);
+        const TexSize qw = QueryTexSize(in.query_w_tex);
+        const TexSize qn = QueryTexSize(in.query_normal_tex);
+        const TexSize qr = QueryTexSize(in.query_rough_tex);
+        CHECK(c.width == in.width && c.height == in.height)
+            << "SsrInputs::color_tex 实际 " << c.width << "×" << c.height << "，声明的 " << in.width
+            << "×" << in.height;
+        CHECK(sw.width == in.width && sw.height == in.height)
+            << "SsrInputs::source_w_tex 尺寸与 width/height 不一致";
+        CHECK(sn.width == in.width && sn.height == in.height)
+            << "SsrInputs::source_normal_tex 尺寸与 width/height 不一致";
+        // 查询纹理必须与源**同尺寸**：屏幕参数化（σ、w 对屏幕仿射）只有在同一张屏幕网格上
+        // 才成立；尺寸不同会让射线落点与柱子坐标对不上（症状像"倒影整体平移"）。
+        CHECK(qw.width == in.width && qw.height == in.height)
+            << "SsrInputs::query_w_tex 尺寸与 width/height 不一致";
+        CHECK(qn.width == in.width && qn.height == in.height)
+            << "SsrInputs::query_normal_tex 尺寸与 width/height 不一致";
+        CHECK(qr.width == in.width && qr.height == in.height)
+            << "SsrInputs::query_rough_tex 尺寸与 width/height 不一致";
+    }
 
     // 纹理边长 / 显存预算（动态，不写死）。
     const long long slice_texels =

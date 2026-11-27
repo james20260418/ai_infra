@@ -4,7 +4,6 @@
 
 #include "tools/jpov/src/ssr/ssr_chain.h"
 
-#include <algorithm>
 #include <cmath>
 
 #include <GL/gl.h>
@@ -24,20 +23,25 @@
 namespace jpov {
 namespace {
 
-int TextureWidth(unsigned int tex) {
-    GLint w = 0;
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return w;
-}
+// 查纹理尺寸。
+// ⚠️ 必须**自己保存/恢复绑定**：本类对调用方的 GL 状态零假设（它可能被任意位置调用），
+//    「顺手改了一个单元的纹理绑定」在这里就是真 bug（调用方下一个 pass 会采错图）。
+// 一次绑定查宽高两个参数（每帧 6 张纹理 ⇒ 6 次绑定而不是 12 次）。
+struct TexSize {
+    int width = 0;
+    int height = 0;
+};
 
-int TextureHeight(unsigned int tex) {
-    GLint h = 0;
+TexSize QueryTexSize(unsigned int tex) {
+    GLint prev_bind = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind);
     glBindTexture(GL_TEXTURE_2D, tex);
+    GLint w = 0;
+    GLint h = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return h;
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prev_bind));
+    return TexSize{static_cast<int>(w), static_cast<int>(h)};
 }
 
 bool IsValidTile(int tile) {
@@ -126,36 +130,38 @@ const SsrChainResult& SsrChain::Render(const SsrSource& source, const SsrQuery& 
 
     // 源的两张 + 查询的三张必须都是**声明的那个尺寸**：屏幕参数化（σ、w 对屏幕仿射）
     // 只在同一张屏幕网格上成立；尺寸不一致的症状是"倒影整体平移 + 命中错格"。
-    CHECK_EQ(TextureWidth(source.color_tex), source.width)
-        << "SsrSource::color_tex 的宽度与声明的 width 不一致";
-    CHECK_EQ(TextureHeight(source.color_tex), source.height)
-        << "SsrSource::color_tex 的高度与声明的 height 不一致";
-    CHECK_EQ(TextureWidth(source.depth_tex), source.width) << "SsrSource::depth_tex 尺寸不一致";
-    CHECK_EQ(TextureHeight(source.depth_tex), source.height) << "SsrSource::depth_tex 尺寸不一致";
-    CHECK_EQ(TextureWidth(source.normal_tex), source.width) << "SsrSource::normal_tex 尺寸不一致";
-    CHECK_EQ(TextureHeight(source.normal_tex), source.height)
-        << "SsrSource::normal_tex 尺寸不一致";
-    CHECK_EQ(TextureWidth(query.depth_tex), source.width)
-        << "SsrQuery::depth_tex 必须与 Source 同尺寸";
-    CHECK_EQ(TextureHeight(query.depth_tex), source.height)
-        << "SsrQuery::depth_tex 必须与 Source 同尺寸";
-    CHECK_EQ(TextureWidth(query.normal_tex), source.width)
-        << "SsrQuery::normal_tex 必须与 Source 同尺寸";
-    CHECK_EQ(TextureHeight(query.normal_tex), source.height)
-        << "SsrQuery::normal_tex 必须与 Source 同尺寸";
-    CHECK_EQ(TextureWidth(query.rough_tex), source.width)
-        << "SsrQuery::rough_tex 必须与 Source 同尺寸";
-    CHECK_EQ(TextureHeight(query.rough_tex), source.height)
-        << "SsrQuery::rough_tex 必须与 Source 同尺寸";
+    {
+        const TexSize c = QueryTexSize(source.color_tex);
+        const TexSize d = QueryTexSize(source.depth_tex);
+        const TexSize n = QueryTexSize(source.normal_tex);
+        const TexSize qd = QueryTexSize(query.depth_tex);
+        const TexSize qn = QueryTexSize(query.normal_tex);
+        const TexSize qr = QueryTexSize(query.rough_tex);
+        CHECK(c.width == source.width && c.height == source.height)
+            << "SsrSource::color_tex 实际 " << c.width << "×" << c.height << "，与声明的 "
+            << source.width << "×" << source.height << " 不一致";
+        CHECK(d.width == source.width && d.height == source.height)
+            << "SsrSource::depth_tex 尺寸与声明不一致";
+        CHECK(n.width == source.width && n.height == source.height)
+            << "SsrSource::normal_tex 尺寸与声明不一致";
+        CHECK(qd.width == source.width && qd.height == source.height)
+            << "SsrQuery::depth_tex 必须与 Source 同尺寸";
+        CHECK(qn.width == source.width && qn.height == source.height)
+            << "SsrQuery::normal_tex 必须与 Source 同尺寸";
+        CHECK(qr.width == source.width && qr.height == source.height)
+            << "SsrQuery::rough_tex 必须与 Source 同尺寸";
+    }
 
     // 反馈环（契约：不改输入、不读自身输出）。
-    CHECK(source.color_tex != result_.reflection_tex &&
-              source.depth_tex != result_.reflection_tex &&
-              source.normal_tex != result_.reflection_tex &&
-              query.depth_tex != result_.reflection_tex &&
-              query.normal_tex != result_.reflection_tex &&
-              query.rough_tex != result_.reflection_tex)
-        << "输入纹理是本装置上一帧的 reflection_tex（反馈环）";
+    // 三个输出都要查：raw_tex / backface_tex 也是本类持有的真实纹理（不是别名）。
+    auto own_output = [&](unsigned int tex) {
+        return tex != 0 && (tex == result_.reflection_tex || tex == result_.backface_tex ||
+                            tex == result_.raw_tex);
+    };
+    CHECK(!own_output(source.color_tex) && !own_output(source.depth_tex) &&
+              !own_output(source.normal_tex) && !own_output(query.depth_tex) &&
+              !own_output(query.normal_tex) && !own_output(query.rough_tex))
+        << "输入纹理是本装置上一帧的输出（反馈环）";
 
     const int scale = static_cast<int>(std::lround(1.0f / params.resolution_scale));
 

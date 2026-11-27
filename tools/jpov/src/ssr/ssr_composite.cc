@@ -4,7 +4,6 @@
 
 #include "tools/jpov/src/ssr/ssr_composite.h"
 
-#include <algorithm>
 #include <string>
 
 #include <GL/gl.h>
@@ -308,6 +307,17 @@ void SsrComposite::Run(const SsrCompositeInputs& in) {
     // ── HDR 副本：blit（不采样、不重建，纯拷贝）──
     // 合成要**读** hdr 又**写** hdr（同一张纹理 = 反馈环）⇒ 先拷一份。
     glBindFramebuffer(GL_READ_FRAMEBUFFER, in.dst_fbo);
+    // hdr_tex 与 dst_fbo 的附件 0 必须是**同一张纹理**：本 pass 的"读副本、写回原图"
+    // 全靠这一点。调用方传糊了（例如换了 FBO 却没换 tex）会得到"合成到错误的图上"，
+    // 比崩溃更难查 ⇒ 这里显式对一次（每帧一次查询，开销可忽略）。
+    {
+        GLint attached = 0;
+        glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &attached);
+        CHECK_EQ(attached, static_cast<GLint>(in.hdr_tex))
+            << "SsrCompositeInputs::hdr_tex 不是 dst_fbo 的 COLOR_ATTACHMENT0"
+               "（合成必须写回它读的那张图）";
+    }
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copy_fbo_);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);

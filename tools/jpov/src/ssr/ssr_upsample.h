@@ -16,6 +16,10 @@
 //      未命中像素的 rgb 无意义（写 0），直接平均 ⇒ "越粗糙越暗"。
 //   ② 空间权用**双线性**（2×2），值域权用软权 + 权重下限 ⇒ Σw 永不为 0，不出孔洞。
 //   ③ A 从预乘和里**除回去**（den/wsum），不是直接相加。
+//
+// 生命周期：Init(shader_mgr) → 每帧 Run(inputs) → Finalize()（析构也会调）。
+// 输入纹理全部**借用**（mip_tex / backface_tex 是装置的内部目标，其余是全分辨率输入）；
+// 两张输出是本类持有的，下一次 Run 改写。Run 自己保存/恢复调用方的 GL 状态。
 
 #ifndef JPOV_SRC_SSR_SSR_UPSAMPLE_H_
 #define JPOV_SRC_SSR_SSR_UPSAMPLE_H_
