@@ -172,6 +172,11 @@ private:
     int ssr_attr_w_ = 0, ssr_attr_h_ = 0;
     unsigned int ssr_attr_depth_tex_ = 0;   // 缓存当时挂的深度纹理句柄（变了要重建 FBO）
     SsrOpaqueReflection ssr_opaque_reflection_;
+    // 水皮自己的 SSR 装置实例（2026-11-27）。**刻意不复用上面那个**：
+    //   · 装置内部缓冲（降采样/柱体/mip/反射图）每份 ~20 MB，两个消费者各自一份更干净；
+    //   · 复用同一个实例能跑（结果在用完就消费），但那等于引入"必须先合成实心、再跑水皮"
+    //     的隐式调用顺序 —— 谁把两段调换一下就会静默拿到别人的反射图。
+    SsrChain water_ssr_chain_;
 
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_tex_hdr_ = 0;
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
@@ -209,7 +214,9 @@ private:
     // 把 ssr_reflector 的物体（以及遮挡物的法线）再画一遍，写视空间法线 + mask
     // （LEQUAL 深度测试）。返回 false = 本帧**一个反射体都没有**（连 FBO 都没建）
     // ⇒ 调用方必须把整条 SSR 链路跳过，见函数注释。
-    bool DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h);
+    // need_for_source：本帧没有 `ssr_reflector` 时仍需这份属性纹理（水皮 SSR 拿它当
+    // **源法线**：射线会不会扎进某张面，靠的是所有遮挡物的视空间法线）。
+    bool DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h, bool need_for_source);
     void EnsureShadowFBO(const ShadowConfig& cfg);
     void DestroyFBO();
     void DestroyOutputFBO();

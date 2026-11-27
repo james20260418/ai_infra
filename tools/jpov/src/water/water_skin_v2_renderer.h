@@ -41,6 +41,26 @@ struct WaterCsmShadow {
     bool IsValid() const { return sun.has_value() && !fbos.empty(); }
 };
 
+// ── 水皮 SSR 的 Query 产物（2026-11-27）──
+// 本类所有（懒创建、尺寸变化才重建），只借给 Renderer 转成 SsrChain 的 SsrQuery。
+// 三个字段的语义与 `SsrQuery` 逐条对应（见 ssr_chain.h），但**本类不认识 SSR**
+// （不 include 装置的接口）：水皮只负责"自己的表面长什么样"。
+struct WaterSsrQueryTextures {
+    unsigned int depth_tex = 0;   // R32F：水面窗口深度（1.0 = 这一像素不查询）
+    unsigned int normal_tex = 0;  // RGBA16F：**视空间**中心法线，a ≥ 0.25 = 有水面
+    unsigned int rough_tex = 0;   // RGBA16F：只读 .a = roughness
+    int width = 0;
+    int height = 0;
+};
+
+// query 趟的三个换算量（属于**装置**的口径，由 Renderer 从 SsrConfig 取）。
+// 放这里而不是放进 Inputs：它们只影响"如何向装置描述自己"，不影响水皮出图。
+struct WaterSsrQueryTuning {
+    float resolution_scale = 0.5f;    // 1/N（> 0），装置的降采样倍率
+    float roughness_to_lod = 8.0f;    // > 0，装置的 roughness → mip 级斜率
+    float rough_max = 0.35f;          // (0, 1]，rough 上限（≈ 探针 LOD cap）
+};
+
 class WaterSkinV2Renderer {
 public:
     // 输入契约与 V1 完全相同（同一份 Camera / 介质 / 波浪 / 太阳 / 探针）。
@@ -75,24 +95,40 @@ public:
     //               否则 Snell 窗缘错位 —— 见 water_wave_uniforms.h 顶部的不变式）。
     void Draw(const Inputs& inputs, int sample_count, const WaterCsmShadow* csm = nullptr);
 
+    // 跑 SSR 的 **query 趟**（只算几何：窗口深度 + 视空间中心法线 + rough）。
+    // 必须在本帧的 Draw 之前调用，且两次传**同一份 Inputs**（几何口径必须一致）。
+    // 产物是本类所有的三张全分辨率纹理（见 query()），生命周期到下一次 DrawQuery。
+    // Pre-condition: 已 Init；full_w/full_h 与 Begin 一致；tuning 各字段在范围内。
+    void DrawQuery(const Inputs& in, const WaterSsrQueryTuning& tuning);
+
+    // 上一次 DrawQuery 的产物；没跑过 ⇒ 全 0（调用方据此跳过装置）。
+    WaterSsrQueryTextures query() const { return query_; }
+
     // 本帧这一层的三张附件（交给合成器的 TransparentLayerSet）。
     // 未 Begin / 没画过内容时返回的层 invalid()。
     TransparentLayer layer() const;
 
 private:
     void EnsureTarget(int w, int h);
+    // query 趟的三附件目标（R32F 深度 / RGBA16F 法线 / RGBA16F rough）。懒创建。
+    void EnsureQueryTarget(int w, int h);
+    void DestroyQueryTarget();
     void UploadCommonUniforms(unsigned int prog, const Inputs& in, int sample_count,
                               const WaterCsmShadow* csm);
     // 按「水上/水下 × 生产/调试」选 program（水上水下由相机 y vs level 决定，每帧常量）。
     unsigned int SelectProgram(const Inputs& inputs) const;
 
     ShaderManager* shader_mgr_ = nullptr;
+    unsigned int prog_query_ = 0;         // SSR query 趟（纯几何）
     unsigned int prog_above_ = 0;         // 水上 · 生产
     unsigned int prog_below_ = 0;         // 水下 · 生产
     unsigned int prog_above_debug_ = 0;   // 水上 · 调试
     unsigned int prog_below_debug_ = 0;   // 水下 · 调试
     unsigned int vao_ = 0;
     WboTarget wbo_;
+    // SSR query 三附件（本类所有）
+    unsigned int query_fbo_ = 0;
+    WaterSsrQueryTextures query_;
     bool has_content_ = false;
     bool initialized_ = false;
 };

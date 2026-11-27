@@ -4,6 +4,8 @@
 
 #include "tools/jpov/src/ssr/ssr_opaque_reflection.h"
 
+#include "tools/jpov/src/ssr/ssr_params.h"
+
 #include <cmath>
 
 #include <GL/gl.h>
@@ -82,36 +84,13 @@ void SsrOpaqueReflection::Render(const SsrPassInputs& in, unsigned int dst_fbo) 
         << "SsrConfig::fade_hit_edge_pixels 必须 ≥ 0（0 = 关闭），得到 "
         << in.cfg.fade_hit_edge_pixels;
 
-    // ── SsrConfig → SsrParams（装置不认识 SsrConfig：那是应用层结构）──
-    SsrParams p;
-    p.near_plane = in.near_plane;
-    p.far_plane = in.far_plane;
-    p.tan_half_fov_y = in.tan_half_fov_y;
-    p.aspect = in.aspect;
-    p.resolution_scale = in.cfg.resolution_scale;
-    p.thickness_pixels = in.cfg.thickness_pixels;
-    p.min_thickness_m = in.cfg.min_thickness_m;
-    p.max_distance_m = in.cfg.max_distance_m;
-    p.max_ray_pixels = in.cfg.max_ray_pixels;
-    p.tile_size = in.cfg.tile_size;
-    p.roughness_cutoff = in.cfg.roughness_cutoff;
-    p.slab_min_thickness = in.cfg.slab_min_thickness;
-    p.slab_gate_rel = in.cfg.slab_gate_rel;
-    p.slab_gate_cos = in.cfg.slab_gate_cos;
-    p.grazing_fade_start = in.cfg.grazing_fade_start;
-    p.grazing_fade_end = in.cfg.grazing_fade_end;
-    p.fade_budget_pixels = in.cfg.fade_budget_pixels;
-    p.fade_edge_pixels = in.cfg.fade_edge_pixels;
-    p.fade_hit_edge_pixels = in.cfg.fade_hit_edge_pixels;
-    p.filter_hole_fill = in.cfg.filter_hole_fill;
-    p.filter_outlier_clamp = in.cfg.filter_outlier_clamp;
-    p.filter_atrous = in.cfg.filter_atrous;
-    p.filter_clamp_sigma = in.cfg.filter_clamp_sigma;
-    p.filter_atrous_iterations = in.cfg.filter_atrous_iterations;
-    p.upsample_depth_tolerance = in.cfg.upsample_depth_tolerance;
-    p.upsample_hard_cut = in.cfg.upsample_hard_cut;
-    p.upsample_weight_floor = in.cfg.upsample_weight_floor;
-    p.roughness_to_lod = in.cfg.roughness_to_lod;
+    // ── SsrConfig → SsrParams（映射的唯一一份：ssr_params.h）──
+    SsrCamera cam;
+    cam.near_plane = in.near_plane;
+    cam.far_plane = in.far_plane;
+    cam.tan_half_fov_y = in.tan_half_fov_y;
+    cam.aspect = in.aspect;
+    const SsrParams p = BuildSsrParams(in.cfg, cam);
 
     // ── Source / Query ──
     // 不透明场景：被反射的世界与"谁在问"是**同一份屏幕数据**（地板/人体自己也在画面里），

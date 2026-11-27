@@ -899,6 +899,31 @@ struct SsrConfig {
     int debug_coverage = 0;
 };
 
+// 水皮 SSR 的默认参数（Danis 2026-11-27 定：**独立**配置、**默认开**）。
+//
+// 与实心场景的 `SsrConfig` 是同一个类型、但**两个独立实例**（`cmds.ssr` 管实心，
+// `cmds.water->ssr` 管水皮）：两者的正确值差得很远（水面几乎总是掠射、反射距离长、
+// 没有逐像素材质）。共用一个实例会变成"调水皮把地板搞坏"。
+//
+// 与实心不同的几处（都体现在下面的默认值里）：
+//   · roughness_cutoff = 1：水面的粗糙度已经按**波浪方差**逐像素算好（见水皮 query pass），
+//     再按阈值跳过射线等于把远处整片倒影扔掉；
+//   · max_distance_m / max_ray_pixels 更宽松：水面上能看到的反射都很远（岸/船）；
+//   · 三个遮丑滤波器保持关：它们是为金属调的形状，水面先按原样看，需要再加。
+// 用不到的字段（ao / backface_* / debug_coverage）只在实心合成层里生效，水皮忽略。
+inline SsrConfig DefaultWaterSsrConfig() {
+    SsrConfig c;
+    c.enabled = true;
+    c.resolution_scale = 0.5f;
+    c.thickness_pixels = 6.0f;
+    c.min_thickness_m = 1.0e-4f;
+    c.max_distance_m = 1000.0f;
+    c.max_ray_pixels = 220;
+    c.roughness_cutoff = 1.0f;
+    c.roughness_to_lod = 8.0f;
+    return c;
+}
+
 // ==================== 水体（Water）====================
 //
 // 水体介质：水面 `y <= level_y` 的半空间里充满**均质**介质（逐通道 σa / σs + HG 相位）。
@@ -1146,6 +1171,15 @@ struct WaterCommand {
     // ⚠️ 波浪只改**界面几何**（水皮求交与法线）；水体介质仍按 level_y 的半空间积分
     //    （波浪化介质见 known_issue §11.5，另 PR）。
     WaterWaves waves;
+
+    // ── 水皮自己的 SSR 装置参数（2026-11-27）──
+    // **与 `cmds.ssr` 完全独立**（两个实例，各自一套滑条），默认**开**（DefaultWaterSsrConfig）。
+    // 语义：水面的镜面项 = A·SSR 辐亮度 + (1−A)·天光探针。A 是装置的覆盖率
+    // （命中覆盖率 + 掠射/预算/贴边淡出 + 升采样软权）⇒ 兜底是逐像素连续的，没有接缝。
+    //   · 只在 `waves.v2 == true` 且相机高于 level_y 时生效（其余组合走纯探针，零回归）；
+    //   · enabled = false ⇒ 水皮 query pass 与整条链路一次都不跑（零开销、逐字节等于旧行为）；
+    //   · 反射源只含**不透明 3D**（颜色/深度/法线），不含条带/粒子/水皮自己。
+    SsrConfig ssr = DefaultWaterSsrConfig();
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。

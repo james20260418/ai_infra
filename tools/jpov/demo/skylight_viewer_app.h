@@ -125,6 +125,13 @@ public:
     };
     std::vector<ModelSlot> models_;
 
+    // ── 远景荷兰帆船（场景 4 的「水上反射源」；2026-11-27）──
+    // 为什么要有它：海面选型场里露出水面的只有一根立柱，水面 SSR 的倒影没有可读形状。
+    // 帆船 = 远、剪影明确、正好落在掠射倒影带里，是这条链路的验收工件。
+    // 它**只**在场景 4 画（不进 models_：那是场景 0/1 共用的）。
+    ModelSlot ship_;
+    bool ship_on_ = true;
+
     void AddModel(jpov::GltfObject obj, jpov::Vec3f center,
                   jpov::Vec3f up, jpov::Vec3f front, float scale = 1.0f) {
         models_.push_back({std::move(obj), center, up, front, scale});
@@ -297,6 +304,9 @@ public:
         view_.R = 5.0;
     }
 
+    // 水皮 SSR 总闸（面板/A-B 拍摄用；参数整份独立于实心场景的 ssr_）。
+    void SetWaterSsr(bool on) { water_ssr_.enabled = on; }
+
     void SetOceanLab(bool on) {
         if (!on) {
             scene_index_ = 0;
@@ -337,6 +347,8 @@ public:
     //   · water_skin_on_   = 界面层（水皮 WBO）：反射 / 透射 / 水面高光 / Snell 窗；
     //   · water_medium_on_ = 水体介质（体积）：水下吸收 + 单次散射注入。
     // 默认都开（旧行为逐字节不变）。
+    // 水皮 SSR 的整份配置（**独立**于实心场景的 ssr_；默认开，见 DefaultWaterSsrConfig）。
+    jpov::SsrConfig water_ssr_ = jpov::DefaultWaterSsrConfig();
     bool water_skin_on_ = true;
     bool water_medium_on_ = true;
     // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
@@ -795,6 +807,11 @@ public:
                                {0.0f, bed_y, 0.0f},
                                /*up*/ {0.0f, 1.0f, 0.0f},
                                /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ 5.0f);
+            // 远景帆船：水面上唯一的"可读形状"，水面 SSR 的倒影靠它验收。
+            if (ship_on_ && !ship_.obj.empty()) {
+                cmds->DrawGltfObject(ship_.obj, ship_.center, ship_.up, ship_.front,
+                                     ship_.scale);
+            }
         } else if (draw_scene && underwater) {
             const float bed_y = water_cfg_.level_y - water_cfg_.depth_m;   // −0.5 m
             // 海底（object3d）：40×40 m 中性沙色。颜色的任何变化只能来自光/水。
@@ -1076,6 +1093,8 @@ public:
             w.waves.v2_m1 = water_v2_m1_;
             w.waves.v2_m2 = water_v2_m2_;
             w.waves.v2_m3 = water_v2_m3_;
+            // 水皮自己的 SSR 配置（默认开；与 cmds.ssr 是两个独立实例）。
+            w.ssr = water_ssr_;
             cmds->water = w;
         }
 
@@ -1317,6 +1336,26 @@ private:
                 ui_.Checkbox("V2 M2 多散射对账", &water_v2_m2_, row(1, 18));
                 ui_.Checkbox("V2 M3 glints (各向异性+颗粒)", &water_v2_m3_, row(1, 19));
                 ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(1, 20));
+
+                // ── 水皮 SSR（2026-11-27）：倒影 = SSR + 探针兜底 ──
+                // 关掉 = 逐字节回到纯探针；这是验收"单调改进"的 A/B 基线。
+                ui_.Checkbox("水皮 SSR 倒影", &water_ssr_.enabled, row(0, 14));
+                {
+                    // 降采样倍率 1/N（>=1）。N 越大越便宜、倒影越糊。
+                    float ssr_n = 1.0f / std::max(water_ssr_.resolution_scale, 1.0e-3f);
+                    if (ui_.SliderFloat("水皮 SSR 降采样 1/N", &ssr_n, row(0, 15), 1.0f, 4.0f,
+                                        0)) {
+                        water_ssr_.resolution_scale = 1.0f / std::max(ssr_n, 1.0f);
+                    }
+                }
+                {
+                    float ssr_budget_px = static_cast<float>(water_ssr_.max_ray_pixels);
+                    if (ui_.SliderFloat("水皮 SSR 射线预算 px", &ssr_budget_px, row(0, 16),
+                                        32.0f, 512.0f, 0)) {
+                        water_ssr_.max_ray_pixels =
+                            static_cast<int>(std::lround(ssr_budget_px));
+                    }
+                }
 
                 // 只读派生量（把"自动推出来的东西"亮出来，否则用户不知道自己调出了什么海）
                 EnsureLabWater();

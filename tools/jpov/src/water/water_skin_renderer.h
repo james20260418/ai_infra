@@ -72,6 +72,12 @@ public:
         // 像素足迹带宽开关：1 = 开（默认，掠射抗闪）；0 = 关（CPU 对拍测试用，
         // 因为着色器里的 dFdx 无法在 CPU 复现）。
         float sun_footprint = 1.0f;
+
+        // ── SSR 的反射结果（2026-11-27；**只有 V2 水上支路**消费）──
+        // 全分辨率 RGBA32F：rgb = 命中辐亮度 L（纯辐亮度），a = 覆盖率 A。
+        // 语义：refl_i = mix(env_i, L, A) ⇒ 0 = 纯探针（V1 与水下支路永远走这条）。
+        // 所有权：调用方（Renderer/SsrChain）所有，本类只借不改。
+        unsigned int ssr_reflection_tex = 0;
     };
 
     WaterSkinRenderer();

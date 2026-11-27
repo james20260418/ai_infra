@@ -157,6 +157,23 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 水皮 SSR 的 GPU 测试：query 趟的 depth/法线口径 + A=0 逐字节等于纯探针。
+# 见 water_ssr_gpu_test.cc 顶部（含三条负向验证的做法）。
+cc_test(
+    name = "water_ssr_gpu_test",
+    srcs = ["water_ssr_gpu_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src/water:water_skin_v2_renderer",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # 水下照明衰减（照明侧）的 CPU 参考单测：逐通道增益、开关独立、水上恒等、低太阳更暗。
 cc_test(
     name = "water_underwater_shading_test",

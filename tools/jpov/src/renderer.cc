@@ -4,6 +4,7 @@
 #define GL_GLEXT_PROTOTYPES
 
 #include "tools/jpov/src/renderer.h"
+#include "tools/jpov/src/ssr/ssr_params.h"   // SsrConfig → SsrParams（唯一一份映射）
 
 #include <algorithm>
 #include <cmath>
@@ -619,6 +620,7 @@ Renderer::~Renderer() {
     fog_composite_.Finalize();
     water_skin_renderer_.Finalize();
     water_skin_v2_renderer_.Finalize();
+    water_ssr_chain_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
@@ -1335,6 +1337,7 @@ void Renderer::Init(
     strip_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     ssr_opaque_reflection_.Init(&shader_mgr_);
+    water_ssr_chain_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
     debug_overlay_renderer_.Init();
@@ -1892,6 +1895,10 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
+        // 本帧属性纹理（视空间法线）是否已经是**本帧**的：实心 SSR 与水皮 SSR 共用它
+        // （实心用它当查询+源法线；水皮只用它当**源法线** —— 射线会不会扎进某张面）。
+        bool ssr_attr_ready = false;
+
         // SSR：**不透明 3D 画完、半透明之前**，用屏幕数据替换环境镜面项。
         // 放这里而不是更后面，是因为它要"没有雾、没有半透明"的颜色（见 SsrConfig 注释）。
         if (cmds.ssr.has_value() && cmds.ssr->enabled) {
@@ -1902,7 +1909,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 注意用 Render 的**局部** fbo_3d_w/h（成员 fbo_3d_w_ 只在 LDR 路径赋值）。
             // 返回 false = 本帧一个 ssr_reflector 都没有 ⇒ 属性纹理不存在/是旧帧残留，
             // 整条链路（属性 pass / 降采样 / 模块 / 合成）一起跳过（见该函数注释）。
-            if (DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h)) {
+            ssr_attr_ready = DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h,
+                                            /*need_for_source=*/false);
+            if (ssr_attr_ready) {
                 SsrPassInputs ssi;
                 ssi.hdr_color_tex = color_tex_hdr_;
                 ssi.scene_depth_tex = scene_depth_tex_hdr_;
@@ -2136,6 +2145,63 @@ void Renderer::Render(const RenderCommandList& cmds,
                     const WaterCsmShadow* water_csm_ptr =
                         water_csm.IsValid() ? &water_csm : nullptr;
                     water_skin_v2_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+
+                    // ── 水皮 SSR（2026-11-27）──
+                    // 三步固定顺序（少一步都会静默退化成纯探针）：
+                    //   ① query 趟：只有几何（水面窗口深度 + 视空间中心法线 + rough）；
+                    //   ② 装置：**源复用上面那三张实心纹理**（颜色/深度/属性法线），Query 换水面的；
+                    //   ③ 着色趟：refl = mix(env, L, A)（见 water_skin_v2_shader.h）。
+                    // 只在相机**在水上**时做：水下镜面项是 TIR + 深海积分，与探针无关。
+                    if (cmds.water->ssr.enabled && !cam_underwater) {
+                        // 源法线：属性 pass 可能还没跑（实心 SSR 关，或本帧一个反射体都没有）。
+                        if (!ssr_attr_ready) {
+                            ssr_attr_ready = DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h,
+                                                            /*need_for_source=*/true);
+                        }
+                        if (!ssr_attr_ready || ssr_attr_tex_ == 0u) {
+                            LOG_FIRST_N(WARNING, 1)
+                                << "水皮 SSR 跳过：属性纹理不可用（本帧无几何？）——"
+                                   "水面退回纯天光探针";
+                        } else {
+                            WaterSsrQueryTuning query_tuning;
+                            query_tuning.resolution_scale = cmds.water->ssr.resolution_scale;
+                            query_tuning.roughness_to_lod = cmds.water->ssr.roughness_to_lod;
+                            water_skin_v2_renderer_.DrawQuery(wsi, query_tuning);
+                            const WaterSsrQueryTextures q = water_skin_v2_renderer_.query();
+
+                            SsrCamera ssr_cam;
+                            ssr_cam.near_plane = cmds.camera.near;
+                            ssr_cam.far_plane = cmds.camera.far;
+                            ssr_cam.tan_half_fov_y = std::tan(
+                                0.5f * cmds.camera.fov * 3.14159265358979323846f / 180.0f);
+                            ssr_cam.aspect = static_cast<float>(fbo_3d_w) /
+                                             static_cast<float>(fbo_3d_h);
+
+                            SsrSource wsrc;
+                            wsrc.color_tex = color_tex_hdr_;
+                            wsrc.depth_tex = hdr_scene_depth_tex;
+                            wsrc.normal_tex = ssr_attr_tex_;
+                            wsrc.width = fbo_3d_w;
+                            wsrc.height = fbo_3d_h;
+
+                            SsrQuery wqry;
+                            wqry.depth_tex = q.depth_tex;
+                            wqry.normal_tex = q.normal_tex;
+                            wqry.rough_tex = q.rough_tex;
+
+                            const SsrChainResult& ref = water_ssr_chain_.Render(
+                                wsrc, wqry, BuildSsrParams(cmds.water->ssr, ssr_cam));
+                            wsi.ssr_reflection_tex = ref.reflection_tex;
+
+                            // 装置内已存/恢 FBO/viewport/program，但主 pass 后续假设
+                            // "3D FBO 已绑 + MRT 两附件"：补齐。
+                            glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                            const GLenum mrt_w2[2] = {GL_COLOR_ATTACHMENT0,
+                                                      GL_COLOR_ATTACHMENT1};
+                            glDrawBuffers(2, mrt_w2);
+                        }
+                    }
                     water_skin_v2_renderer_.Draw(wsi, samples, water_csm_ptr);
                     if (!cam_underwater) {
                         water_layer_index = layers.count;
@@ -2796,7 +2862,8 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
     ssr_attr_depth_tex_ = depth_tex_hdr_;
 }
 
-bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
+bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h,
+                              bool need_for_source) {
     bool any_reflector = false;
     for (const Object3DCommand& o : cmds.object3d) {
         if (o.ssr_reflector) {
@@ -2813,7 +2880,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
             }
         }
     }
-    if (!any_reflector) {
+    if (!any_reflector && !need_for_source) {
         // 本帧没有反射体（场景 0/2，或用户刚把镜面地板关掉）：**整条 SSR 链路必须一起
         // 跳过**，不能只跳过这一趟。否则：
         //   · 首帧：ssr_attr_tex_ 还是 0 ⇒ SsrOpaqueReflection::Render 的

@@ -104,13 +104,23 @@ void WaterSkinV2Renderer::Init(ShaderManager* shader_mgr) {
     prog_above_debug_ = shader_mgr_->GetOrCreate(
         "water_skin_v2_above_debug",
         {water::kWaterSkinVs,
-         (above_fs + water::kWaterSkinV2DebugGlsl + water::kWaterSkinV2AboveDebugMainGlsl)
+         (above_fs + water::kWaterSkinV2DebugGlsl + water::kWaterSkinV2SsrDebugGlsl +
+          water::kWaterSkinV2AboveDebugMainGlsl)
              .c_str()});
     prog_below_debug_ = shader_mgr_->GetOrCreate(
         "water_skin_v2_below_debug",
         {water::kWaterSkinVs,
          (below_fs + water::kWaterSkinV2DebugGlsl + water::kWaterSkinV2BelowDebugMainGlsl)
              .c_str()});
+    // SSR 的 query 趟（2026-11-27）：只拼接求交/法线所需的片段（无 GGX / 无探针 / 无介质），
+    // 所以它与水上/水下的着色 program 是**两份互不影响的编译单元**。
+    std::string query_fs = "#version 330 core\n";
+    query_fs += water::kWaterInterfaceUniformsGlsl;
+    query_fs += water::kWaterWaveGlsl;
+    query_fs += water::kWaterSkinV2CommonGlsl;
+    query_fs += water::kWaterSkinV2QueryGlsl;
+    prog_query_ = shader_mgr_->GetOrCreate("water_skin_v2_ssr_query",
+                                          {water::kWaterSkinVs, query_fs.c_str()});
     glGenVertexArrays(1, &vao_);
     CHECK_NE(vao_, 0u) << "WaterSkinV2Renderer::Init: glGenVertexArrays 失败";
     initialized_ = true;
@@ -127,11 +137,13 @@ unsigned int WaterSkinV2Renderer::SelectProgram(const Inputs& in) const {
 
 void WaterSkinV2Renderer::Finalize() {
     wbo_.Destroy();
+    DestroyQueryTarget();
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
     // 4 个 program 由 ShaderManager 拥有（它在自己的析构里 glDeleteProgram），这里只抹掉句柄。
+    prog_query_ = 0;
     prog_above_ = 0;
     prog_below_ = 0;
     prog_above_debug_ = 0;
@@ -299,6 +311,145 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
     water::UploadWaterWaveUniforms(*shader_mgr_, prog, in.waves, wp);
 }
 
+void WaterSkinV2Renderer::DestroyQueryTarget() {
+    query_ = WaterSsrQueryTextures{};
+    if (query_fbo_ != 0) {
+        glDeleteFramebuffers(1, &query_fbo_);
+        query_fbo_ = 0;
+    }
+}
+
+void WaterSkinV2Renderer::EnsureQueryTarget(int w, int h) {
+    if (query_fbo_ != 0 && query_.width == w && query_.height == h) {
+        return;
+    }
+    DestroyQueryTarget();
+
+    // 三张全分辨率纹理：窗口深度（R32F，装置按 1/z 用）、视空间法线、rough。
+    glGenTextures(1, &query_.depth_tex);
+    glBindTexture(GL_TEXTURE_2D, query_.depth_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    const auto make_half = [&](unsigned int* out) {
+        glGenTextures(1, out);
+        glBindTexture(GL_TEXTURE_2D, *out);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    };
+    make_half(&query_.normal_tex);
+    make_half(&query_.rough_tex);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &query_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, query_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           query_.depth_tex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
+                           query_.normal_tex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+                           query_.rough_tex, 0);
+    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                            GL_COLOR_ATTACHMENT2};
+    glDrawBuffers(3, bufs);
+    CHECK_EQ(static_cast<int>(glCheckFramebufferStatus(GL_FRAMEBUFFER)),
+             static_cast<int>(GL_FRAMEBUFFER_COMPLETE))
+        << "WaterSkinV2Renderer: SSR query FBO 不完整";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    query_.width = w;
+    query_.height = h;
+}
+
+void WaterSkinV2Renderer::DrawQuery(const Inputs& in, const WaterSsrQueryTuning& tuning) {
+    CHECK(initialized_) << "WaterSkinV2Renderer::DrawQuery: 未 Init";
+    CHECK_GT(in.full_w, 0);
+    CHECK_GT(in.full_h, 0);
+    CHECK_EQ(in.full_w, wbo_.width()) << "DrawQuery: 与 Begin 的宽度不一致";
+    CHECK_EQ(in.full_h, wbo_.height()) << "DrawQuery: 与 Begin 的高度不一致";
+    CHECK_NE(in.scene_depth_tex, 0u) << "DrawQuery: scene_depth_tex 不能为 0";
+    CHECK(in.waves == nullptr || in.waves->v2)
+        << "DrawQuery: Query 的几何口径必须与着色趟一致（waves.v2 == true）";
+    CHECK(tuning.resolution_scale > 0.0f);
+    CHECK(tuning.roughness_to_lod > 0.0f);
+    CHECK(tuning.rough_max > 0.0f && tuning.rough_max <= 1.0f);
+
+    EnsureQueryTarget(in.full_w, in.full_h);
+
+    // 保存本趟会动到的状态（调用方后续还要接着画水皮/合成）。
+    GLint prev_fbo = 0;
+    GLint prev_viewport[4] = {0, 0, 0, 0};
+    GLint prev_program = 0;
+    const GLint prev_depth_test = glIsEnabled(GL_DEPTH_TEST);
+    const GLint prev_blend = glIsEnabled(GL_BLEND);
+    const GLint prev_cull = glIsEnabled(GL_CULL_FACE);
+    GLint prev_depth_mask = GL_TRUE;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, prev_viewport);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_program);
+    glGetIntegerv(GL_DEPTH_WRITEMASK, &prev_depth_mask);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, query_fbo_);
+    glViewport(0, 0, in.full_w, in.full_h);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);
+
+    glUseProgram(prog_query_);
+    // 与着色趟共用同一份 uniform 上传（相机 / 波浪谱 / 介质 / 太阳 / 深度容差）。
+    // 传 sample_count = 1：query 只要中心法线（S 不影响几何，也不进这一趟的成本）。
+    UploadCommonUniforms(prog_query_, in, /*sample_count=*/1, /*csm=*/nullptr);
+    glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrResolutionScale"),
+                tuning.resolution_scale);
+    glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrRoughnessToLod"),
+                tuning.roughness_to_lod);
+    glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrRoughMax"), tuning.rough_max);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, in.scene_depth_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_query_, "uSceneDepth"), 0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, in.wave_flow_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_query_, "uWaveFlowMap"), 2);
+    glActiveTexture(GL_TEXTURE0);
+
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+
+    glUseProgram(0);
+
+    // 恢复调用方的状态（本趟没有用 WBO 的 BindForDraw/EndDraw 对，
+    // 也就不碰它的混合方程 —— 只改 GL 开关，全部在这里还原）。
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<unsigned int>(prev_fbo));
+    glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+    glUseProgram(static_cast<unsigned int>(prev_program));
+    glDepthMask(prev_depth_mask);
+    if (prev_depth_test != 0) {
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
+    if (prev_blend != 0) {
+        glEnable(GL_BLEND);
+    } else {
+        glDisable(GL_BLEND);
+    }
+    if (prev_cull != 0) {
+        glEnable(GL_CULL_FACE);
+    } else {
+        glDisable(GL_CULL_FACE);
+    }
+    glActiveTexture(GL_TEXTURE0);
+}
+
 void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count,
                                const WaterCsmShadow* csm) {
     CHECK(initialized_) << "WaterSkinV2Renderer::Draw: 未 Init";
@@ -337,6 +488,13 @@ void WaterSkinV2Renderer::Draw(const Inputs& in, int sample_count,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, in.wave_flow_tex);
     glUniform1i(shader_mgr_->GetUniform(prog, "uWaveFlowMap"), 2);
+    // SSR 反射图（可选）：纹理单元 3。0 = 关（uSsrOn=0 ⇒ 着色器不采样、逐字节等于旧行为）。
+    // 只有水上 program 声明这两个 uniform；水下/调试 program 上 glUniform(-1) 是 no-op。
+    const bool ssr_on = (in.ssr_reflection_tex != 0u);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSsrOn"), ssr_on ? 1 : 0);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, in.ssr_reflection_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSsrReflection"), 3);
     glActiveTexture(GL_TEXTURE0);
 
     glBindVertexArray(vao_);

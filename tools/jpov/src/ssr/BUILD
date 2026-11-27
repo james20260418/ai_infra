@@ -171,6 +171,20 @@ cc_library(
 )
 
 # 不透明场景的接入层（胶水）：属性 pass 的 program + 装置 + 合成。
+# SsrConfig（应用层）→ SsrParams（装置）的唯一一份映射。
+# 两个消费端（实心场景 / 水皮）各持独立的 SsrConfig 实例，但映射只有这一处。
+cc_library(
+    name = "ssr_params",
+    hdrs = ["ssr_params.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ssr_chain",
+        "//tools/jpov/interface:render_command",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 cc_library(
     name = "ssr_opaque_reflection",
     srcs = ["ssr_opaque_reflection.cc"],
@@ -179,6 +193,7 @@ cc_library(
     deps = [
         ":ssr_chain",
         ":ssr_composite",
+        ":ssr_params",
         ":ssr_shader",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/src:shader_manager",

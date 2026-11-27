@@ -71,6 +71,8 @@ echo ""
 echo "==> 4. 拷贝模型资源到 output/jpov_skylight_viewer/models/"
 mkdir -p "$OUTPUT_DIR/models"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/scene/scene_assets/table.glb"              "$OUTPUT_DIR/models/"
+# 远景荷兰帆船（Tripo 生成，20k 三角；场景 4「海面选型场」的反射源，2026-11-27）
+cp -v "$PROJECT_DIR/tools/jpov/assets/models/scene/scene_assets/dutch_ship.glb"         "$OUTPUT_DIR/models/"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/characters/mixamo_male.glb"         "$OUTPUT_DIR/models/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"

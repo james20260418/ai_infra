@@ -387,6 +387,15 @@ inline constexpr const char* kWaterSkinV2AboveGlsl = R"glsl(
 uniform float uEnvScale;       // 天光反射消费量 [0,1]（= EnvSpecular::sky_scale）
 uniform samplerCube uEnvCube;  // 天光探针（大气色，不含日月盘）
 
+// ── SSR（水皮镜面项的"替换估计器"，2026-11-27）──
+// 全分辨率 RGBA32F：rgb = 命中辐亮度 L（纯辐亮度，未乘 F/未加雾），a = 覆盖率 A。
+// 语义（逐样本，因为 F 逐样本）：refl_i = mix(env_i, L, A)。
+//   A = 0 ⇒ 逐字节等于纯探针（旧行为）；A = 1 ⇒ 纯 SSR。
+// ⚠️ 必须先判 A > 0 再 mix：A = 0 的像素 rgb 无意义（升采样残留可能是 NaN/Inf），
+//    乘 0 会把 env 一起污染成 NaN。
+uniform sampler2D uSsrReflection;
+uniform int uSsrOn;
+
 // 粗糙界面的**反射方向反照率**（角度平均菲涅尔）：与 V1 / water_optics.h 同源。
 // ⚠️ 输入是**斜率方差 σ²**（不是 a2）：a2 = 2σ²（GGX 自身方差 = α²/2）。
 float RoughFresnelAlbedo(float cos_i, float slope_var, float ior) {
@@ -551,6 +560,12 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float n = SkinV2Hash12(gl_FragCoord.xy);
         sparkle = 1.0 + amp * (2.0 * n - 1.0);
     }
+    // SSR：逐像素取一次（装置给的是**屏幕空间**反射图，与样本无关）。
+    // 循环外取 → S 个样本共用同一份 L，只把各自的 env_i 按同一个 A 混过去。
+    vec4 ssr_refl = vec4(0.0);
+    if (uSsrOn != 0) {
+        ssr_refl = texelFetch(uSsrReflection, ivec2(gl_FragCoord.xy), 0);
+    }
     int S = SkinV2SampleCount();
     vec3 sum_c = vec3(0.0);
     float sum_a = 0.0;
@@ -564,6 +579,10 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float F = RoughFresnelAlbedo(cos_i, sigma2, uWaterIor);
         vec3 refl = textureLod(uEnvCube, ClampReflectionAboveHorizon(reflect(g.rd, g.N)),
                               env_lod).rgb * uEnvScale;
+        // SSR 替换（不叠加）：A 是装置给的覆盖率，A = 0 的行**逐字节**退回探针。
+        if (uSsrOn != 0 && ssr_refl.a > 0.0) {
+            refl = mix(refl, ssr_refl.rgb, ssr_refl.a);
+        }
         // 半向量随 rd 变（将来接子像素射线时每个样本一条）⇒ 逐样本算，别提到循环外。
         vec3 H = uSunToward - g.rd;
         float hlen = length(H);
@@ -585,6 +604,75 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
     // 透射率对样本是线性的 ⇒ alpha 平均是**正确的**（1 − mean(T_i) = mean(α_i)）。
     o.alpha = sum_a / float(S);
     o.env_lod_debug = env_lod;
+}
+)glsl";
+
+// ─────────────────── 水皮 SSR 的 Query 准备趟（2026-11-27）───────────────────
+//
+// 只做几何：不采探针、不采 CSM、不算太阳 —— 纯粹给 SSR 装置产三张 Query 纹理。
+// 输出（全分辨率三附件）：
+//   0 R32F    ：水面窗口深度（与 gl_FragCoord.z 同口径；1.0 = 这一像素不查询）
+//   1 RGBA16F ：**视空间**中心法线（与属性纹理同一套约定），a = 1 表示有水面
+//   2 RGBA16F ：.a = roughness（装置的模糊量 + 发射线截止）
+//
+// 为什么要单开一趟：装置必须在**着色之前**读到 Query（水面位置/法线），而水皮是解析
+// 求交、没有 G-buffer；它自己 WBO 里那条深度是着色之后才有的，时序上用不了。
+// 成本口径：一次求交 + 一次法线求值，**不跑 S 个样本、不算着色**（大约水皮 pass 的 1/3）。
+inline constexpr const char* kWaterSkinV2QueryGlsl = R"glsl(
+layout(location = 0) out vec4 oQueryDepth;    // R32F
+layout(location = 1) out vec4 oQueryNormal;   // RGBA16F（视空间法线 + 有数据掩码）
+layout(location = 2) out vec4 oQueryRough;    // RGBA16F（只读 .a）
+
+uniform float uSsrResolutionScale;   // 1/N（与装置同值）
+uniform float uSsrRoughnessToLod;    // SsrConfig::roughness_to_lod（SSR 像素 → mip 级）
+uniform float uSsrRoughMax;          // rough 上限（0.35 ≈ 环境探针的 LOD cap）
+
+void main() {
+    // 默认 = 不查询（深度 1 / 无数据 / 粗糙度 0）：装置只认 a ≥ 0.25 的像素。
+    oQueryDepth = vec4(1.0, 0.0, 0.0, 0.0);
+    oQueryNormal = vec4(0.0, 0.0, 1.0, 0.0);
+    oQueryRough = vec4(0.0, 0.0, 0.0, 0.0);
+
+    WaterSurfaceV2 s;
+    ResolveSurfaceV2(s);   // 永不 discard ⇒ 导数在这里已经求完（本 pass 之后才有分支出口）
+    if (!s.hit || !s.wave_ok) {
+        return;            // 水面之外（地平线以上）：这一像素不查询
+    }
+
+    // 深度拒绝：与 RejectOccludedV2 **同一口径**（这里不 discard，只标成"不查询"）。
+    float scene_ndc = texture(uSceneDepth, gl_FragCoord.xy / uViewport).r;
+    float view_z = s.t_plane * dot(s.rd, uCamFwd);
+    if (scene_ndc < kBackgroundDepth) {
+        if (s.horizon_clamped) {
+            return;        // 天际线钳位行：任何不透明几何都挡在它前面
+        }
+        float scene_z = LinearizeDepthNdc(scene_ndc, uNear, uFar);
+        if (view_z > scene_z + uDepthBiasM) {
+            return;        // 不透明场景挡在水面前（立柱/船体）：这一格没有水面
+        }
+    }
+
+    // ① 窗口深度：与 MRT#1 同口径（1/z 线性映射；装置自己再换回 1/z）。
+    //    用波浪求交的 s.t（真交点），不是平面交点的 s.t_plane。
+    float z_eye = max(s.t * dot(s.rd, uCamFwd), uNear);
+    float ndc_z = (uFar + uNear - 2.0 * uFar * uNear / z_eye) / (uFar - uNear);
+    oQueryDepth = vec4(clamp(0.5 * ndc_z + 0.5, 0.0, 1.0), 0.0, 0.0, 0.0);
+
+    // ② 视空间中心法线：行 = side / up / −fwd，与属性 pass 的 uWorldToView 完全同源
+    //    （Render 侧用的是同一个 BuildLookAt；uCamRight/uCamUp/uCamFwd 就是那三行）。
+    oQueryNormal = vec4(dot(s.N, uCamRight), dot(s.N, uCamUp), -dot(s.N, uCamFwd), 1.0);
+
+    // ③ rough：把"像素内法线方差"换算成装置的 mip 级。
+    //    与 env 侧同源（同一份 σ = √normal_var_px）：反射方向的抖动 2σ（镜面放大 2×）
+    //    → 屏幕像素 → SSR 像素 → mip 级（1 级 = 2 个 SSR 像素的方框平均）。
+    //    上限 0.35 是刻意的：再高就已经等价于"交给探针"，而探针那条路已经更准。
+    float pixel_angle = 2.0 * uTanHalfFov / uViewport.y;
+    float refl_sigma = sqrt(max(s.normal_var_px, 0.0));
+    float blur_screen_px = 2.0 * refl_sigma / max(pixel_angle, 1.0e-6);
+    float blur_ssr_px = blur_screen_px / max(uSsrResolutionScale, 1.0e-6);
+    float lod = log2(max(blur_ssr_px, 1.0));
+    oQueryRough = vec4(0.0, 0.0, 0.0,
+                       clamp(lod / max(uSsrRoughnessToLod, 1.0e-6), 0.0, uSsrRoughMax));
 }
 )glsl";
 
@@ -735,6 +823,23 @@ void main() {
 }
 )glsl";
 
+// SSR 的两个调试档（20 = 覆盖率 A，21 = 命中辐亮度 L）。**只拼进水上调试 program**
+// （水下/生产的 program 里没有 uSsrReflection，拼进去会编译失败）。
+// 用途：判"SSR 到底有没有在这片水面生效" —— A 全黑 = 射线没发出/没命中/被淡出吃光。
+inline constexpr const char* kWaterSkinV2SsrDebugGlsl = R"glsl(
+bool EmitSsrDebugV2(int mode) {
+    if (mode != 20 && mode != 21) {
+        return false;
+    }
+    vec4 ssr = texelFetch(uSsrReflection, ivec2(gl_FragCoord.xy), 0);
+    vec3 c = (mode == 20) ? vec3(ssr.a) : ssr.rgb;
+    oAccum = vec4(c, 1.0);
+    oReveal = 1.0;
+    oDepth = 1.0;
+    return true;
+}
+)glsl";
+
 inline constexpr const char* kWaterSkinV2AboveDebugMainGlsl = R"glsl(
 void main() {
     WaterSurfaceV2 s;
@@ -742,7 +847,9 @@ void main() {
     RejectOccludedV2(s, uWaveDebug == 3);
     WaterShadeV2 o;
     ShadeAboveV2(s, o);
-    EmitDebugV2(s, o, uWaveDebug);
+    if (!EmitSsrDebugV2(uWaveDebug)) {
+        EmitDebugV2(s, o, uWaveDebug);
+    }
 }
 )glsl";
 

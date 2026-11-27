@@ -382,6 +382,8 @@ cc_library(
         ":sky_renderer",
         ":env_specular",
         "//tools/jpov/src/ssr:ssr_opaque_reflection",
+        "//tools/jpov/src/ssr:ssr_chain",        # 水皮自己的 SSR 装置实例
+        "//tools/jpov/src/ssr:ssr_params",       # SsrConfig → SsrParams（唯一一份）
         "//tools/jpov/src/fog:fog_composite_renderer",
         "//tools/jpov/src/fog:fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",

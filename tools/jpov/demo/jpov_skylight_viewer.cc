@@ -128,6 +128,43 @@ void InstallModels(jpov_skylight::SkylightApp& app) {
                  /*up*/ {0, 1, 0}, /*front*/ {-1, 0, 0}, oak_scale);
 }
 
+// ── 远景荷兰帆船（场景 4「海面选型场」的水上反射源；2026-11-27）──
+//
+// 为什么需要它：选型场里露出水面的只有一根立柱，水面 SSR 的倒影没有可读形状，
+// 也就没法验收"倒影到底对不对"。帆船 = 远、剪影明确、正好落在掠射倒影带里。
+//
+// 资产：Tripo 生成的 20k 三角 fluyt（`models/dutch_ship.glb`，build 脚本拷到 exe 旁）。
+// 尺度按**桅顶高度**归一（资产原始尺寸未知，见 gen3d 的既定做法）；吃水用"包围盒最低点
+// 压到水位以下 kShipDraftM"表达 —— 模型没有水位线，这是纯摆放约定，不是几何裁剪。
+inline constexpr const char* kShipModelPath   = "models/dutch_ship.glb";
+inline constexpr float kShipMastHeightM = 24.0f;   // 龙骨 → 桅顶（fluyt 量级）
+inline constexpr float kShipDraftM      = 1.6f;    // 水面以下的船体深度
+inline constexpr float kShipX = -40.0f;            // 摆在默认机位视线的远端
+inline constexpr float kShipZ = -60.0f;
+// 船头朝向（模型局部 +Z 指向的世界方向）：斜对相机比纯侧影更有体积。
+inline constexpr float kShipFrontX = -0.55f;
+inline constexpr float kShipFrontZ =  0.835f;
+
+void InstallShip(jpov_skylight::SkylightApp& app) {
+    jpov::GltfObject ship = app.LoadGltf(kShipModelPath);
+    CHECK(!ship.empty()) << "LoadGltf failed: " << kShipModelPath
+                         << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
+    CHECK(ship.bounds_valid) << "帆船资产无包围盒，无法归一尺度: " << kShipModelPath;
+    const float h = ship.bounds_max[1] - ship.bounds_min[1];
+    CHECK_GT(h, 1.0e-6f) << "帆船资产 Y 向高度≈0: " << kShipModelPath;
+    const float scale = kShipMastHeightM / h;
+    const float level_y = app.water_cfg_.level_y;
+    const float min_y = ship.bounds_min[1];
+
+    app.ship_.obj = std::move(ship);
+    app.ship_.center = {kShipX, level_y - kShipDraftM - scale * min_y, kShipZ};
+    app.ship_.up = {0.0f, 1.0f, 0.0f};
+    app.ship_.front = {kShipFrontX, 0.0f, kShipFrontZ};
+    app.ship_.scale = scale;
+    LOG(INFO) << "dutch ship assembled: asset_h=" << h << " scale=" << scale
+              << " center_y=" << app.ship_.center.y();
+}
+
 // 蓝人（mixamo_male）：一份蒙皮 mesh + 一份骨架（单 identity pose = T-pose），
 // 每个方块顶面各摆一个实例 —— 三人共用同一份几何/骨架，只差摆放，**一次 instanced
 // draw call** 画完（见 SkylightApp::OneIteration）。
@@ -1227,6 +1264,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
     app.SetShowScene(true);
     app.Init();
     InstallScene(app);
+    InstallShip(app);   // 场景 4 的反射源（UI/无 UI 两种拍摄都要）
     if (show_ui) {
         InstallModels(app);
     }
@@ -1307,6 +1345,64 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
                   << " rms_slope=" << r.rms_slope;
     }
     LOG(INFO) << "ocean lab captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
+// 用法：jpov_skylight_viewer --capture-water-ssr <out_dir>
+//
+// 水皮 SSR 的 A/B 验收（2026-11-27）。同一机位、同一时刻，**只切** `water.ssr.enabled`：
+//   <shot>_ssr_on.png / <shot>_ssr_off.png
+// 判据：
+//   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
+//   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
+int RunCaptureWaterSsr(const std::string& out_dir) {
+    const float kPi = 3.14159265358979323846f;
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水皮 SSR A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowScene(true);
+    app.Init();
+    InstallScene(app);
+    InstallShip(app);
+    app.InstallTextMeasure();
+    app.SetOceanLab(true);
+    app.SetWaterWaveTime(/*wave_time_s=*/6.0f);   // 冻结时刻：差异只来自 SSR
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    struct Shot { const char* name; float phi_deg; float R; float theta_deg; };
+    const float theta_toward = app.deg_.sun_azim_deg - 180.0f;
+    const Shot kShots[4] = {
+        {"cam45_5m",   45.0f, 5.0f / std::sin(45.0f * kPi / 180.0f), theta_toward},
+        {"cam25_20m",  25.0f, 20.0f, theta_toward},
+        {"cam10_graze", 10.0f, 18.0f, theta_toward},
+        {"cam60_40m",  60.0f, 40.0f, theta_toward},
+    };
+    for (const Shot& s : kShots) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = s.phi_deg * kPi / 180.0f;
+        app.view_.theta = s.theta_deg * kPi / 180.0f;
+        app.view_.R = s.R;
+        app.SetWaterSsr(true);
+        app.RunOnce(input, winfo, (out_dir + "/" + s.name + "_ssr_on.png").c_str());
+        app.SetWaterSsr(false);
+        app.RunOnce(input, winfo, (out_dir + "/" + s.name + "_ssr_off.png").c_str());
+        LOG(INFO) << "capture: " << out_dir << "/" << s.name << "_{ssr_on,ssr_off}.png";
+    }
+    app.SetWaterSsr(true);
     app.Finalize();
     return 0;
 }
@@ -2356,6 +2452,7 @@ int main(int argc, char** argv) {
     std::string point_spec_out_dir;
     std::string camera_cross_out_dir;
     std::string sky_refract_out_dir;
+    std::string water_ssr_out_dir;   // --capture-water-ssr：水皮 SSR 的 A/B（场景 4）
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
@@ -2431,6 +2528,8 @@ int main(int argc, char** argv) {
             start_ocean_lab = true;
         } else if (std::strcmp(argv[i], "--capture-ocean-lab") == 0 && i + 1 < argc) {
             ocean_lab_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water-ssr") == 0 && i + 1 < argc) {
+            water_ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ocean-lab-ui") == 0 && i + 1 < argc) {
             ocean_lab_ui_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ocean-config") == 0 && i + 1 < argc) {
@@ -2445,6 +2544,9 @@ int main(int argc, char** argv) {
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!water_ssr_out_dir.empty()) {
+        return RunCaptureWaterSsr(water_ssr_out_dir);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
