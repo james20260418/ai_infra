@@ -120,6 +120,12 @@ struct Fixture {
     jpov::ShaderManager shader_mgr;
     unsigned int fbo = 0;
     unsigned int color_tex = 0;
+    // 本 fixture 的相机矩阵（默认恒等：层/雾用例不需要真实投影；
+    // 需要真实的 z_op 时由用例设成透视矩阵）。
+    float view_proj[16] = {1.0f, 0.0f, 0.0f, 0.0f,
+                           0.0f, 1.0f, 0.0f, 0.0f,
+                           0.0f, 0.0f, 1.0f, 0.0f,
+                           0.0f, 0.0f, 0.0f, 1.0f};
     std::vector<unsigned int> textures;   // 用例结束统一删
 
     // medium_glsl = 非空 ⇒ 换一份**合成用**的介质提供者（物理被换成可手算的解析式，
@@ -168,7 +174,8 @@ struct Fixture {
 
     // 清成背景色 → 跑一趟合成 → 读回左上角像素（整幅同色）。
     void Run(const jpov::TransparentLayerSet& layers, float out_rgba[4],
-             const jpov::water::WaterMediumSample* medium = nullptr) {
+             const jpov::water::WaterMediumSample* medium = nullptr,
+             unsigned int scene_depth_tex = 0, int read_x = 0, int read_y = 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, kWidth, kHeight);
         glDisable(GL_BLEND);
@@ -181,18 +188,14 @@ struct Fixture {
         cam.position = {0.0f, 0.0f, 0.0f};
         cam.near = 0.1f;
         cam.far = 1000.0f;
-        float view_proj[16] = {1.0f, 0.0f, 0.0f, 0.0f,
-                               0.0f, 1.0f, 0.0f, 0.0f,
-                               0.0f, 0.0f, 1.0f, 0.0f,
-                               0.0f, 0.0f, 0.0f, 1.0f};
         jpov::FogParams params;   // 无效雾场：只走层合成
         // uHasFog=0 ⇒ froxel 采样整条跳过，本用例只看层。
-        composite.Draw(jpov::FogField{}, /*scene_depth_tex=*/0, cam, view_proj, params,
-                       layers, medium);
+        composite.Draw(jpov::FogField{}, scene_depth_tex, cam, view_proj, params, layers,
+                       medium);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, px);
+        glReadPixels(read_x, read_y, 1, 1, GL_RGBA, GL_FLOAT, px);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         for (int i = 0; i < 4; ++i) {
             out_rgba[i] = px[i];
@@ -330,6 +333,90 @@ TEST(FogCompositeRendererTest, EachLayerIsAttenuatedAtItsOwnDepth) {
     EXPECT_NEAR(px[0], e1 * a_near * c_near[0], kTolerance);
     EXPECT_NEAR(px[1], e1 * a_near * c_near[1], kTolerance);
     EXPECT_NEAR(px[2], (1.0f - a_near) * e2 * a_far * c_far[2], kTolerance);
+}
+
+// ─────────── 覆盖率必须同时作用在「层」和「背景」两项上（2026-11-27）───────────
+//
+// 这是「条带变实心」那个 bug 的最小复现：合成结果是
+//     out = ΣL + dst·T，其中 L 含 α·C、T 含 (1−α)
+// 如果解析把覆盖率丢了（cov 恒 1 / 只有层没有背景项），半透明条带就会变成实心片。
+//
+// 与上一个用例的区别：这里给一个**有限的背景深度**（不透明几何在 10 m 处），
+// 于是 `T` 与 `L` 两项都能用常数手算 —— 只查一项的话「cov=1」这类错误会被
+// 「两项都错但比值对」蒙过去。
+//
+// 负向验证（开发时实跑）：把 ResolveLayer 的 cov 改成常数 1.0 ⇒ 本用例红。
+constexpr float kBgDepthM = 10.0f;
+
+// 标准 GL 透视（fov 很小 ⇒ 整个 32×16 视口的视线都≈平行于 −z，z_op ≈ 常数）。
+void MakeNarrowPerspective(float fov_deg, float aspect, float znear, float zfar,
+                           float out[16]) {
+    const float f = 1.0f / std::tan(fov_deg * 0.5f * 3.14159265358979323846f / 180.0f);
+    for (int i = 0; i < 16; ++i) {
+        out[i] = 0.0f;
+    }
+    out[0] = f / aspect;
+    out[5] = f;
+    out[10] = (zfar + znear) / (znear - zfar);
+    out[11] = -1.0f;
+    out[14] = 2.0f * zfar * znear / (znear - zfar);
+}
+
+// 与 fog_composite 的 ZView 同一口径：视空间 z（米）→ 窗口深度 [0,1]。
+float WindowDepthFor(float z_m, float znear, float zfar) {
+    const float ndc = ((zfar + znear) - 2.0f * znear * zfar / z_m) / (zfar - znear);
+    return ndc * 0.5f + 0.5f;
+}
+
+TEST(FogCompositeRendererTest, CoverageShapesBothLayerAndBackgroundTerms) {
+    Fixture f;
+    f.Setup(kLinearAbsorbMedium);
+    jpov::water::WaterMediumSample medium;
+
+    const float znear = 0.1f;
+    const float zfar = 1000.0f;
+    const float c[3] = {1.0f, 0.5f, 0.25f};
+    const float alpha = 0.4f;
+    const float z_layer = 4.0f;
+
+    // 背景深度：不透明几何在 kBgDepthM 处（整屏同值，视口很窄 ⇒ 逐像素 z_op≈常数）。
+    std::vector<float> depth(static_cast<size_t>(kWidth) * kHeight,
+                             WindowDepthFor(kBgDepthM, znear, zfar));
+    unsigned int depth_tex = 0;
+    glGenTextures(1, &depth_tex);
+    glBindTexture(GL_TEXTURE_2D, depth_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, kWidth, kHeight, 0, GL_RED, GL_FLOAT,
+                 depth.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // 真实透视：z_op 才等于「不透明几何在 10 m」而不是恒等矩阵下的 0.98 m。
+    MakeNarrowPerspective(/*fov_deg=*/10.0f,
+                          static_cast<float>(kWidth) / static_cast<float>(kHeight),
+                          znear, zfar, f.view_proj);
+
+    jpov::TransparentLayerSet set;
+    set.Add(f.Track(MakeLayer(c[0], c[1], c[2], alpha, z_layer)));
+
+    float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    f.Run(set, px, &medium, depth_tex, /*read_x=*/kWidth / 2, /*read_y=*/kHeight / 2);
+    glDeleteTextures(1, &depth_tex);
+
+    // out = dst·(1−α)·exp(−τ(z_op)) + α·C·exp(−τ(z_layer))，τ(z) = 0.1z
+    const float t_layer = std::exp(-0.1f * z_layer);
+    const float t_bg = std::exp(-0.1f * kBgDepthM);
+    for (int ch = 0; ch < 3; ++ch) {
+        const float expected =
+            alpha * c[ch] * t_layer + (1.0f - alpha) * Fixture::kBg[ch] * t_bg;
+        EXPECT_NEAR(px[ch], expected, kTolerance) << "channel " << ch;
+    }
+    // 非恒真断言：背景项必须真的在（cov=1 时它会整个消失），且不能整块被层盖住。
+    const float bg_term = (1.0f - alpha) * Fixture::kBg[1] * t_bg;
+    EXPECT_GT(px[1], alpha * c[1] * t_layer) << "背景项被吃掉了 ⇒ 覆盖率没有作用在 T 上";
+    EXPECT_GT(bg_term, 1.0e-3f);   // 自检：这条期望本身不能接近 0（否则断言恒真）
 }
 
 // 加法集：只有加法集的层（无覆盖集）也必须把光加进画面（α≡0 不遮挡背景）。

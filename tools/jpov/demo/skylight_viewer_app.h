@@ -458,12 +458,19 @@ public:
         sl.sun_intensity = lighting.sky.SunDirectionalIntensity();
         sl.injection = 0.35f;   // 1.0 会把条带打到饱和（255）⇒ 衰减看不出来
 
-        auto fill = [&](bool arc, float x0, float z0, float half_w, jpov::Strip16* out) {
+        // α 逐条带：两条带的验收角色不同 ——
+        //   直条带 α=1（实心）：只验「照明侧衰减」（颜色几乎全来自天光注入）；
+        //   拱形 α=0.35（半透明）：验**合成趟** —— 背景必须按 (1−α) 透上来，且条带自己的
+        //   颜色只吃「相机 → 条带」那一段介质衰减（不是背景那一段）。
+        //   2026-11-27：α=1 的实心条带在这两点上都看不出对错（以前它们看起来"半透明"
+        //   其实是条带被按背景深度衰减到接近 0，背景才是「透上来」的那个）。
+        auto fill = [&](bool arc, float x0, float z0, float half_w, float alpha,
+                        jpov::Strip16* out) {
             out->point_count = jpov::kStripSampleCount;
             // 点色压到近黑：条带的颜色几乎全部来自「天光注入」⇒ 水下衰减才看得出来
             //（白色点色会盖过注入项，条带就变成不受光照的发光片）。
             for (jpov::Color& c : out->point_color) {
-                c = {0.05f, 0.05f, 0.05f, 1.0f};
+                c = {0.05f, 0.05f, 0.05f, alpha};
             }
             for (int i = 0; i < jpov::kStripSampleCount; ++i) {
                 const float t = static_cast<float>(i) /
@@ -485,14 +492,14 @@ public:
         polyline.geometry = jpov::StripInterpolation::kPolyline;
         polyline.sky_light = sl;
         jpov::Strip16 straight;
-        fill(/*arc=*/false, -3.0f, 1.6f, 0.28f, &straight);
+        fill(/*arc=*/false, -3.0f, 1.6f, 0.28f, /*alpha=*/1.0f, &straight);
         polyline.strips.push_back(straight);
 
         jpov::TranslucentStrip16Batch smooth;
         smooth.geometry = jpov::StripInterpolation::kSmooth;
         smooth.sky_light = sl;
         jpov::Strip16 arch;
-        fill(/*arc=*/true, 2.9f, 1.6f, 0.28f, &arch);
+        fill(/*arc=*/true, 2.9f, 1.6f, 0.28f, /*alpha=*/0.35f, &arch);
         smooth.strips.push_back(arch);
 
         cmds->DrawStrip16Batch(std::move(polyline));
