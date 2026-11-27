@@ -83,15 +83,80 @@ cc_library(
     linkstatic = 1,
 )
 
-# SSR 融合：升采样 + 用 SSR 结果替换环境镜面项。
+# 同面并集柱体：SSR 分辨率的"每格 back"图（命中判据的厚度源之一）。
 cc_library(
-    name = "ssr_fusion",
-    srcs = ["ssr_fusion.cc"],
-    hdrs = ["ssr_fusion.h"],
+    name = "ssr_slab_back",
+    srcs = ["ssr_slab_back.cc"],
+    hdrs = ["ssr_slab_back.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":ssr_shader",
-        "//tools/jpov/interface:render_command",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 升采样：SSR 分辨率的 A 预乘 mip 链 → 全分辨率反射图（+ 背面 flag）。
+cc_library(
+    name = "ssr_upsample",
+    srcs = ["ssr_upsample.cc"],
+    hdrs = ["ssr_upsample.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ssr_shader",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# SSR 装置（util）：Source + Query → 全分辨率反射图。
+# 位置无关：只有这一个 target 是"任何消费者都可以直接用"的入口，
+# 它不认识 SsrConfig / 环境探针 / HDR 目标（那些属于消费者）。
+cc_library(
+    name = "ssr_chain",
+    srcs = ["ssr_chain.cc"],
+    hdrs = ["ssr_chain.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ssr_downsample",
+        ":ssr_filter",
+        ":ssr_renderer",
+        ":ssr_slab_back",
+        ":ssr_upsample",
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 不透明场景的消费端：用 SSR 结果替换环境镜面项（"实心→实心"的位置知识）。
+cc_library(
+    name = "ssr_composite",
+    srcs = ["ssr_composite.cc"],
+    hdrs = ["ssr_composite.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ssr_shader",
         "//tools/jpov/src:env_specular",
         "//tools/jpov/src:shader_manager",
         "@glog_static//:glog",
@@ -105,17 +170,15 @@ cc_library(
     linkstatic = 1,
 )
 
-# SSR 接入层（编排）：HDR 副本 → 降采样 → 模块 → 融合；属性 pass 的 program 也在这里。
+# 不透明场景的接入层（胶水）：属性 pass 的 program + 装置 + 合成。
 cc_library(
-    name = "ssr_integration",
-    srcs = ["ssr_integration.cc"],
-    hdrs = ["ssr_integration.h"],
+    name = "ssr_opaque_reflection",
+    srcs = ["ssr_opaque_reflection.cc"],
+    hdrs = ["ssr_opaque_reflection.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":ssr_downsample",
-        ":ssr_filter",
-        ":ssr_fusion",
-        ":ssr_renderer",
+        ":ssr_chain",
+        ":ssr_composite",
         ":ssr_shader",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/src:shader_manager",

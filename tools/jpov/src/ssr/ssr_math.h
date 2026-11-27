@@ -378,7 +378,7 @@ inline bool HitFacesRay(const Vec3& ray_dir, const Vec3& hit_normal) {
     return Dot(ray_dir, hit_normal) < 0.0f;
 }
 
-// ─────────── ⑥ 升采样的深度值域判据（composite；ssr_integration.cc 里同一份算式）───────────
+// ─────────── ⑥ 升采样的深度值域判据（ssr_upsample.cc 里同一份算式）───────────
 //
 // 场景：低分辨率 A/rgb 升到全分辨率时，要用「本像素的 1/z」与「低分格子的 1/z」比一次，
 // 拒绝跨表面（剪影）的邻格。**固定百分比的直接比较在掠射下必然误判**：

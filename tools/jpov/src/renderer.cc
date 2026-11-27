@@ -1332,7 +1332,7 @@ void Renderer::Init(
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
-    ssr_integration_.Init(&shader_mgr_);
+    ssr_opaque_reflection_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
     debug_overlay_renderer_.Init();
@@ -1884,7 +1884,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 ssi.env_sky_scale = env_scale;
                 ssi.env_enabled = env_on;
                 ssi.cfg = *cmds.ssr;
-                ssr_integration_.Render(ssi, fbo_hdr_);
+                ssr_opaque_reflection_.Render(ssi, fbo_hdr_);
                 // Render 内恢复了调用前的 FBO/viewport，但主 pass 后续假设"3D FBO 已绑"，
                 // 这里重新绑定一次（draw buffer 也恢复成 MRT 两附件）。
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
@@ -2770,7 +2770,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     if (!any_reflector) {
         // 本帧没有反射体（场景 0/2，或用户刚把镜面地板关掉）：**整条 SSR 链路必须一起
         // 跳过**，不能只跳过这一趟。否则：
-        //   · 首帧：ssr_attr_tex_ 还是 0 ⇒ SsrIntegration::Render 的
+        //   · 首帧：ssr_attr_tex_ 还是 0 ⇒ SsrOpaqueReflection::Render 的
         //     CHECK_NE(in.attr_tex, 0u) 直接 FATAL（开 SSR 切场景就崩）；
         //   · 非首帧：属性纹理是上一帧的残留 ⇒ 合成层按旧的反射体 mask 叠 SSR，
         //     把上一帧的倒影贴在别的地方。
@@ -2806,7 +2806,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     const float world_to_view[9] = {view[0], view[1], view[2], view[4], view[5],
                                     view[6], view[8], view[9], view[10]};
 
-    const unsigned int prog = ssr_integration_.attr_program();
+    const unsigned int prog = ssr_opaque_reflection_.attr_program();
     glUseProgram(prog);
     glUniformMatrix3fv(glGetUniformLocation(prog, "uWorldToView"), 1, GL_FALSE, world_to_view);
     // 2026-10-30 起本 pass 画**所有** object3d（不只反射体）：SSR 的命中面朝向判据需要
@@ -2816,7 +2816,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     // 镂空材质（alpha_mode == kMask）走**带 discard 的变体**：否则属性 pass 会在被主 pass
     // 丢掉的透明区域也写一遍法线（深度 LEQUAL 会放行更近的片元），把那片不存在的几何
     // 写进朝向判据的输入里（2026-11-01）。
-    const unsigned int prog_cutout = ssr_integration_.attr_cutout_program();
+    const unsigned int prog_cutout = ssr_opaque_reflection_.attr_cutout_program();
     // uniform location 只在 Init 后查一次就够（每帧每物体查一次 glGetUniformLocation
     // 是驱动里的字符串查找，物体多时很贵）。uWorldToView 每帧只变一次 ⇒ 两个 program 各传一次。
     const unsigned int attr_progs[2] = {prog, prog_cutout};
@@ -2866,7 +2866,7 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     // VS 复用蒙皮主 pass 的 kSkinnedVs（已输出 vWorldNormal），只换 FS ⇒ 法线来自**真实
     // 的曲面**，不再是"每件一套平面"。仍然只测不写深度 ⇒ 只写可见的那一层。
     if (!cmds.skinned_mesh.empty()) {
-        const unsigned int prog_sk = ssr_integration_.attr_skinned_program();
+        const unsigned int prog_sk = ssr_opaque_reflection_.attr_skinned_program();
         glUseProgram(prog_sk);
         glUniformMatrix3fv(glGetUniformLocation(prog_sk, "uWorldToView"), 1, GL_FALSE,
                            world_to_view);

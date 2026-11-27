@@ -21,6 +21,7 @@ cc_test(
     srcs = ["ssr_gpu_test.cc"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/ssr:ssr_chain",
         "//tools/jpov/src/ssr:ssr_math",
         "//tools/jpov/src/ssr:ssr_renderer",
         "@glog_static//:glog",

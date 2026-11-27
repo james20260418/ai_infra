@@ -33,6 +33,7 @@
 #include <gtest/gtest.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/src/ssr/ssr_chain.h"
 #include "tools/jpov/src/ssr/ssr_math.h"
 #include "tools/jpov/src/ssr/ssr_renderer.h"
 
@@ -307,9 +308,13 @@ struct Fixture {
         }
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
-        in.w_tex = w_tex;
-        in.normal_tex = normal_tex;
-        in.rough_tex = rough_tex;
+        in.source_w_tex = w_tex;
+        in.source_normal_tex = normal_tex;
+        in.query_rough_tex = rough_tex;
+        // 本文件测的是**算法**（单渲染器），源与查询用同一份屏幕数据：
+        // 实心→实心的真实调用方也是这么传的（见 ssr_opaque_reflection.cc）。
+        in.query_w_tex = w_tex;
+        in.query_normal_tex = normal_tex;
         in.slab_back_tex = slab_tex;
         in.roughness_cutoff = 1.0f;
         in.width = kWidth;
@@ -862,6 +867,193 @@ TEST(SsrGpu, BackfaceHitsFlaggedNotRejected) {
     EXPECT_GT(backface_hits_in_table, 0)
         << "这个场景没造出「背面命中」⇒ flag 通路没被覆盖";
     EXPECT_GT(facing_hits_in_wall, 0) << "朝向判据把墙的正面命中一起拒掉了（判太严）";
+}
+
+// ───────────────────── 装置整体（SsrChain）：Source / Query 分离 ─────────────────────
+//
+// 这是 2026-11-27 拆分 Source/Query 之后**新出现**的语义，前面那些用例抓不到：
+//   · SsrRenderer 级用例里源与查询永远是同一份数据；
+//   · gold 图同理（实心→实心）。
+// 三条断言，每条都能被"实现退化成同源（只读一侧）"打红：
+//   ① 只改**查询**法线 ⇒ 反射图必须变（射线方向来自查询侧）。
+//   ② 只改**查询**深度 ⇒ 反射图必须变（射线起点来自查询侧）。
+//   ③ 只改**源**法线（从朝向相机翻成背朝相机）⇒ 背面命中 flag 从 0 变成几乎全覆盖
+//      （命中面朝向判据读的是源侧，不是查询侧）。
+namespace {
+
+// 一张全屏的"墙"：均匀窗口深度 + 给定法线的 RGBA 纹理（a = 有法线数据）+ 格号颜色。
+struct ChainScene {
+    std::vector<float> depth;    // R32F 窗口深度
+    std::vector<float> normal;   // RGBA32F：rgb = 视空间法线，a = 1
+    std::vector<float> color;    // RGBA16F
+};
+
+ChainScene MakeChainScene(float distance_m, float nx, float ny, float nz) {
+    ChainScene sc;
+    const size_t n = static_cast<size_t>(kWidth) * kHeight;
+    sc.depth.assign(n, 0.0f);
+    sc.normal.assign(n * 4, 0.0f);
+    sc.color.assign(n * 4, 0.0f);
+    const float ndc = ((kFar + kNear) - 2.0f * kNear * kFar / distance_m) / (kFar - kNear);
+    const float depth = 0.5f * ndc + 0.5f;
+    for (size_t i = 0; i < n; ++i) {
+        sc.depth[i] = depth;
+        sc.normal[i * 4 + 0] = nx;
+        sc.normal[i * 4 + 1] = ny;
+        sc.normal[i * 4 + 2] = nz;
+        sc.normal[i * 4 + 3] = 1.0f;
+        sc.color[i * 4 + 0] = static_cast<float>((i % kWidth) + 1) / (kWidth + 1);
+        sc.color[i * 4 + 1] = static_cast<float>((i / kWidth) + 1) / (kHeight + 1);
+        sc.color[i * 4 + 2] = 0.25f;
+        sc.color[i * 4 + 3] = 1.0f;
+    }
+    return sc;
+}
+
+struct ChainRun {
+    std::vector<float> reflection;         // RGBA32F：rgb = 辐亮度，a = 覆盖率
+    std::vector<unsigned char> backface;   // R8UI：bit0
+};
+
+ChainRun RunChain(jpov::SsrChain* chain, const ChainScene& src, const ChainScene& qry,
+                  std::vector<unsigned int>* textures) {
+    const unsigned int color_tex =
+        UploadFloatTexture(src.color, kWidth, kHeight, GL_RGBA16F, GL_RGBA);
+    const unsigned int src_depth_tex =
+        UploadFloatTexture(src.depth, kWidth, kHeight, GL_R32F, GL_RED);
+    const unsigned int src_normal_tex =
+        UploadFloatTexture(src.normal, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
+    const unsigned int qry_depth_tex =
+        UploadFloatTexture(qry.depth, kWidth, kHeight, GL_R32F, GL_RED);
+    const unsigned int qry_normal_tex =
+        UploadFloatTexture(qry.normal, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
+    // 查询的 roughness 是**全分辨率 RGBA16F 的 .a**（与属性纹理附件 1 同构）。
+    // 本用例只测几何 ⇒ 全 0 + cutoff = 1（永不跳过）。
+    std::vector<float> rough(static_cast<size_t>(kWidth) * kHeight * 4, 0.0f);
+    const unsigned int rough_tex = UploadFloatTexture(rough, kWidth, kHeight, GL_RGBA16F, GL_RGBA);
+    textures->insert(textures->end(),
+                     {color_tex, src_depth_tex, src_normal_tex, qry_depth_tex, qry_normal_tex,
+                      rough_tex});
+
+    jpov::SsrSource s;
+    s.color_tex = color_tex;
+    s.depth_tex = src_depth_tex;
+    s.normal_tex = src_normal_tex;
+    s.width = kWidth;
+    s.height = kHeight;
+    jpov::SsrQuery q;
+    q.depth_tex = qry_depth_tex;
+    q.normal_tex = qry_normal_tex;
+    q.rough_tex = rough_tex;
+    jpov::SsrParams p;
+    p.near_plane = kNear;
+    p.far_plane = kFar;
+    p.tan_half_fov_y = kTanHalf;
+    p.aspect = kAspect;
+    p.resolution_scale = 0.5f;
+    p.thickness_pixels = 10.0f;
+    p.min_thickness_m = 1.0e-4f;
+    p.max_distance_m = 900.0f;
+    p.max_ray_pixels = 160;
+    p.tile_size = 2;
+    p.roughness_cutoff = 1.0f;
+    p.slab_min_thickness = 0.01f;
+    p.slab_gate_rel = 0.02f;
+    p.slab_gate_cos = 0.94f;
+    p.grazing_fade_start = 2.0f;
+    p.grazing_fade_end = 10.0f;
+    p.upsample_depth_tolerance = 0.02f;
+    p.upsample_hard_cut = 0.5f;
+    p.upsample_weight_floor = 1.0e-3f;
+    p.roughness_to_lod = 8.0f;
+    const jpov::SsrChainResult& r = chain->Render(s, q, p);
+    ChainRun out;
+    out.reflection = ReadTexFloat(r.reflection_tex, kWidth, kHeight, GL_RGBA);
+    out.backface = ReadTexUInt8(r.backface_tex, kWidth, kHeight);
+    return out;
+}
+
+int CountCovered(const std::vector<float>& reflection, float threshold) {
+    int count = 0;
+    for (size_t i = 0; i < reflection.size() / 4; ++i) {
+        if (reflection[i * 4 + 3] > threshold) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int CountDiffering(const std::vector<float>& a, const std::vector<float>& b) {
+    int count = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::fabs(a[i] - b[i]) > 1.0e-6f) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int CountBackface(const std::vector<unsigned char>& flags) {
+    int count = 0;
+    for (unsigned char v : flags) {
+        if ((v & 1u) != 0u) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+}  // namespace
+
+TEST(SsrChain, SourceAndQueryAreIndependentInputs) {
+    GlEnv::Get().Ensure();
+    jpov::ShaderManager mgr;
+    jpov::SsrChain chain;
+    chain.Init(&mgr);
+    std::vector<unsigned int> textures;
+
+    // 源与查询都是"20 m 处的一面墙"，但两者的**角色**完全不同：
+    //   源   —— 命中时我该看什么（颜色/深度）+ 命中面朝哪（法线）
+    //   查询 —— 我从哪里出发（深度）+ 往哪反（法线）
+    // 源法线取 (0,0,1)（正对相机）⇒ 所有命中都是正面命中，背面 flag 应为 0。
+    const ChainScene world = MakeChainScene(20.0f, 0.0f, 0.0f, 1.0f);
+    // 查询法线取"地板"（朝上偏相机）⇒ 反射方向朝屏幕上方飞。
+    const ChainScene qry_up = MakeChainScene(20.0f, 0.0f, 0.95f, 0.3122499f);
+    const ChainScene qry_down = MakeChainScene(20.0f, 0.0f, -0.95f, 0.3122499f);
+    const ChainScene qry_near = MakeChainScene(5.0f, 0.0f, 0.95f, 0.3122499f);
+
+    const ChainRun base = RunChain(&chain, world, qry_up, &textures);
+    const ChainRun turned = RunChain(&chain, world, qry_down, &textures);
+    const ChainRun near = RunChain(&chain, world, qry_near, &textures);
+
+    const int base_covered = CountCovered(base.reflection, 0.5f);
+    EXPECT_GT(base_covered, kWidth * kHeight / 4)
+        << "基线根本没有倒影 ⇒ 后续断言没有意义";
+
+    // ① 查询法线：只翻它，反射图必须变（射线方向 = 查询侧法线反射出来的）。
+    const int turned_diff = CountDiffering(base.reflection, turned.reflection);
+    EXPECT_GT(turned_diff, kWidth * kHeight / 4)
+        << "只翻**查询**法线后反射图几乎没变 ⇒ 射线方向没用查询侧的法线（差 "
+        << turned_diff << " 个 float）";
+    // ② 查询深度：只改它（20 m → 5 m），反射图必须变（射线起点 = 查询侧深度）。
+    const int near_diff = CountDiffering(base.reflection, near.reflection);
+    EXPECT_GT(near_diff, kWidth * kHeight / 4)
+        << "只改**查询**深度后反射图几乎没变 ⇒ 射线起点没用查询侧的深度（差 "
+        << near_diff << " 个 float）";
+    // ③ 源法线：翻成背朝相机 ⇒ 命中面朝向判据（读**源**侧法线）把命中全判成背面。
+    const ChainScene world_flipped = MakeChainScene(20.0f, 0.0f, 0.0f, -1.0f);
+    const ChainRun backfaced = RunChain(&chain, world_flipped, qry_up, &textures);
+    const int base_backface = CountBackface(base.backface);
+    const int flip_backface = CountBackface(backfaced.backface);
+    EXPECT_EQ(base_backface, 0) << "基线的源法线正对相机 ⇒ 不该出现背面命中";
+    EXPECT_GT(flip_backface, base_covered / 2)
+        << "把**源**法线翻成背朝相机后背面 flag 没起来 ⇒ 朝向判据没用源侧的法线"
+        << "（flip=" << flip_backface << " base_covered=" << base_covered << "）";
+
+    chain.Finalize();
+    for (unsigned int tex : textures) {
+        glDeleteTextures(1, &tex);
+    }
 }
 
 }  // namespace

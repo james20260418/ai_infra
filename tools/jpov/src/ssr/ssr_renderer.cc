@@ -39,16 +39,20 @@ namespace {
 // ⚠️ 两趟的槽位**必须分开编号**：写成"march 的 depth=0、resolve 的 slice=0"会让 resolve 的
 //    `glBindTexture(unit0, depth)` 把 slice 顶掉 ⇒ uSlice 采到深度值（≈0.95 < 哨兵）
 //    ⇒ **每个像素都被判成命中**。这一条是 CPU/GPU 对拍当场抓出来的（2026-10-29）。
-constexpr int kTexUnitMarchDepth = 0;
-constexpr int kTexUnitMarchNormal = 1;
-constexpr int kTexUnitMarchRough = 2;
-constexpr int kTexUnitMarchSlab = 3;
+constexpr int kTexUnitMarchSrcW = 0;
+constexpr int kTexUnitMarchQueryW = 1;
+constexpr int kTexUnitMarchSrcNormal = 2;
+constexpr int kTexUnitMarchQueryNormal = 3;
+constexpr int kTexUnitMarchQueryRough = 4;
+constexpr int kTexUnitMarchSlab = 5;
 constexpr int kTexUnitResolveSlice = 0;
-constexpr int kTexUnitResolveDepth = 1;
-constexpr int kTexUnitResolveNormal = 2;
-constexpr int kTexUnitResolveColor = 3;
-constexpr int kTexUnitResolveRough = 4;
-constexpr int kTexUnitSize = 6;
+constexpr int kTexUnitResolveSrcW = 1;
+constexpr int kTexUnitResolveQueryW = 2;
+constexpr int kTexUnitResolveSrcNormal = 3;
+constexpr int kTexUnitResolveQueryNormal = 4;
+constexpr int kTexUnitResolveColor = 5;
+constexpr int kTexUnitResolveRough = 6;
+constexpr int kTexUnitSize = 7;
 
 bool IsValidTile(int tile) {
     return tile == 1 || tile == 2 || tile == 4 || tile == 8;
@@ -225,12 +229,14 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     // ── Pre-condition（见头文件；不静默退化）──
     CHECK(initialized_) << "SsrRenderer::Render 前必须先 Init";
     CHECK_NE(in.color_tex, 0u) << "SsrInputs::color_tex 未设置";
-    CHECK_NE(in.w_tex, 0u) << "SsrInputs::w_tex 未设置（w = 1/z）";
+    CHECK_NE(in.source_w_tex, 0u) << "SsrInputs::source_w_tex 未设置（w = 1/z）";
     // 2026-11-13 起柱体是命中判据的一部分（三源取最厚）⇒ back 纹理是**必需输入**，
     // 不再"可选"。缺了会采到未绑定纹理 → 结果不可预期，所以这里直接炸。
     CHECK_NE(in.slab_back_tex, 0u) << "SsrInputs::slab_back_tex 未设置（同面并集柱体）";
-    CHECK_NE(in.normal_tex, 0u) << "SsrInputs::normal_tex 未设置";
-    CHECK_NE(in.rough_tex, 0u) << "SsrInputs::rough_tex 未设置（逐像素 roughness）";
+    CHECK_NE(in.source_normal_tex, 0u) << "SsrInputs::source_normal_tex 未设置";
+    CHECK_NE(in.query_w_tex, 0u) << "SsrInputs::query_w_tex 未设置（射线起点）";
+    CHECK_NE(in.query_normal_tex, 0u) << "SsrInputs::query_normal_tex 未设置（反射方向）";
+    CHECK_NE(in.query_rough_tex, 0u) << "SsrInputs::query_rough_tex 未设置（逐像素 roughness）";
     CHECK_GT(in.width, 0) << "SsrInputs::width 未设置";
     CHECK_GT(in.height, 0) << "SsrInputs::height 未设置";
     CHECK_GT(in.near_plane, 0.0f) << "SsrInputs::near_plane 未设置";
@@ -258,10 +264,24 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         << "color_tex 的宽度与 SsrInputs::width 不一致";
     CHECK_EQ(TextureHeight(in.color_tex), in.height)
         << "color_tex 的高度与 SsrInputs::height 不一致";
-    CHECK_EQ(TextureWidth(in.w_tex), in.width) << "w_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.w_tex), in.height) << "w_tex 的高度与 height 不一致";
-    CHECK_EQ(TextureWidth(in.normal_tex), in.width) << "normal_tex 的宽度与 width 不一致";
-    CHECK_EQ(TextureHeight(in.normal_tex), in.height) << "normal_tex 的高度与 height 不一致";
+    CHECK_EQ(TextureWidth(in.source_w_tex), in.width) << "source_w_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.source_w_tex), in.height) << "source_w_tex 的高度与 height 不一致";
+    CHECK_EQ(TextureWidth(in.source_normal_tex), in.width)
+        << "source_normal_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.source_normal_tex), in.height)
+        << "source_normal_tex 的高度与 height 不一致";
+    // 查询纹理必须与源**同尺寸**：屏幕参数化（σ、w 对屏幕仿射）只有在同一张屏幕网格上
+    // 才成立；尺寸不同会让射线落点与柱子坐标对不上（症状像"倒影整体平移"）。
+    CHECK_EQ(TextureWidth(in.query_w_tex), in.width) << "query_w_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.query_w_tex), in.height) << "query_w_tex 的高度与 height 不一致";
+    CHECK_EQ(TextureWidth(in.query_normal_tex), in.width)
+        << "query_normal_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.query_normal_tex), in.height)
+        << "query_normal_tex 的高度与 height 不一致";
+    CHECK_EQ(TextureWidth(in.query_rough_tex), in.width)
+        << "query_rough_tex 的宽度与 width 不一致";
+    CHECK_EQ(TextureHeight(in.query_rough_tex), in.height)
+        << "query_rough_tex 的高度与 height 不一致";
 
     // 纹理边长 / 显存预算（动态，不写死）。
     const long long slice_texels =
@@ -289,11 +309,17 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
                           in.tan_half_fov_y, in.height);
 
     // 皮肤检查（契约 6）：不许把本模块自己的输出再喂回来。
-    CHECK(in.color_tex != outputs_.radiance_tex && in.w_tex != outputs_.radiance_tex &&
-              in.normal_tex != outputs_.radiance_tex)
+    CHECK(in.color_tex != outputs_.radiance_tex && in.source_w_tex != outputs_.radiance_tex &&
+              in.source_normal_tex != outputs_.radiance_tex &&
+              in.query_w_tex != outputs_.radiance_tex &&
+              in.query_normal_tex != outputs_.radiance_tex &&
+              in.query_rough_tex != outputs_.radiance_tex)
         << "输入纹理是本模块自己的 radiance_tex（反馈环）";
-    CHECK(in.color_tex != outputs_.hit_s_tex && in.w_tex != outputs_.hit_s_tex &&
-              in.normal_tex != outputs_.hit_s_tex)
+    CHECK(in.color_tex != outputs_.hit_s_tex && in.source_w_tex != outputs_.hit_s_tex &&
+              in.source_normal_tex != outputs_.hit_s_tex &&
+              in.query_w_tex != outputs_.hit_s_tex &&
+              in.query_normal_tex != outputs_.hit_s_tex &&
+              in.query_rough_tex != outputs_.hit_s_tex)
         << "输入纹理是本模块自己的 hit_s_tex（反馈环）";
 
     // ── 保存调用方的 GL 状态（返回前原样恢复）──
@@ -369,18 +395,24 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         set1f(prog, "uRoughnessCutoff", in.roughness_cutoff);
     };
     upload_common(prog_march_);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchDepth);
-    glBindTexture(GL_TEXTURE_2D, in.w_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchNormal);
-    glBindTexture(GL_TEXTURE_2D, in.normal_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchRough);
-    glBindTexture(GL_TEXTURE_2D, in.rough_tex);
-    // 可选的同面并集柱体 back（2026-11-12）：off 时绑 0，着色器走老的 c·T 判据。
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchSrcW);
+    glBindTexture(GL_TEXTURE_2D, in.source_w_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchQueryW);
+    glBindTexture(GL_TEXTURE_2D, in.query_w_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchSrcNormal);
+    glBindTexture(GL_TEXTURE_2D, in.source_normal_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchQueryNormal);
+    glBindTexture(GL_TEXTURE_2D, in.query_normal_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitMarchQueryRough);
+    glBindTexture(GL_TEXTURE_2D, in.query_rough_tex);
+    // 同面并集柱体 back（2026-11-12）：总是由调用方准备好（2026-11-13 起是命中判据的一部分）。
     glActiveTexture(GL_TEXTURE0 + kTexUnitMarchSlab);
     glBindTexture(GL_TEXTURE_2D, in.slab_back_tex);
-    set1i(prog_march_, "uW", kTexUnitMarchDepth);
-    set1i(prog_march_, "uNormal", kTexUnitMarchNormal);
-    set1i(prog_march_, "uRough", kTexUnitMarchRough);
+    set1i(prog_march_, "uSrcW", kTexUnitMarchSrcW);
+    set1i(prog_march_, "uQueryW", kTexUnitMarchQueryW);
+    set1i(prog_march_, "uSrcNormal", kTexUnitMarchSrcNormal);
+    set1i(prog_march_, "uQueryNormal", kTexUnitMarchQueryNormal);
+    set1i(prog_march_, "uQueryRough", kTexUnitMarchQueryRough);
     set1i(prog_march_, "uSlabBack", kTexUnitMarchSlab);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -392,19 +424,25 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     upload_common(prog_resolve);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveSlice);
     glBindTexture(GL_TEXTURE_2D, slice_tex_);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveDepth);
-    glBindTexture(GL_TEXTURE_2D, in.w_tex);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveNormal);
-    glBindTexture(GL_TEXTURE_2D, in.normal_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveSrcW);
+    glBindTexture(GL_TEXTURE_2D, in.source_w_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveQueryW);
+    glBindTexture(GL_TEXTURE_2D, in.query_w_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveSrcNormal);
+    glBindTexture(GL_TEXTURE_2D, in.source_normal_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitResolveQueryNormal);
+    glBindTexture(GL_TEXTURE_2D, in.query_normal_tex);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveColor);
     glBindTexture(GL_TEXTURE_2D, in.color_tex);
-    set1i(prog_resolve, "uSlice", kTexUnitResolveSlice);
-    set1i(prog_resolve, "uW", kTexUnitResolveDepth);
-    set1i(prog_resolve, "uNormal", kTexUnitResolveNormal);
-    set1i(prog_resolve, "uColor", kTexUnitResolveColor);
     glActiveTexture(GL_TEXTURE0 + kTexUnitResolveRough);
-    glBindTexture(GL_TEXTURE_2D, in.rough_tex);
-    set1i(prog_resolve, "uRough", kTexUnitResolveRough);
+    glBindTexture(GL_TEXTURE_2D, in.query_rough_tex);
+    set1i(prog_resolve, "uSlice", kTexUnitResolveSlice);
+    set1i(prog_resolve, "uSrcW", kTexUnitResolveSrcW);
+    set1i(prog_resolve, "uQueryW", kTexUnitResolveQueryW);
+    set1i(prog_resolve, "uSrcNormal", kTexUnitResolveSrcNormal);
+    set1i(prog_resolve, "uQueryNormal", kTexUnitResolveQueryNormal);
+    set1i(prog_resolve, "uColor", kTexUnitResolveColor);
+    set1i(prog_resolve, "uQueryRough", kTexUnitResolveRough);
     // 掠射淡出（2026-11-13）：只改 resolve 输出的 A，march 不受影响。
     // 钳位到 [0, 64]：end <= start 由着色器解释为"关闭"（面板把它拖到很大即可）。
     const float gf0 = std::min(std::max(in.grazing_fade_start, 0.0f), 64.0f);
