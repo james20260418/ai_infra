@@ -980,9 +980,6 @@ public:
             const bool lab_water = ocean_lab || underwater;
             jpov::WaterCommand w;
             w.level_y = lab_water ? water_cfg_.level_y : water_level_y_;
-            // 水下照明衰减（照明侧）：只在本场景打开（其它场景默认 false ⇒ 零回归）。
-            w.attenuate_ambient = underwater && water_atten_ambient_;
-            w.attenuate_sun = underwater && water_atten_sun_;
             // 水面时钟：**唯一出处**（WaterWaves 里已经没有 time_s）。
             // 选型场走真实时钟（"动态的海"）；冻结时用滑条秒数（可复现对帧）。
             {
@@ -1009,6 +1006,12 @@ public:
             const bool sigma_nonzero =
                 sa.x() > 0.0f || sa.y() > 0.0f || sa.z() > 0.0f || ss > 0.0f;
             w.medium.enabled = water_medium_on_ && sigma_nonzero;
+            // 水下照明衰减（照明侧）：只在本场景打开（其它场景默认 false ⇒ 零回归）。
+            // ⚠️ 同样要 `&& sigma_nonzero`：Renderer 对「attenuate=true 但 σ 全 0」是 CHECK
+            //（它防的是 API 误用，UI 不该能触发）。面板把四个 σ 滑条全拖到 0 是合法操作 ——
+            // 不夹这一下就会 abort（2026-11-27 review 发现）。
+            w.attenuate_ambient = underwater && water_atten_ambient_ && sigma_nonzero;
+            w.attenuate_sun = underwater && water_atten_sun_ && sigma_nonzero;
             w.medium.sigma_a = sa;
             w.medium.sigma_s = {ss, ss, ss};
             w.medium.phase_g = lab_water ? water_cfg_.phase_g : water_phase_g_;

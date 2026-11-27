@@ -40,8 +40,10 @@ struct TransparentLayer {
     unsigned int depth_tex = 0;   // R32F
     // 加法集（Σ 预乘色，不遮挡背景）。0 = 本层没有加法集（水皮就是这种）。
     unsigned int additive_tex = 0;
-    // 解算分辨率 / 主视口分辨率（1、0.5、0.25 …）。合成时按归一化 uv 采样。
-    float scale = 1.0f;
+    // 没有 `scale` 字段：合成趟按**归一化 uv** 采样（`texture(tex, uv)`），
+    // 低分辨率层（粒子 1/2）的 LINEAR 上采样由纹理过滤本身完成 ⇒ 解算分辨率
+    // 不需要传给合成器。（曾经有过一个 `scale` 字段，四个生产者都写、没人读，
+    // 2026-11-27 review 删掉。）
 
     // 加法集可有可无，所以不能算进合法性判断：三件必需附件齐了就是合法层。
     bool valid() const {

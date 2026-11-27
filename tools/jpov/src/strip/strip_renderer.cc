@@ -937,7 +937,6 @@ TransparentLayer StripRenderer::layer() const {
     layer.depth_tex = wbo_.depth_tex();
     // 加法集附件按需申请：本帧没有 kEmissive 批时是 0（合成器按零哑元处理）。
     layer.additive_tex = target_with_additive_ ? wbo_.additive_tex() : 0;
-    layer.scale = 1.0f;
     return layer;
 }
 

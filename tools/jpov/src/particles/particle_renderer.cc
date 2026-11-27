@@ -227,7 +227,6 @@ TransparentLayer ParticleRenderer::layer() const {
     layer.reveal_tex = wbo_.reveal_tex();
     layer.depth_tex = wbo_.depth_tex();
     layer.additive_tex = wbo_.additive_tex();   // 恒有（粒子目标总是带加法集附件）
-    layer.scale = kScale;                       // 1/2 分辨率：合成器按归一化 uv 采样
     return layer;
 }
 

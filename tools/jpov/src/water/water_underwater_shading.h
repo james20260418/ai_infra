@@ -55,7 +55,8 @@ struct UnderwaterAttenuation {
 };
 
 // 从一帧的介质样本生成衰减参数。σt / K_d 在这里算一次（每帧一次，不进片元）。
-// Pre-condition: m.ior >= 0；σ 各分量 >= 0（Renderer 侧已 CHECK）。
+// Pre-condition: m.ior >= 1（Renderer 侧 CHECK_GE(ior,1)：水必须比空气密，
+//   否则 sin²θw ≥ 1 ⇒ 没有折射解 ⇒ 1/cosθw = inf 与 (1−R)=0 相乘得 NaN）；σ 各分量 >= 0。
 inline UnderwaterAttenuation BuildUnderwaterAttenuation(const WaterMediumSample& m,
                                                         bool attenuate_ambient,
                                                         bool attenuate_sun) {

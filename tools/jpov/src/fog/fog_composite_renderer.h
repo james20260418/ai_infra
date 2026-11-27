@@ -168,6 +168,12 @@ uniform int uWaterLayerIndex;
 // 所以交给主循环的 min(z, z_op) 钉到背景深度上是安全且一致的。
 const float kAdditiveOnlyDepthM = 1.0e30;
 
+// 覆盖集权重和的「等于 0」门槛。accum.a 是 RGBA16F：最小正**次正规** ≈ 5.96e-8，
+// 所以小于 1e-8 只可能是 0（或读回来的垃圾）—— 这一步实质就是判 0，同时把 0/x 挡在
+// 外面。写成 `!(x > kMinAccumAlpha)`，**NaN 也一起拦掉**（与 ZView 的守卫同一个理由：
+// NaN 一旦进 accum 就会顺着 L 污染整帧后处理链）。
+const float kMinAccumAlpha = 1.0e-8;
+
 // 解析第 i 个透明层 → 预乘色 c、层透射率 t、代表深度 z（沿视线的欧氏距离，米）。
 // 返回 false = 该像素上此层为空，不产生深度边界。
 bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
@@ -196,9 +202,10 @@ bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
         depth_sum = texture(uLayer3Depth, uv).r;
         add = texture(uLayer3Add, uv).rgb;
     }
-    if (accum.a <= 1e-8) {
+    if (!(accum.a > kMinAccumAlpha)) {
         // 没有覆盖集：只剩加法集时仍然是一层（只加光、不遮挡）。
-        if (max(max(add.r, add.g), add.b) <= 0.0) {
+        // 这里同样用 `!(x > 0)`：NaN 也得按「空层」处理，不能放它进 c。
+        if (!(max(max(add.r, add.g), add.b) > 0.0)) {
             c = vec3(0.0);
             t = 1.0;
             z = 0.0;

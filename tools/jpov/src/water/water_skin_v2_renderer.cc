@@ -357,7 +357,6 @@ TransparentLayer WaterSkinV2Renderer::layer() const {
     layer.accum_tex = wbo_.accum_tex();
     layer.reveal_tex = wbo_.reveal_tex();
     layer.depth_tex = wbo_.depth_tex();
-    layer.scale = 1.0f;
     return layer;
 }
 
