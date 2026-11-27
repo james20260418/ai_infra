@@ -26,6 +26,7 @@
 #include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/src/water/water_medium_shader.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/jpov/src/transparent_layer.h"   // TransparentLayerSet（粒子/条带/水皮三条透明 pass 共用）
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
 #include "tools/common/utils.h"
 
@@ -1951,12 +1952,23 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
             const bool run_fog = !cmds.point_fogs.empty();
-            // 合成趟的触发条件：有雾场 **或** 有水体（层必须有人消费，否则水皮白画）。
-            const bool run_medium_composite = run_fog || water_skin_on || water_medium_on;
+            const bool has_strip_batches =
+                !cmds.translucent_strip4s.empty() || !cmds.translucent_strip8s.empty() ||
+                !cmds.translucent_strips.empty() || !cmds.translucent_strip32s.empty();
+            // 合成趟的触发条件：有雾场 / 有水体 / **有透明层**（层必须有人消费 ——
+            // 否则 WBO 白画，条带/粒子会整块消失）。三条透明 pass（粒子 / 条带 / 水皮）
+            // 全部走这一个合成器，口径统一（2026-11-27 Danis 定）。
+            const bool run_medium_composite = run_fog || water_skin_on || water_medium_on ||
+                                              !cmds.particles.empty() || has_strip_batches;
+
+            // ── 透明层集合：粒子 / 条带 / 水皮三家共用（合成器按代表深度排序）──
+            //    为什么不各自 Composite 进 HDR：那样它们会变成「背景」，介质/雾只能按
+            //    **不透明几何**的深度衰减它们 —— 开阔水体里 z_op→∞ ⇒ T→0 ⇒ 整条被擦掉。
+            TransparentLayerSet layers;
 
             // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
-            //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
-            //    随后雾体按既有路径在 HDR 上继续（粒子会一起被雾影响）。
+            //    只画进 1/2 WBO FBO（accum/reveal/additive/depth），把结果作为一个透明层
+            //    交给下面的合成趟 —— 由它按粒子的代表深度与雾/介质交替积分。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
@@ -1964,12 +1976,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                     particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
                                             hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
                 }
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                const GLenum pdraw[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, pdraw);
-                particle_renderer_.Composite(fbo_3d_w, fbo_3d_h);
-                const GLenum mrt_bufs_p[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                glDrawBuffers(2, mrt_bufs_p);
+                layers.Add(particle_renderer_.layer());
             }
 
             // ── 体积火（逐像素 raymarch）—— 与粒子同套 WBO；结果作为薄层 over 合成进 HDR。──
@@ -1988,11 +1995,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(2, mrt_bufs_v);
             }
 
-            // ── 半透明条带（1× WBO 覆盖集）—— 层序：粒子 → 体积火 → **条带** → 远景雾。
+            // ── 半透明条带（1× WBO 覆盖集 + 可选加法集）—— 同样只解算、交给合成趟。
             //    与体积火不共 FBO：火权重恒 1、条带用 WeightWbo，混一个 accum 会被权重尺度偏置。
-            const bool has_strip_batches =
-                !cmds.translucent_strip4s.empty() || !cmds.translucent_strip8s.empty() ||
-                !cmds.translucent_strips.empty() || !cmds.translucent_strip32s.empty();
             if (has_strip_batches) {
                 CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
                 // 加法集附件按需申请：本帧有 kEmissive 批才建 att2。
@@ -2035,13 +2039,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                     strip_renderer_.Draw32(sc, texture_mgr_, cmds.camera, mvp_,
                                            hdr_scene_depth_tex, csm_ptr, fbo_3d_w, fbo_3d_h);
                 }
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                // 只写颜色附件：MRT#1（场景深度）本 pass 不碰，不摘会与采样形成反馈环。
-                const GLenum sdraw[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, sdraw);
-                strip_renderer_.Composite(fbo_3d_w, fbo_3d_h);
-                const GLenum mrt_bufs_s[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                glDrawBuffers(2, mrt_bufs_s);
+                layers.Add(strip_renderer_.layer());
             }
 
             // ── 点状雾火（froxel 体积雾）+ 水体介质 —— 同一次全屏合成趟。──
@@ -2051,7 +2049,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             // ── 水皮（界面层）—— 只画进自持 WBO，**不合成**。──
             //    合成由下面的介质合成趟做（段 ↔ 层交替）：这样「相机 → 水面」那段水体的注入
             //    不会被层盖掉（环外 α=1 时尤其明显）。
-            TransparentLayerSet layers;
             // 水皮层在集合里的下标（-1 = 没有）。只有**相机在水上**时才把它标成水体层：
             // 约定「水皮一定包住水体」只在水上成立（水下时水皮在相机头顶，前缀不是空的）。
             int water_layer_index = -1;

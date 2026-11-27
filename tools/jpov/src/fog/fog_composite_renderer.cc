@@ -29,17 +29,17 @@ namespace {
 // composite 的纹理单元分配（固定顺序，避免各调用点各记一套）。
 constexpr GLint kScatterUnit = 0;
 constexpr GLint kSceneDepthUnit = 1;
-constexpr GLint kLayerUnitBase = 2;   // 每个层占 3 个连续单元（accum/reveal/depth）
+constexpr GLint kLayerUnitBase = 2;   // 每个层占 4 个连续单元（accum/reveal/depth/additive）
 // 本趟触碰的单元总数：雾散射 + 场景深度 + 4 个层槽（空槽也绑哑元，
 // 否则采样器默认指向 unit 0，会把雾散射纹理当成层累积读）。
-constexpr int kUnitsTouched = kLayerUnitBase + kMaxTransparentLayers * 3;
+constexpr int kUnitsTouched = kLayerUnitBase + kMaxTransparentLayers * 4;
 
-// 每个层槽的 3 个采样器 uniform 名（GLSL 330 不能动态索引采样器，故按槽展开）。
-constexpr const char* kLayerSlotUniforms[kMaxTransparentLayers][3] = {
-    {"uLayer0Accum", "uLayer0Reveal", "uLayer0Depth"},
-    {"uLayer1Accum", "uLayer1Reveal", "uLayer1Depth"},
-    {"uLayer2Accum", "uLayer2Reveal", "uLayer2Depth"},
-    {"uLayer3Accum", "uLayer3Reveal", "uLayer3Depth"},
+// 每个层槽的 4 个采样器 uniform 名（GLSL 330 不能动态索引采样器，故按槽展开）。
+constexpr const char* kLayerSlotUniforms[kMaxTransparentLayers][4] = {
+    {"uLayer0Accum", "uLayer0Reveal", "uLayer0Depth", "uLayer0Add"},
+    {"uLayer1Accum", "uLayer1Reveal", "uLayer1Depth", "uLayer1Add"},
+    {"uLayer2Accum", "uLayer2Reveal", "uLayer2Depth", "uLayer2Add"},
+    {"uLayer3Accum", "uLayer3Reveal", "uLayer3Depth", "uLayer3Add"},
 };
 
 // 组装一遍 FS 源码（#version 330 core + 公共前置 + 介质提供者 + 趟体）。
@@ -83,6 +83,17 @@ void FogCompositeRenderer::Init(ShaderManager* shader_mgr, const char* medium_gl
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1, 1, 0, GL_RED, GL_FLOAT, &one);
+
+    // 1×1 **零**哑元：给「本层没有加法集」的槽位用。不能复用上面那张 1.0 的
+    // ——那个值会被当成加法集亮度直接加到画面上（每层凭空 +1.0）。
+    const float zero = 0.0f;
+    glGenTextures(1, &dummy_zero_tex_);
+    glBindTexture(GL_TEXTURE_2D, dummy_zero_tex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1, 1, 0, GL_RED, GL_FLOAT, &zero);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -90,6 +101,10 @@ void FogCompositeRenderer::Finalize() {
     if (dummy_depth_tex_ != 0) {
         glDeleteTextures(1, &dummy_depth_tex_);
         dummy_depth_tex_ = 0;
+    }
+    if (dummy_zero_tex_ != 0) {
+        glDeleteTextures(1, &dummy_zero_tex_);
+        dummy_zero_tex_ = 0;
     }
     shader_mgr_ = nullptr;
     prog_composite_ = 0;
@@ -187,7 +202,11 @@ void FogCompositeRenderer::Draw(const FogField& field,
             used ? layers.layers[slot].reveal_tex : dummy_depth_tex_;
         const unsigned int depth =
             used ? layers.layers[slot].depth_tex : dummy_depth_tex_;
-        const GLint unit = kLayerUnitBase + slot * 3;
+        // 加法集：本层没有时绑**零**哑元（绑 1.0 哑元会凭空加亮）。
+        const unsigned int add = (used && layers.layers[slot].additive_tex != 0)
+                                     ? layers.layers[slot].additive_tex
+                                     : dummy_zero_tex_;
+        const GLint unit = kLayerUnitBase + slot * 4;
         glActiveTexture(GL_TEXTURE0 + unit + 0);
         glBindTexture(GL_TEXTURE_2D, accum);
         glUniform1i(shader_mgr_->GetUniform(prog_composite_,
@@ -203,6 +222,11 @@ void FogCompositeRenderer::Draw(const FogField& field,
         glUniform1i(shader_mgr_->GetUniform(prog_composite_,
                                             kLayerSlotUniforms[slot][2]),
                     unit + 2);
+        glActiveTexture(GL_TEXTURE0 + unit + 3);
+        glBindTexture(GL_TEXTURE_2D, add);
+        glUniform1i(shader_mgr_->GetUniform(prog_composite_,
+                                            kLayerSlotUniforms[slot][3]),
+                    unit + 3);
     }
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uLayerCount"), layers.count);
     glActiveTexture(GL_TEXTURE0);

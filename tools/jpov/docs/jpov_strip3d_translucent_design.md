@@ -172,10 +172,11 @@ WBO 里消光**只由 α 决定**，`max(rgb)` 只进颜色加权平均。
 WBO 的 FBO / 附件 / clear / 混合 / 还原已经收敛成 `src/wbo/wbo_target.{h,cc}` 的 `WboTarget`，
 权重与解析收敛成 `src/wbo/wbo_shader.h`。**条带必须用它们**，不要复制粘贴一套新的。
 规则见 `docs/jpov_wbo_target.md §3`。要点：
-- 只申请要读的附件（条带 v1：accum/reveal + additive；不要 depth）；
+- 申请 accum/reveal + additive（按需）+ **depth**（代表深度，合成器要用）；
 - `BindForDraw()` / `EndDraw()` 包住绘制；
 - 权重从 `kWboWeightGlsl` 注入；
-- 解析用 `kWboCompositeFs`。
+- 解析**不自己做**（2026-11-27 起）：交 `TransparentLayer` 给雾/介质合成器
+  （见 `docs/jpov_transparent_composite_design.md §5.1`）。
 
 ### 5.1 一个 FBO、三个附件（1×）
 
@@ -386,6 +387,7 @@ struct TranslucentStripBatch {
 **已落地（配套 WBO 重构 PR）**：
 - `WboTarget` 接管粒子与体积火的 FBO/clear/blend/还原（`docs/jpov_wbo_target.md`）；
 - 权重函数与全屏解析共享化（`kWboWeightGlsl` / `kWboCompositeFs`），并有文本契约测试守 drift；
+  （2026-11-27 起条带/粒子改走 `TransparentLayerSet`，`kWboCompositeFs` 只剩体积火在用）
 - **体积火的死 depth 附件已删**（`FragDepth` 输出 + 第三附件 + num/den 累积一并移除），gold 逐字节不变；
 - 槽位约定定为 `0=accum / 1=reveal / 2=additive / 3=depth`。
 

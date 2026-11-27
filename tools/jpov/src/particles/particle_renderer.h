@@ -16,18 +16,20 @@
 //     att0 accum   : vec4(色·α, α)·w    （blend ONE,ONE）
 //     att1 reveal  : α                  （blend ZERO,ONE_MINUS_SRC_COLOR）
 //     att2 additive: 色·α（真加法时）    （blend ONE,ONE）
-//   （att3 是深度槽，本渲染器不申请；槽位定义见 src/wbo/wbo_target.h）
+//   （att3 是代表深度槽 = Σ(欧氏距离·α·w)，供合成器排序/介质衰减用；槽位见 wbo_target.h）
 //   WeightWbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)，
 //   文本来自 src/wbo/wbo_shader.h 的 kWboWeightGlsl（唯一权威副本）。
-//   （曾有 depth 附件 = z_view·α·w，但 Composite 从未采样它 —— 纯带宽浪费，已删。）
+//   （曾有 depth 附件 = z_view·α·w，但当时的 Composite 从未采样它，曾按「纯带宽浪费」删过；
+//    现在合成器要靠它做深度排序/介质衰减 ⇒ 重新申请。）
 //
 // 深度判据两种模式（ParticleRenderCommand::soft_depth_m）：
 //   关闭：`z > scene_z + 2cm` 即丢弃 —— 粒子与几何相交处是一条硬切边。
 //   开启：按 d = scene_z − z（视空间米）线性淡出 α，d ∈ (0, 过渡距离) 内平滑过渡。
 //   两种模式**都**发生在 WBO 写入之前，故覆盖率解析 1−Π(1−α) 始终自洽。
 //
-// 合成：Composite() 全屏把半透 WBO 解析（C=accum.rgb/accum.a，覆盖=1−reveal）并以 over 混合
-//   写进**当前绑定的目标**（HDR），随后由 fog 合成雾+玻璃 → 再后续。
+// 合成：本渲染器**不再自己合成**（2026-11-27 统一三条透明 pass 的口径）。它把
+//   accum/reveal/depth（+ 加法集）交给 `TransparentLayer`，由 FogCompositeRenderer
+//   与雾/水体介质按代表深度交替积分 —— 粒子才能被放到正确深度上衰减。
 
 #ifndef JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
 #define JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
@@ -37,6 +39,7 @@
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
+#include "tools/jpov/src/transparent_layer.h"
 #include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
@@ -76,6 +79,7 @@ uniform int  uStretched;
 uniform float uStretchScale;
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vWorld;          // 片元世界位置（合成器要的代表深度 = 到相机的欧氏距离）
 flat out float vFrame;
 void main() {
     vec2 corner = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
@@ -142,6 +146,7 @@ void main() {
         size.y *= (1.0 + length(aVel) * uStretchScale);
     }
     vec3 world = aPos + (corner.x * size.x) * rr + (corner.y * size.y) * uu;
+    vWorld = world;
     gl_Position = uViewProj * vec4(world, 1.0);
 }
 )glsl";
@@ -153,7 +158,9 @@ void main() {
 #version 330 core
 in vec2 vUV;
 in vec4 vColor;
+in vec3 vWorld;
 flat in float vFrame;
+uniform vec3 uCamPos;     // 世界空间相机位置（代表深度用；与 VS 是同一个 uniform）
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform int uTilesX;
@@ -170,6 +177,9 @@ uniform int uBlendPath;          // 0 = α 覆盖 / 1 = 加法近似（亮度当
 layout(location = 0) out vec4 FragAccum;   // 覆盖集：Σ(色·α·w, α·w)
 layout(location = 1) out float FragReveal; // 覆盖集：Π(1−α)
 layout(location = 2) out vec4 FragAdd;     // 加法集：Σ(色·α)（黑底=0 → 天然透明）
+// 代表深度：Σ(沿视线的欧氏距离·α·w)。合成器用 z̄ = FragDepth / accum.a 把本层
+// 插到介质/雾的**正确深度**上（否则层会被当成背景，按不透明几何的深度衰减）。
+layout(location = 3) out float FragDepth;
 vec2 CellUV(vec2 uv, float f) {
     float col = mod(f, float(uTilesX));
     float row = floor(f / float(uTilesX));
@@ -248,6 +258,9 @@ void main() {
         FragAdd = vec4(contrib, 0.0);
         FragAccum = vec4(0.0);
         FragReveal = 0.0;
+        // 加法集不提供代表深度：它不遮挡背景，而 depth 附件的分母是 accum.a（此处为 0）。
+        // 合成器对「只有加法集」的像素用最远深度兜底（见 ResolveLayer）。
+        FragDepth = 0.0;
     } else {
         float a = a_cov * fade;
         if (a <= 1.0 / 255.0) {
@@ -258,6 +271,9 @@ void main() {
         FragAccum = vec4(col.rgb * a, a) * w;
         FragReveal = a;
         FragAdd = vec4(0.0);
+        // 与 accum.a（= Σα·w）同权：z̄ = Σ(dist·α·w) / Σ(α·w)。
+        // 用**欧氏射线距离**（不是 ZView 的视空间 z）：合成器的 z_op 就是 length(p_scene-ro)。
+        FragDepth = length(uCamPos - vWorld) * a * w;
     }
 }
 )glsl";
@@ -282,24 +298,24 @@ void main() {
               unsigned int scene_depth_tex,
               int full_w, int full_h);
 
-    // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无粒子则 no-op。
-    void Composite(int full_w, int full_h);
-
-    bool has_content() const { return has_content_; }
+    // 本帧解算结果作为**一个透明层**交给合成器（雾/介质 + 层交替积分）。
+    // 无内容时返回 invalid（TransparentLayerSet::Add 会忽略）。
+    //
+    // 为什么不自己 Composite 进 HDR（2026-11-27 统一）：透明层必须先于介质合成
+    // 交给合成器，才能被插在**它自己的深度**上；自行 over 进 HDR 会被当成背景，
+    // 按不透明几何的深度（往往是几十米/无穷远）做衰减 ⇒ 粒子入水即被乘成 0。
+    TransparentLayer layer() const;
 
 private:
-    // 本渲染器的 WBO 目标规格（1/2 分辨率、覆盖集 + 加法集、无深度附件）。
+    // 本渲染器的 WBO 目标规格（1/2 分辨率、覆盖集 + 加法集 + 代表深度）。
     // 只在这一处声明，Begin/Draw 都走它 —— 避免两处字面量漂移。
     void EnsureTarget(int w, int h);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
-    unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    WboTarget wbo_;               // 1/2 分辨率、覆盖集 + 加法集（无深度附件）
+    WboTarget wbo_;               // 1/2 分辨率、覆盖集 + 加法集 + 代表深度
     bool has_content_ = false;
-    bool has_alpha_ = false;      // 本帧画过覆盖集（走 over 合成）
-    bool has_additive_ = false;   // 本帧画过加法集（走求和合成）
 
     InstanceBuffer pos_buf_{kParticlePosSpec};
     InstanceBuffer misc_buf_{kParticleMiscSpec};

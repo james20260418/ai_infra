@@ -32,6 +32,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/src/fog/fog_composite_renderer.h"
+#include "tools/jpov/src/water/water_medium_math.h"
 
 namespace {
 
@@ -106,6 +107,14 @@ jpov::TransparentLayer MakeLayer(float cr, float cg, float cb, float alpha, floa
     return layer;
 }
 
+// 加法集附件：存的是**已预乘**的 Σ(色·α)，与生产端的 `FragAdd` 一致。
+jpov::TransparentLayer WithAdditive(const jpov::TransparentLayer& layer, float ar,
+                                    float ag, float ab) {
+    jpov::TransparentLayer out = layer;
+    out.additive_tex = UploadFilled(ar, ag, ab, 0.0f, GL_RGBA16F, GL_RGBA);
+    return out;
+}
+
 struct Fixture {
     jpov::FogCompositeRenderer composite;
     jpov::ShaderManager shader_mgr;
@@ -113,9 +122,11 @@ struct Fixture {
     unsigned int color_tex = 0;
     std::vector<unsigned int> textures;   // 用例结束统一删
 
-    void Setup() {
+    // medium_glsl = 非空 ⇒ 换一份**合成用**的介质提供者（物理被换成可手算的解析式，
+    // 这样「层按自己的深度被衰减」这条不变式才能用常数手算验证）。
+    void Setup(const char* medium_glsl = nullptr) {
         GlEnv::Get().Ensure();
-        composite.Init(&shader_mgr);
+        composite.Init(&shader_mgr, medium_glsl);
 
         glGenTextures(1, &color_tex);
         glBindTexture(GL_TEXTURE_2D, color_tex);
@@ -149,11 +160,15 @@ struct Fixture {
         textures.push_back(layer.accum_tex);
         textures.push_back(layer.reveal_tex);
         textures.push_back(layer.depth_tex);
+        if (layer.additive_tex != 0) {
+            textures.push_back(layer.additive_tex);
+        }
         return layer;
     }
 
     // 清成背景色 → 跑一趟合成 → 读回左上角像素（整幅同色）。
-    void Run(const jpov::TransparentLayerSet& layers, float out_rgba[4]) {
+    void Run(const jpov::TransparentLayerSet& layers, float out_rgba[4],
+             const jpov::water::WaterMediumSample* medium = nullptr) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, kWidth, kHeight);
         glDisable(GL_BLEND);
@@ -173,7 +188,7 @@ struct Fixture {
         jpov::FogParams params;   // 无效雾场：只走层合成
         // uHasFog=0 ⇒ froxel 采样整条跳过，本用例只看层。
         composite.Draw(jpov::FogField{}, /*scene_depth_tex=*/0, cam, view_proj, params,
-                       layers);
+                       layers, medium);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -246,6 +261,92 @@ TEST(FogCompositeRendererTest, TwoLayersSortedByDepth) {
         EXPECT_NEAR(px_fwd[ch], expected, kTolerance) << "channel " << ch;
         EXPECT_NEAR(px_rev[ch], px_fwd[ch], 1.0e-4f)
             << "层集合顺序不该影响结果（合成器按代表深度排序），channel " << ch;
+    }
+}
+
+
+// ───────────────── 层必须按**自己的深度**被介质衰减（2026-11-27 回归）─────────────────
+//
+// 这是「条带入水即消失」的那个 bug 的最小复现：介质合成趟输出 `out = L + dst·T`，
+// 而 `T` 只用**不透明场景深度**算。层如果不在 `L` 里（= 自己先 over 进 dst），
+// 就会被 `T` 乘掉 —— 开阔水体里 `z_op → ∞` ⇒ `T → 0` ⇒ 整层被擦成水体注入色。
+//
+// 用一份**可手算**的合成用介质：τ(z) = 0.1·z（每米 0.1，灰），S ≡ 0。
+// 于是「层 z=6.7 m、α=1、色 C」的期望值是 exp(−0.67)·C，而背景（无穷远）为 0。
+//
+// 负向验证（开发时实跑）：把层改回「先 over 进 dst 再跑介质」⇒ 读回 0（用例红）。
+constexpr const char* kLinearAbsorbMedium = R"glsl(
+void MediumAt(vec3 ro, vec3 rd, float z, out vec3 tau, out vec3 S) {
+    tau = vec3(0.1) * z;   // 每米 0.1 的光学厚度（灰，与方向无关）
+    S = vec3(0.0);
+}
+)glsl";
+
+TEST(FogCompositeRendererTest, LayerIsAttenuatedByItsOwnDepthNotTheBackground) {
+    Fixture f;
+    f.Setup(kLinearAbsorbMedium);
+    jpov::water::WaterMediumSample medium;   // 数值被 kLinearAbsorbMedium 顶掉，只为
+                                             // 触发「逐通道透射」两趟路径
+    const float c[3] = {1.0f, 0.5f, 0.25f};
+    const float z_layer = 6.7f;
+    jpov::TransparentLayerSet set;
+    set.Add(f.Track(MakeLayer(c[0], c[1], c[2], /*alpha=*/1.0f, z_layer)));
+
+    float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    f.Run(set, px, &medium);
+
+    const float transmit = std::exp(-0.1f * z_layer);
+    for (int ch = 0; ch < 3; ++ch) {
+        // 背景（无穷远）本该被介质吃干（T→0），层的贡献只吃自己那一段 τ。
+        EXPECT_NEAR(px[ch], transmit * c[ch], kTolerance) << "channel " << ch;
+    }
+    // 非恒真断言：结果必须**明显不等于 0**（= 被当成背景吃掉的旧行为）。
+    EXPECT_GT(px[0], 0.4f) << "层被介质吃掉了 ⇒ 说明它没进 L（回到了旧路径）";
+}
+
+// 多层：每一层各吃自己那一段 τ（近层不被远层的 τ 影响，远层被近层的 W 衰减）。
+TEST(FogCompositeRendererTest, EachLayerIsAttenuatedAtItsOwnDepth) {
+    Fixture f;
+    f.Setup(kLinearAbsorbMedium);
+    jpov::water::WaterMediumSample medium;
+    const float c_near[3] = {1.0f, 0.0f, 0.0f};
+    const float c_far[3] = {0.0f, 0.0f, 1.0f};
+    const float z_near = 2.0f;
+    const float z_far = 8.0f;
+    const float a_near = 0.5f;
+    const float a_far = 0.5f;
+
+    jpov::TransparentLayerSet set;
+    // 故意先加远层：合成器必须按代表深度重排。
+    set.Add(f.Track(MakeLayer(c_far[0], c_far[1], c_far[2], a_far, z_far)));
+    set.Add(f.Track(MakeLayer(c_near[0], c_near[1], c_near[2], a_near, z_near)));
+
+    float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    f.Run(set, px, &medium);
+
+    // L = exp(−τ(z1))·(α1·C1) + (1−α1)·exp(−τ(z2))·(α2·C2)；背景无穷远 ⟹ T=0。
+    const float e1 = std::exp(-0.1f * z_near);
+    const float e2 = std::exp(-0.1f * z_far);
+    EXPECT_NEAR(px[0], e1 * a_near * c_near[0], kTolerance);
+    EXPECT_NEAR(px[1], e1 * a_near * c_near[1], kTolerance);
+    EXPECT_NEAR(px[2], (1.0f - a_near) * e2 * a_far * c_far[2], kTolerance);
+}
+
+// 加法集：只有加法集的层（无覆盖集）也必须把光加进画面（α≡0 不遮挡背景）。
+// 无介质 ⇒ 恒等路径，期望 out = 背景 + 加法集。
+TEST(FogCompositeRendererTest, AdditiveOnlyLayerAddsLight) {
+    Fixture f;
+    f.Setup();
+    const float add[3] = {0.40f, 0.20f, 0.10f};
+    jpov::TransparentLayerSet set;
+    set.Add(f.Track(WithAdditive(MakeLayer(0.9f, 0.9f, 0.9f, /*alpha=*/0.0f, 1.0f),
+                                 add[0], add[1], add[2])));
+
+    float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    f.Run(set, px);
+
+    for (int ch = 0; ch < 3; ++ch) {
+        EXPECT_NEAR(px[ch], Fixture::kBg[ch] + add[ch], kTolerance) << "channel " << ch;
     }
 }
 

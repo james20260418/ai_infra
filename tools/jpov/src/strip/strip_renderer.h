@@ -51,14 +51,17 @@
 //                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
 //                每个 pass 有**两个 program**（天光关/开）：主函数共用，
 //                只差 ApplySkyLight 的定义（见 kSkyLightOffFs / kSkyLightFs）。
-//   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
+//   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只解算成一个**透明层**。
 //
 // 采样数：**两种拓扑并列**，不是模板 —— `Draw16`（Strip16，32 顶点/15 段）与
 //                `Draw4`（Strip4，8 顶点/3 段）。两者共用同一份 GLSL（拓扑常量走 uniform）、
 //                同一套 CPU 数学（StripSamplesView + StripLayout）、同一段绘制代码。
 //
-// 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
-//   写进当前绑定的目标（HDR），随后由 horizon fog / froxel 继续。
+// 合成：本渲染器**不再自己合成**（2026-11-27 统一三条透明 pass 的口径）。
+//   它把 accum/reveal/depth（+ 可选加法集）交给 `TransparentLayer`，由
+//   FogCompositeRenderer 与雾/水体介质**按代表深度交替积分** —— 条带与环境里的
+//   吸收/注入、雾、其它透明层都能排到正确的深度上。
+//   （以前它自己 over 进 HDR，于是被介质当成背景，按不透明几何的深度衰减。）
 
 #ifndef JPOV_SRC_STRIP_STRIP_RENDERER_H_
 #define JPOV_SRC_STRIP_STRIP_RENDERER_H_
@@ -72,6 +75,7 @@
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/strip/strip_geometry.h"
 #include "tools/jpov/src/texture_manager.h"
+#include "tools/jpov/src/transparent_layer.h"
 #include "tools/jpov/src/water/water_underwater_shading.h"
 #include "tools/jpov/src/wbo/wbo_target.h"
 
@@ -183,6 +187,9 @@ uniform float uFresnelGrazeAlpha;
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
 layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
 layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
+// 代表深度：Σ(沿视线的欧氏距离·α·w)。合成器用 z̄ = FragDepth / accum.a 把本层
+// 插到介质/雾的**正确深度**上（否则层会被当成背景，按不透明几何的深度衰减）。
+layout(location = 3) out float FragDepth;
 // 窗口深度 [0,1] → 视空间深度（正，米）。
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
@@ -317,6 +324,9 @@ void EmitFragment(vec3 color, float a) {
         FragAdd = vec4(contrib, 0.0);
         FragAccum = vec4(0.0);
         FragReveal = 0.0;
+        // 加法集不提供代表深度：它不遮挡背景，而 depth 附件的分母是 accum.a（此处为 0）。
+        // 合成器对「只有加法集」的像素用最远深度兜底（见 ResolveLayer）。
+        FragDepth = 0.0;
     } else {
         float aa = a * fade;
         if (aa <= 1.0 / 255.0) {
@@ -327,6 +337,9 @@ void EmitFragment(vec3 color, float a) {
         FragAccum = vec4(color * aa, aa) * w;
         FragReveal = aa;
         FragAdd = vec4(0.0);
+        // 与 accum.a（= Σα·w）同权：z̄ = Σ(dist·α·w) / Σ(α·w)。
+        // 用**欧氏射线距离**（不是 ZView 的视空间 z）：合成器的 z_op 就是 length(p_scene-ro)。
+        FragDepth = length(uCamPos - vWorld) * aa * w;
     }
 }
 )glsl";
@@ -602,16 +615,19 @@ void ApplySkyLight(vec3 N, inout vec3 color) {
                 const StripCsmShadow* csm,
                 int full_w, int full_h);
 
-    // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无内容则 no-op。
-    void Composite(int full_w, int full_h);
-
-    bool has_content() const { return has_content_; }
+    // 本帧解算结果作为**一个透明层**交给合成器（雾/介质 + 层交替积分）。
+    // 无内容时返回 invalid（TransparentLayerSet::Add 会忽略）。
+    //
+    // 为什么不自己 Composite 进 HDR（2026-11-27 统一）：透明层必须先于介质合成
+    // 交给合成器，才能被插在**它自己的深度**上；自行 over 进 HDR 会被当成背景，
+    // 按不透明几何的深度（往往是几十米/无穷远）做衰减 ⇒ 入水即被乘成 0。
+    TransparentLayer layer() const;
 
 private:
     // per-instance 数据纹理的行宽（texel）= 采样点数 + 9 个剖面 knot，由 StripLayout 给
     // （16 点档 25、4 点档 13）。采样坐标的 scale/bias 也从 layout 现算后传给 shader。
 
-    // 1× 覆盖集（可选加法集）、无深度附件（NEAREST：1× 上插值没有意义）。
+    // 1× 覆盖集（可选加法集）+ 代表深度附件（NEAREST：1× 上插值没有意义）。
     void EnsureTarget(int w, int h, bool with_additive);
 
     // uniform 位置**只查一次**（Init 里），Draw 里直接用整数。
@@ -690,13 +706,6 @@ private:
         int water_atten_sun_toward = -1;
         int water_atten_ambient_t = -1;
     };
-    struct CompositeUniforms {
-        int accum = -1;
-        int reveal = -1;
-        int add = -1;
-        int additive = -1;
-    };
-
     // 平滑 pass = 公共项 + 三个专用（段数 / 数据纹理行数 / 数据纹理采样器）。
     struct SmoothUniforms {
         CommonUniforms common;
@@ -743,7 +752,6 @@ private:
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
-    unsigned int prog_comp_ = 0;
     // 「开天光」的两个变体：不在原 program 里加 uniform 分支，
     // 而是单独编译 —— 不开天光的批在 GPU 上零额外指令（见 kSkyLightOffFs）。
     unsigned int prog_draw_lit_ = 0;
@@ -751,7 +759,6 @@ private:
     CommonUniforms draw_uniforms_;
     CommonUniforms draw_lit_uniforms_;
     std::optional<water::UnderwaterAttenuation> underwater_atten_;
-    CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点（两种档位共用：顶点布局相同）
     // 索引：拓扑与采样数有关（32 顶点/90 索引 vs 8/18），所以两个档位各一条缓冲。
@@ -763,8 +770,6 @@ private:
     bool initialized_ = false;
     bool has_content_ = false;
     bool target_with_additive_ = false;   // 当前 WBO 目标是否带加法集附件
-    bool has_alpha_ = false;              // 本帧画过覆盖集
-    bool has_additive_ = false;           // 本帧画过加法集
     std::vector<StripVertex> vertices_;   // 复用缓冲，避免每帧分配
 
     // ── 平滑 pass 的资源（kSmooth）──
