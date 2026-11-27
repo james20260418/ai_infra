@@ -920,7 +920,7 @@ SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并�
 | `SsrChainResult`（reflection / backface / raw） | `SsrChain` | `SsrChain::Finalize` | 下一次 Render 改写；**不要**把 id 存到下一帧 |
 | 装置内部中间目标（两套降采样、柱体、slice、mip 链、升采样） | `SsrChain` | 同上 | 懒创建；尺寸或 scale 变化才重建（Render 里零分配） |
 | 不透明场景的属性纹理 / 3D FBO | `Renderer` | `Renderer` | `SsrOpaqueReflection` 只借用（它在 3D pass 那一侧） |
-| HDR 副本（合成用） | `SsrComposite` | `SsrComposite::Finalize` | 避免同张纹理又读又写；`hdr_tex` 必须**就是** dst_fbo 的附件 0（Run 里校验） |
+| HDR 副本（合成用） | `SsrComposite` | `SsrComposite::Finalize` | 避免同张纹理又读又写：从 `hdr_tex` blit（读端 FBO 每帧临时挂、用完脱钩），合成写回 `dst_fbo` |
 | GLSL program | `ShaderManager` | `ShaderManager` | 各模块只持 id，按名字缓存 |
 
 两套降采样（源 / 查询）是**两个对象、两份目标**：实心→实心时它们内容逐字节相同，
