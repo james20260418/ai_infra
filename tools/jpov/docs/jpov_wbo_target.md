@@ -62,7 +62,11 @@ src/wbo/
 2. **用 `BindForDraw()` / `EndDraw()` 包住绘制**，不要自己写 blend func。`EndDraw()` 会把四个槽位的
    blend 都回写成引擎默认的 `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`。
 3. **权重只从 `kWboWeightGlsl` 注入**（`std::string(head) + kWboWeightGlsl + tail`），不要复制函数体。
-4. **解析用 `kWboCompositeFs`**（覆盖集 over + 加法集求和）。
+4. **解析**：水皮 / 条带 / 粒子走 `TransparentLayerSet`（雾+介质合成器统一积分，
+   见 `docs/jpov_transparent_composite_design.md §5.1`）；只有体积火还在用
+   `kWboCompositeFs`（覆盖集 over + 加法集求和）自己 over 进 HDR。
+   若该层需要参与介质/雾的深度排序，**必须**申请 depth 附件（`with_depth=true`）
+   并在 FS 里写 `FragDepth = Σ(欧氏射线距离·α·w)`。
 5. **同一个目标内所有使用者必须用同一个权重函数。** 加权平均是 `Σw_k c_k / Σw_k`，
    混入两套权重尺度会把平均色整体偏置 —— 这是 "条带不要和体积火共用 FBO" 的原因
    （体积火权重恒 1，条带用深度权重）。

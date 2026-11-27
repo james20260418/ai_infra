@@ -115,17 +115,39 @@ out = L + dst · a                       // GL_ONE / GL_SRC_ALPHA
 | `uHasFog=0` 快路径（无雾只有层） | ✅ |
 | 纯雾路径逐像素不变 | ✅ gold `diff = 0` |
 | 层路径的单元级验收（预乘 over / 排序 / 顺序无关） | ✅ `fog_composite_gpu_test` |
-| **生产者接入**（广告牌粒子 / 体积火 / 条带变成层） | ⬜ **未接，下一步** |
+| **生产者接入**（广告牌粒子 / **条带**变成层） | ✅ 2026-11-27（见 §5.1） |
+| **生产者接入**（体积火变成层） | ⬜ 仍走自己的 `Composite()`（存在感低，未接） |
 | 低分层深度感知上采样（联合双线性） | ⬜ 现在用 NEAREST 取代表深度 |
 
-**为什么这次不把生产者一起接上**：粒子的「加性 / 遮挡双 WBO 层」与条带、体积火都是
+### 5.1 粒子 / 条带接入（2026-11-27）
+
+三家 WBO 生产者（水皮 / 广告牌粒子 / 半透明条带）现在**只有一条**合成路径：各自只解算
+WBO，交一个 `TransparentLayer`（accum / reveal / **depth** / **additive**），由本合成器
+按代表深度排序后与雾/水体介质交替积分。`StripRenderer::Composite()` /
+`ParticleRenderer::Composite()` / 它们的合成 program 已删除。
+
+**为什么必须接（不只是口味问题）**：自建 `Composite()` 把层 over 进 HDR 之后，它就变成
+了「背景」——介质/雾只能按 **不透明几何** 的深度衰减它。开阔水体里 `z_op → ∞` ⇒
+`T = exp(−σ·z_op) → 0` ⇒ 层色被乘成 0，只剩水体注入色：**条带/粒子一入水就整块消失**
+（2026-11-27 Danis 报障，实测 6.7 m 处的条带被按 ≈56 m 衰减，绿通道过衰减 ≈100×）。
+
+**加法集（`kEmissive` / `blend_path == 2`）的处理**：它和覆盖集来自同一批几何、同一条射线上，
+拆成两层会产生假的深度边界，所以 `TransparentLayer` 多带一个 `additive_tex`，在
+`ResolveLayer` 里与覆盖集合并成一个预乘色；层透射率 `t` 仍只由覆盖集决定
+（加性不遮挡）。只有加法集的像素没有代表深度（depth 附件的分母 `accum.a ≡ 0`）⇒
+用 `kAdditiveOnlyDepthM` 交给 `min(z, z_op)` 钉在背景深度上。
+
+**层预算**：`kMaxTransparentLayers = 4`，当前用量 = 水皮 1 + 粒子 1 + 条带 1 = 3。
+体积火接入后正好满 4（满了会 `LOG(WARNING)` 丢层）。
+
+**为什么当初没把生产者一起接上**：粒子的「加性 / 遮挡双 WBO 层」与条带、体积火都是
 2026-10-17 之后各自长出来的链路，各自已经有一套 `Composite()`（见 `src/wbo/`）。
 把它们改成「交出 WBO 三附件、由雾的合成趟统一积分」会同时改变三条链路的**画面**
 （雾会插进层与层之间），需要重出这些链路各自的 gold —— 属于另一个 PR，
-不应该和「改名 + 拆类」混在一起。
+不应该和「改名 + 拆类」混在一起。（粒子/条带已在 §5.1 接入。）
 
-在此之前，`TransparentLayerSet` 在 `Renderer` 里恒为空：合成趟退化为纯雾路径，
-与旧实现逐位一致。
+在那之前，`TransparentLayerSet` 在 `Renderer` 里只放水皮一层；现在粒子/条带也进来，
+合成趟的触发条件随之补上「本帧有层就跑」（否则 WBO 解算完没人消费 ⇒ 整块消失）。
 
 ---
 
@@ -135,3 +157,14 @@ out = L + dst · a                       // GL_ONE / GL_SRC_ALPHA
 - `//tools/jpov/test/fog`：`fog` / `fog_pointlight` 两组 gold `max-channel-mean-diff = 0`
 - `fog_composite_gpu_test`（headless GL）：单层预乘 over、双层按 z̄ 排序、
   集合顺序无关、空集合零开销 —— 4 条断言各有一处负向验证（见测试文件头）
+
+### 6.1 粒子 / 条带接入后的回归（2026-11-27）
+
+- `//tools/jpov/test/...` 全量 **117 targets / 361 cases 全绿**（llvmpipe + xvfb）。
+- gold 影响面：只有 **7 张**，且全部是 **±1 LSB（max diff = 1，无任何像素 > 1）**
+  —— 解析从「固定管线混合」挪进合成器 shader 后的末位舍入，肉眼不可见：
+  条带场景 5 张（10/20/30/40/50 各 121~228 px）、粒子 2 张（760 / 764 px）。
+  其余所有 gold（水皮 94 cases、object3d、skeleton、fog、ssr、postprocess、volume_fire）
+  **逐字节不变**。
+- 无介质/无雾的帧：条带/粒子的像素与改动前**逐字节相同**（`underwater_medium_off.png`
+  `maxdiff = 0`），说明接入层路径本身没有引入任何颜色偏差。

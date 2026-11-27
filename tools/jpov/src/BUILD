@@ -452,6 +452,7 @@ cc_library(
         ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src/water:water_underwater_shading",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [
@@ -492,6 +493,7 @@ cc_library(
         ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src/water:water_underwater_shading",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

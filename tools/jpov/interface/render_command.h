@@ -1129,6 +1129,19 @@ struct WaterCommand {
     // 水体介质（吸收/散射）。enabled = true 时合成趟会把介质积分进画面。
     WaterMedium medium;
 
+    // ── 水下照明衰减（2026-11-26，照明侧）──
+    //
+    // 只对**水面以下的片元**生效（d = level_y − p.y > 0），用 `medium` 的 σ 逐通道衰减：
+    //   直射：E(λ) = E_air(λ)·(1−R)·exp(−σt(λ)·d/cosθw)
+    //   环境：L(λ) = L_air(λ)·0.94·exp(−K_d(λ)·d)，K_d = σa + (1−g)·σs
+    // 不动光的方向（无折射/无图像位移）、不采 CSM、不做波面透射率 —— 「能量的基本盘」。
+    //
+    // 两个开关独立（Danis 2026-11-26：ambient / 平行光各自是否开启）。
+    // 默认 false = 零回归；σ 来自 `medium`（与 `medium.enabled` 无关：可以只衰减照明、
+    // 不画水体体积的 A/B）。两个都为 true 而 σ 全 0 时 Renderer 会 CHECK（那是参数漏填）。
+    bool attenuate_ambient = false;
+    bool attenuate_sun = false;
+
     // 水面波浪（法线扰动/高度置换）。enabled = false ⇒ 纯平面（零回归）。
     // ⚠️ 波浪只改**界面几何**（水皮求交与法线）；水体介质仍按 level_y 的半空间积分
     //    （波浪化介质见 known_issue §11.5，另 PR）。

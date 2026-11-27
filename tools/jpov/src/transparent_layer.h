@@ -4,15 +4,19 @@
 // 玻璃 / 广告牌粒子 / 体积火 / 条带都各自解算进自己的 WBO 缓冲，然后统一以
 // **一个等效层**交给合成器：合成器按代表深度排序做多段（雾 + 层交替）积分。
 //
-// 一个 WBO 缓冲的三个附件（实现见 src/wbo/wbo_target.h）：
+// 一个 WBO 缓冲的附件（实现见 src/wbo/wbo_target.h）：
 //   accum : RGBA16F，Σ(预乘色×w, α×w) —— 加权平均色 Cavg = accum.rgb / accum.a；
 //   reveal: R16F   ，Π(1−α)           —— 该层透射率 T（背景透过率）；
-//   depth : R32F   ，Σ(z_view×α×w)    —— 代表深度 z̄ = depth / accum.a（视空间米）。
+//   depth : R32F   ，Σ(z_view×α×w)    —— 代表深度 z̄ = depth / accum.a（视空间米）；
+//   additive: RGBA16F（可选），Σ(色×α) —— **加法集**：发光介质，不遮挡背景。
 //
-// 由三者导出的**等效层**：
-//   C_premult = Cavg · (1 − T)   （预乘色，即本层贡献的亮度）
-//   cov       = 1 − T            （遮挡掉多少背景）
-//   z̄         = depth / accum.a   （参与排序的代表深度）
+// 由四者导出的**等效层**：
+//   C_premult = Cavg · (1 − T) + additive   （预乘色，即本层贡献的亮度）
+//   cov       = 1 − T                        （遮挡掉多少背景）
+//   z̄         = depth / accum.a               （参与排序的代表深度）
+//
+// 加法集是**同一个 WBO 目标里的另一个附件**，不是第二层：它与覆盖集来自同一批几何、
+// 同一条射线位置，所以必须一起交给合成器（否则会多出一个假的深度边界）。
 //
 // ⚠️ 契约边界（**生产者负责，合成器不校验**）：
 //   · 每个纹理对每个像素只代表**一个**层；
@@ -34,9 +38,14 @@ struct TransparentLayer {
     unsigned int accum_tex = 0;   // RGBA16F
     unsigned int reveal_tex = 0;  // R16F
     unsigned int depth_tex = 0;   // R32F
-    // 解算分辨率 / 主视口分辨率（1、0.5、0.25 …）。合成时按归一化 uv 采样。
-    float scale = 1.0f;
+    // 加法集（Σ 预乘色，不遮挡背景）。0 = 本层没有加法集（水皮就是这种）。
+    unsigned int additive_tex = 0;
+    // 没有 `scale` 字段：合成趟按**归一化 uv** 采样（`texture(tex, uv)`），
+    // 低分辨率层（粒子 1/2）的 LINEAR 上采样由纹理过滤本身完成 ⇒ 解算分辨率
+    // 不需要传给合成器。（曾经有过一个 `scale` 字段，四个生产者都写、没人读，
+    // 2026-11-27 review 删掉。）
 
+    // 加法集可有可无，所以不能算进合法性判断：三件必需附件齐了就是合法层。
     bool valid() const {
         return accum_tex != 0 && reveal_tex != 0 && depth_tex != 0;
     }

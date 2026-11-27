@@ -152,3 +152,26 @@ cc_library(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# 水下照明衰减（照明侧）：三个 PBR 主 pass + 条带天光共用的 GLSL 片段 + uniform 上传。
+# 只做「能量基本盘」—— 逐片元按深度衰减 ambient / 平行光，不改方向、不采 CSM、不做波面聚焦。
+# 关闭时（WaterCommand 两个开关都为 false）shader 第一行 return ⇒ 逐字节零回归。
+cc_library(
+    name = "water_underwater_shading",
+    srcs = ["water_underwater_shading.cc"],
+    hdrs = ["water_underwater_shading.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":water_medium_math",
+        ":water_optics",
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/src:shader_manager",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
