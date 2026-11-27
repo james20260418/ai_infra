@@ -1363,7 +1363,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
 //   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
 //   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
 int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ssr_clamp,
-                       int water_debug, float ship_distance_m) {
+                       int water_debug, float ship_distance_m, float ssr_downscale_n) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 水皮 SSR A/B（headless）";
@@ -1388,6 +1388,11 @@ int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ss
     }
     if (ssr_clamp >= 0) {
         app.water_ssr_clamp_normal_ = (ssr_clamp != 0);
+    }
+    if (ssr_downscale_n > 0.0f) {
+        // 与面板同一个入口：非法小数被 snap 成 1/N（N = 1..4）——装置只认这几个值。
+        app.water_ssr_.resolution_scale =
+            jpov_skylight::SnapDownscaleTo1OverN(ssr_downscale_n);
     }
     app.SetWaterWaveDebug(water_debug);
     if (ship_distance_m >= 0.0f) {
@@ -2479,6 +2484,7 @@ int main(int argc, char** argv) {
     float water_ssr_truncate_px = -1.0f;   // --water-ssr-truncate：query 法线的谱截断（<0 = 用默认）
     int water_ssr_clamp = -1;              // --water-ssr-clamp 0|1：query 法线是否钳到地平线
     float ship_distance_m = -1.0f;         // --ship-distance：帆船离场景原点的距离（<0 = 默认）
+    float water_ssr_downscale_n = -1.0f;   // --water-ssr-downscale：N（会被 snap 到 1..4 的整数）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2567,6 +2573,8 @@ int main(int argc, char** argv) {
             water_ssr_clamp = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ship-distance") == 0 && i + 1 < argc) {
             ship_distance_m = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-downscale") == 0 && i + 1 < argc) {
+            water_ssr_downscale_n = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2576,7 +2584,8 @@ int main(int argc, char** argv) {
     }
     if (!water_ssr_out_dir.empty()) {
         return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px,
-                                  water_ssr_clamp, water_debug, ship_distance_m);
+                                  water_ssr_clamp, water_debug, ship_distance_m,
+                                  water_ssr_downscale_n);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,

@@ -59,6 +59,13 @@ inline constexpr float kShipDirX = -0.5547f;   // = normalize(-40, -60)
 inline constexpr float kShipDirZ = -0.8321f;
 inline constexpr float kShipDistanceDefaultM = 72.0f;
 
+// 面板滑条 → SSR 装置倍率的**唯一入口**：装置的约定是 1/N（N = 1..4），
+// SliderFloat 会在拖动中途给出小数（decimals 只影响显示）⇒ 必须在这里四舍五入并夹住。
+inline float SnapDownscaleTo1OverN(float n) {
+    const int ni = std::clamp(static_cast<int>(std::lround(n)), 1, 4);
+    return 1.0f / static_cast<float>(ni);
+}
+
 // 天光查看器渲染核心 App。
 class SkylightApp : public JPOV {
 public:
@@ -1371,11 +1378,14 @@ private:
                 // 关掉 = 逐字节回到纯探针；这是验收"单调改进"的 A/B 基线。
                 ui_.Checkbox("水皮 SSR 倒影", &water_ssr_.enabled, row(0, 14));
                 {
-                    // 降采样倍率 1/N（>=1）。N 越大越便宜、倒影越糊。
+                    // 降采样倍率 1/N。装置的约定是**只支持 1/N（N = 1..4）**。
+                    // ⚠️ SliderFloat 即使 decimals=0 也会在拖动中途给出 1.1473 这种值
+                    //   ⇒ 必须四舍五入 + 夹，否则 1/1.1473 = 0.871489 撞装置 CHECK 直接 abort
+                    //   （2026-11-27 Danis 实拍：拖这根滑条把查看器拖崩了）。
                     float ssr_n = 1.0f / std::max(water_ssr_.resolution_scale, 1.0e-3f);
                     if (ui_.SliderFloat("水皮 SSR 降采样 1/N", &ssr_n, row(0, 15), 1.0f, 4.0f,
                                         0)) {
-                        water_ssr_.resolution_scale = 1.0f / std::max(ssr_n, 1.0f);
+                        water_ssr_.resolution_scale = 1.0f / SnapDownscaleTo1OverN(ssr_n);
                     }
                 }
                 // query 法线的谱截断：0 = 逐字用中心法线（倒影会被亚像素波切碎）
@@ -1628,9 +1638,8 @@ private:
             // 降采样倍率滑条 N（1..4）：分辨率 = 1/N。N=3 也能跑（整数格 + 加权，不要求 2 的幂）。
             float n_f = static_cast<float>(ssr_downscale_n_);
             if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 9), 1.0f, 4.0f, 0)) {
-                ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
-                ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
-                ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
+                ssr_scale_ = SnapDownscaleTo1OverN(n_f);   // 与水面共用同一个入口
+                ssr_downscale_n_ = static_cast<int>(std::lround(1.0f / ssr_scale_));
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 11), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);
