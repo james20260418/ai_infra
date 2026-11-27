@@ -70,6 +70,15 @@ void FogCompositeRenderer::Init(ShaderManager* shader_mgr, const char* medium_gl
         medium_glsl = water::kDefaultMediumGlsl;
     }
     shader_mgr_ = shader_mgr;
+    // 本趟要吃 2 + 4×4 = 18 个片元纹理单元（雾散射 + 场景深度 + 每层 4 张）。
+    // GL 3.3 的下限只有 16 ⇒ 老/精简驱动上会在 link 阶段以一句难懂的 sampler 错误失败。
+    // 这里提前拦下并给出可执行的数字（桌面驱动普遍 32，llvmpipe 32）。
+    GLint max_fs_units = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &max_fs_units);
+    CHECK_LE(kUnitsTouched, max_fs_units)
+        << "雾/介质合成趟需要 " << kUnitsTouched << " 个片元纹理单元（kMaxTransparentLayers="
+        << kMaxTransparentLayers << " × 4 + 2），本驱动只报了 " << max_fs_units
+        << "：要么减少同时合成的层数，要么把加法集并进别的附件。";
     fs_composite_ = AssembleCompositeShader(medium_glsl, kFsComposite);
     prog_composite_ = shader_mgr_->GetOrCreate(
         "fog_composite", {kFogVs, fs_composite_.c_str()});
