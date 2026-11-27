@@ -390,8 +390,10 @@ public:
         ship_distance_f_ = distance_m;
         ship_.center = {kShipDirX * distance_m, ship_base_y_, kShipDirZ * distance_m};
     }
-    // query 法线的谱截断乘数（0 = 不截断）。语义见 WaterCommand::ssr_normal_truncate_px。
-    float water_ssr_truncate_px_ = 0.0f;
+    // query 法线的谱截断乘数（0 = 该族不截断）。主波 / 细节波**分开**：
+    //   截细节波 = 只去噪（它只进法线）；截主波 = 会把水面反射"压平"（它还管几何/剪影）。
+    float water_ssr_truncate_main_px_ = 0.0f;
+    float water_ssr_truncate_detail_px_ = 0.0f;
     bool water_skin_on_ = true;
     bool water_medium_on_ = true;
     // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
@@ -1139,7 +1141,8 @@ public:
             // 水皮自己的 SSR 配置（默认开；与 cmds.ssr 是两个独立实例）。
             w.ssr = water_ssr_;
             w.ssr.resolution_scale = 1.0f / static_cast<float>(water_ssr_downscale_n_);
-            w.ssr_normal_truncate_px = water_ssr_truncate_px_;
+            w.ssr_normal_truncate_main_px = water_ssr_truncate_main_px_;
+            w.ssr_normal_truncate_detail_px = water_ssr_truncate_detail_px_;
             w.ssr_clamp_normal_above_horizon = water_ssr_clamp_normal_;
             cmds->water = w;
         }
@@ -1206,7 +1209,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 21;   // 场景4：row(0,0..13) + row(1,0..20)
+        constexpr int kOceanLabPanelRows = 22;   // 场景4：row(0,0..13,14..21) + row(1,0..20)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         constexpr int kUnderwaterRows    = 10;   // 场景5：row(0,0..9)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
@@ -1398,8 +1401,12 @@ private:
                     }
                 }
                 // query 法线的谱截断：0 = 逐字用中心法线（倒影会被亚像素波切碎）
-                ui_.SliderFloat("水皮 SSR 法线截断 T (×3~8px)", &water_ssr_truncate_px_,
-                                row(0, 17), 0.0f, 8.0f, 1);
+                // 谱截断**主波/细节波分开**：细节波只进法线（截它=纯去噪），
+                // 主波还管几何/剪影（截它会把水面反射压平）—— 归因必须能分开。
+                ui_.SliderFloat("水皮 SSR 截断 T 主波", &water_ssr_truncate_main_px_,
+                                row(0, 20), 0.0f, 8.0f, 1);
+                ui_.SliderFloat("水皮 SSR 截断 T 细节波", &water_ssr_truncate_detail_px_,
+                                row(0, 21), 0.0f, 8.0f, 1);
                 // 法线钳位：把"反射方向指到水下"的像素魔改到 R.y ≥ sin1°（与 env 同口径）
                 ui_.Checkbox("水皮 SSR 法线钳到地平线", &water_ssr_clamp_normal_, row(0, 18));
                 // 远景帆船的远近（沿固定世界方位推远/拉近；改机位不会让它跟着跑）

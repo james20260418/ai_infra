@@ -1362,8 +1362,10 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
 // 判据：
 //   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
 //   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
-int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ssr_clamp,
-                       int water_debug, float ship_distance_m, float ssr_downscale_n) {
+int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px,
+                       float ssr_truncate_main_px, float ssr_truncate_detail_px,
+                       int ssr_clamp, int water_debug, float ship_distance_m,
+                       float ssr_downscale_n) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 水皮 SSR A/B（headless）";
@@ -1384,7 +1386,14 @@ int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ss
     app.InstallTextMeasure();
     app.SetOceanLab(true);
     if (ssr_truncate_px >= 0.0f) {
-        app.water_ssr_truncate_px_ = ssr_truncate_px;
+        app.water_ssr_truncate_main_px_ = ssr_truncate_px;
+        app.water_ssr_truncate_detail_px_ = ssr_truncate_px;
+    }
+    if (ssr_truncate_main_px >= 0.0f) {
+        app.water_ssr_truncate_main_px_ = ssr_truncate_main_px;
+    }
+    if (ssr_truncate_detail_px >= 0.0f) {
+        app.water_ssr_truncate_detail_px_ = ssr_truncate_detail_px;
     }
     if (ssr_clamp >= 0) {
         app.water_ssr_clamp_normal_ = (ssr_clamp != 0);
@@ -2483,7 +2492,9 @@ int main(int argc, char** argv) {
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
-    float water_ssr_truncate_px = -1.0f;   // --water-ssr-truncate：query 法线的谱截断（<0 = 用默认）
+    float water_ssr_truncate_px = -1.0f;        // --water-ssr-truncate：两族同值（<0 = 用默认）
+    float water_ssr_truncate_main_px = -1.0f;   // --water-ssr-truncate-main：只主波
+    float water_ssr_truncate_detail_px = -1.0f; // --water-ssr-truncate-detail：只细节波
     int water_ssr_clamp = -1;              // --water-ssr-clamp 0|1：query 法线是否钳到地平线
     float ship_distance_m = -1.0f;         // --ship-distance：帆船离场景原点的距离（<0 = 默认）
     float water_ssr_downscale_n = -1.0f;   // --water-ssr-downscale：N（会被 snap 到 1..4 的整数）
@@ -2571,6 +2582,10 @@ int main(int argc, char** argv) {
             water_debug = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--water-ssr-truncate") == 0 && i + 1 < argc) {
             water_ssr_truncate_px = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-truncate-main") == 0 && i + 1 < argc) {
+            water_ssr_truncate_main_px = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-truncate-detail") == 0 && i + 1 < argc) {
+            water_ssr_truncate_detail_px = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-ssr-clamp") == 0 && i + 1 < argc) {
             water_ssr_clamp = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ship-distance") == 0 && i + 1 < argc) {
@@ -2586,6 +2601,7 @@ int main(int argc, char** argv) {
     }
     if (!water_ssr_out_dir.empty()) {
         return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px,
+                                  water_ssr_truncate_main_px, water_ssr_truncate_detail_px,
                                   water_ssr_clamp, water_debug, ship_distance_m,
                                   water_ssr_downscale_n);
     }
@@ -2741,7 +2757,14 @@ int main(int argc, char** argv) {
         app.SetWaterSkinV2TruncateDetail(water_truncate_detail);
     }
     if (water_ssr_truncate_px >= 0.0f) {
-        app.water_ssr_truncate_px_ = water_ssr_truncate_px;
+        app.water_ssr_truncate_main_px_ = water_ssr_truncate_px;
+        app.water_ssr_truncate_detail_px_ = water_ssr_truncate_px;
+    }
+    if (water_ssr_truncate_main_px >= 0.0f) {
+        app.water_ssr_truncate_main_px_ = water_ssr_truncate_main_px;
+    }
+    if (water_ssr_truncate_detail_px >= 0.0f) {
+        app.water_ssr_truncate_detail_px_ = water_ssr_truncate_detail_px;
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──

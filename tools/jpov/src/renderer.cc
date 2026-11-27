@@ -2166,8 +2166,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                             WaterSsrQueryTuning query_tuning;
                             query_tuning.resolution_scale = cmds.water->ssr.resolution_scale;
                             query_tuning.roughness_to_lod = cmds.water->ssr.roughness_to_lod;
-                            query_tuning.normal_truncate_px =
-                                cmds.water->ssr_normal_truncate_px;
+                            query_tuning.normal_truncate_main_px =
+                                cmds.water->ssr_normal_truncate_main_px;
+                            query_tuning.normal_truncate_detail_px =
+                                cmds.water->ssr_normal_truncate_detail_px;
                             query_tuning.clamp_normal_above_horizon =
                                 cmds.water->ssr_clamp_normal_above_horizon;
                             water_skin_v2_renderer_.DrawQuery(wsi, query_tuning);

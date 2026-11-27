@@ -61,7 +61,10 @@ struct WaterSsrQueryTuning {
     float rough_max = 0.35f;          // (0, 1]，rough 上限（≈ 探针 LOD cap）
     // 谱截断乘数（波长 < 3T~8T 像素的波**不进 query 法线**；0 = 不截断）。
     // 见 WaterCommand::ssr_normal_truncate_px 的注释：这是倒影噪点的直接旋钮。
-    float normal_truncate_px = 0.0f;
+    // 谱截断乘数（波长 < 3T~8T 像素的波**不进 query 法线**；0 = 该族不截断）。
+    // 主波 / 细节波分开：截细节波只去噪，截主波会把水面反射"压平"。
+    float normal_truncate_main_px = 0.0f;
+    float normal_truncate_detail_px = 0.0f;
     // 1 = 把 query 法线魔改到"反射方向 ≥ sin1°"（与着色趟 env 的钳位同口径）。
     // 关掉 = 逐字用中心法线（A/B 用；关掉时会有 10%~20% 的射线指到水面以下）。
     bool clamp_normal_above_horizon = true;
@@ -121,8 +124,12 @@ private:
     void DestroyQueryTarget();
     // truncate_override_px > 0 ⇒ 覆盖波浪谱自带的截断乘数（只给 query 趟用：
     // 着色趟必须与天球折射同口径，query 趟刻意用更强的截断压掉亚像素噪声）。
+    // truncate_*_px >= 0 ⇒ 覆盖波浪谱自带的截断乘数（只给 query 趟用：
+    // 着色趟必须与天球折射同口径，query 趟刻意用自己的一组值）。
+    // < 0（默认）= 不覆盖，用谱自己的口径。
     void UploadCommonUniforms(unsigned int prog, const Inputs& in, int sample_count,
-                              const WaterCsmShadow* csm, float truncate_override_px = 0.0f);
+                              const WaterCsmShadow* csm, float truncate_main_px = -1.0f,
+                              float truncate_detail_px = -1.0f);
     // 按「水上/水下 × 生产/调试」选 program（水上水下由相机 y vs level 决定，每帧常量）。
     unsigned int SelectProgram(const Inputs& inputs) const;
 
