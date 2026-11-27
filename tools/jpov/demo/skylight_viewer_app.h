@@ -216,6 +216,11 @@ public:
     // 镜面材质 + 两条条带（折线 / 平滑各一条，都开天光 ⇒ 都会被衰减）。
     static constexpr int kSceneUnderwater = 5;
     bool IsUnderwater() const { return scene_index_ == kSceneUnderwater; }
+    // 场景 5 两条条带的逐点 alpha（面板滑条）：
+    //   直条带默认 1（实心，只验照明侧衰减）；拱形默认 0.35（半透明，验合成趟）。
+    //   两者都是**素材级**参数 —— 合成趟只负责「α 是多少就按多少衰减背景」。
+    float underwater_strip_alpha_polyline_ = 1.0f;
+    float underwater_strip_alpha_smooth_ = 0.35f;
     // 两个独立开关（面板）。只在本场景写进 WaterCommand，其它场景保持默认 false ⇒ 零回归。
     bool water_atten_ambient_ = true;
     bool water_atten_sun_ = true;
@@ -492,14 +497,15 @@ public:
         polyline.geometry = jpov::StripInterpolation::kPolyline;
         polyline.sky_light = sl;
         jpov::Strip16 straight;
-        fill(/*arc=*/false, -3.0f, 1.6f, 0.28f, /*alpha=*/1.0f, &straight);
+        fill(/*arc=*/false, -3.0f, 1.6f, 0.28f, underwater_strip_alpha_polyline_,
+             &straight);
         polyline.strips.push_back(straight);
 
         jpov::TranslucentStrip16Batch smooth;
         smooth.geometry = jpov::StripInterpolation::kSmooth;
         smooth.sky_light = sl;
         jpov::Strip16 arch;
-        fill(/*arc=*/true, 2.9f, 1.6f, 0.28f, /*alpha=*/0.35f, &arch);
+        fill(/*arc=*/true, 2.9f, 1.6f, 0.28f, underwater_strip_alpha_smooth_, &arch);
         smooth.strips.push_back(arch);
 
         cmds->DrawStrip16Batch(std::move(polyline));
@@ -1350,6 +1356,35 @@ private:
                 ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(0, 7), 0.0f, 3.0f, 2);
                 ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(0, 8), 0.0f, 120.0f,
                                 2);
+                // ── 右列：条带透明度 + 水体参数（2026-11-27 Danis 要"看更多场景"）──
+                //   两条带各自一个 α：它是**素材**参数（逐点颜色里的 alpha），
+                //   合成趟只保证「α 是多少就按多少衰减背景、且各吃自己的介质前缀」。
+                ui_.SliderFloat("条带 α 直(折线)", &underwater_strip_alpha_polyline_,
+                                row(1, 0), 0.0f, 1.0f, 2);
+                ui_.SliderFloat("条带 α 拱(平滑)", &underwater_strip_alpha_smooth_,
+                                row(1, 1), 0.0f, 1.0f, 2);
+                // 水体吸收 = 水色：视线侧（介质）与照明侧（衰减）用的是同一组 σ
+                //（attenuate_* 的 σ 就是从这份配置派生的）⇒ 拖它两边一起变。
+                if (ui_.SliderFloat("水 吸收 R 1/m (水色 蓝↔绿)", &water_cfg_.sigma_a.x(),
+                                    row(1, 2), 0.0f, 1.5f, 3)) {
+                    InvalidateLabWater();
+                }
+                if (ui_.SliderFloat("水 吸收 G 1/m", &water_cfg_.sigma_a.y(), row(1, 3),
+                                    0.0f, 0.3f, 3)) {
+                    InvalidateLabWater();
+                }
+                if (ui_.SliderFloat("水 吸收 B 1/m", &water_cfg_.sigma_a.z(), row(1, 4),
+                                    0.0f, 0.1f, 3)) {
+                    InvalidateLabWater();
+                }
+                // 水深：海底、方块、树、蓝人、两条带**整组**跟着上下（全部按 bed_y 摆放），
+                // 所以拖它改的是「水下有多深」而不是「东西浮起来」。
+                if (ui_.SliderFloat("水 水深 m (0.5~12)", &water_cfg_.depth_m, row(1, 5),
+                                    0.5f, 12.0f, 2)) {
+                    InvalidateLabWater();   // 有限水深会改色散 ⇒ 波谱要重算
+                }
+                ui_.SliderFloat("水 散射 1/m (浑浊)", &water_cfg_.sigma_s, row(1, 6),
+                                0.0f, 0.5f, 3);
                 // 只读：海底深度处的两个逐通道增益（让「开关改了什么」可核对，
                 // 观感上的差异大部分被水体的注入色吃掉了，数字不会骗人）。
                 {
