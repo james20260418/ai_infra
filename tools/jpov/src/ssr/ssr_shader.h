@@ -36,8 +36,8 @@ inline constexpr const char* kSsrGlslVersion = "#version 330 core\n";
 // ── 共享的「同面判定」数学（2026-11-13）──
 //
 // 这个模型有三处用到（以前各写一份，阈值/形式容易漂）：
-//   ① 体素柱的同面并集（ssr_integration.cc 的 ssr_slab_back pass）
-//   ② 融合层双边升采样的值域项（ssr_fusion.cc）
+//   ① 体素柱的同面并集（ssr_slab_back.cc 的 pass）
+//   ② 升采样的值域项（ssr_upsample.cc）
 //   ③ 掠射淡出里对 Q 的两个视角比较（同一套"预测—残差"思路）
 // 只放与分辨率/取纹理无关的纯函数；调用方自己算好角射线与预测值再传进来。
 inline constexpr const char* kSsrSameSurfaceGlsl = R"glsl(
@@ -82,13 +82,20 @@ float SsrPlaneViewDist(vec3 n, vec3 P, vec3 c) {
 )glsl";
 
 inline constexpr const char* kSsrCommonGlsl = R"glsl(
+// ── 源（被反射的世界）与查询（谁在问）是**两套纹理**（2026-11-27）──
+// 实心→实心时它们是同一份屏幕数据，但水皮/其它透明层做倒影时，查询像素（水面）
+// 不在源深度图里。算法本身对两者一视同仁：只在"取镜面像素自身"时用 uQuery*，
+// 在"判定这一格有没有柱子 / 射线扎进哪张面"时用 uSrc*。
+//
 // R32F：**w = 1/z_view**（不是窗口深度）。0 = 没有几何（天空/背景）。
 // SSR 内部一律用 w：判据全是"1/d 落在哪个区间"，而 1/d 对屏幕坐标仿射 ⇒ 每格零除法。
-uniform sampler2D uW;
-uniform sampler2D uNormal;    // 视空间法线 **rgb 三分量**（.a = 掩码：1/0.5/0 无数据）
+uniform sampler2D uSrcW;        // 源：每格的 w（柱子 front）
+uniform sampler2D uQueryW;      // 查询像素自身的 w（射线起点）
+uniform sampler2D uSrcNormal;   // 源法线：命中面朝向判据（rgb = **三分量**视空间法线）
+uniform sampler2D uQueryNormal; // 查询像素法线（反射方向）
 // 反射层**逐像素** roughness（R16F，降采样后）。2026-11-02 起材质进属性纹理，
 // 不再有"全场景一套粗糙度"；这里只用于一件事：超过 uRoughnessCutoff 的像素**不发射线**。
-uniform sampler2D uRough;
+uniform sampler2D uQueryRough;
 uniform float uRoughnessCutoff;   // [0,1]；1 = 永不跳过（等价于旧行为）
 uniform vec2  uRes;           // 镜面像素栅格 (W, H)
 uniform float uNear;
@@ -150,7 +157,7 @@ vec3 SsrNormalOf(vec4 attr) {
 // 粗糙表面的真实答案是一个**宽积分**，单条镜面射线对它没有意义（业界做法同：
 // FidelityFX SSSR 的 tile classification 直接不给高粗糙像素发射线，交回 env 探针）。
 float SsrRoughnessAt(ivec2 mir) {
-    return texelFetch(uRough, mir, 0).r;
+    return texelFetch(uQueryRough, mir, 0).r;
 }
 
 // σ 处的 1/d。**只在这里做插值，永远不要在 d 空间插值**（§3.1）。
@@ -210,7 +217,7 @@ bool SsrCellHit(float w_in, float w_out, float w_cell, ivec2 cell) {
 // attr.a ≥ 0.25 ⇒ 这一格有视空间法线（属性 pass 画过几何）。没有数据（天空 / 未纳入
 // 属性 pass 的几何）时不判、维持旧行为（见 ssr_renderer.h "已知边界"）。
 bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
-    vec4 attr = texelFetch(uNormal, cell, 0);
+    vec4 attr = texelFetch(uSrcNormal, cell, 0);
     if (attr.a < 0.25) {          // .a = 掩码编码：1 反射体 / 0.5 有法线非反射体 / 0 无数据
         return true;              // 没有法线数据 ⇒ 不判方向（维持引入判据之前的行为）
     }
@@ -222,10 +229,10 @@ bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
 // ⚠️ 采样点用 **tile 中心** uv = (mir + 0.5) / uRes，**不是** gl_FragCoord/uTile/uRes：
 //    后者会把采样点偏 (T−1)/(2T) 个像素，倒影整体平移 + 边缘一圈脏边。
 bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
-    float w_surf = texelFetch(uW, mir, 0).r;
+    float w_surf = texelFetch(uQueryW, mir, 0).r;
     float d_surf = 1.0 / w_surf;   // w = 1/z ⇒ z = 1/w（每像素一次除法）
 
-    vec3 N = SsrNormalOf(texelFetch(uNormal, mir, 0));
+    vec3 N = SsrNormalOf(texelFetch(uQueryNormal, mir, 0));
 
     vec2 uv = (vec2(mir) + 0.5) / uRes;
     vec2 ndc = uv * 2.0 - 1.0;
@@ -397,7 +404,7 @@ float SsrMarchLane(SsrRay ray, int lane) {
         }
         // 空格子（天空/无深度数据）没有柱子：穿过去，**不要**当成 far 处的墙。
         // 见 ssr_math.h::kEmptyCell 的反例（掠射时会在近地平线造出一大片假高光）。
-        float w_cell = texelFetch(uW, cell, 0).r;
+        float w_cell = texelFetch(uSrcW, cell, 0).r;
         if (!SsrHasDepth(w_cell)) {
             if (sigma_out >= end) {
                 break;
@@ -455,7 +462,7 @@ void main() {
     FragS = uSentinel;
 
     // 远平面（清空值）：没有深度数据，不发射线。天空占屏的场景里这一步最省。
-    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
+    if (!SsrHasDepth(texelFetch(uQueryW, mir, 0).r)) {
         return;
     }
     // 太粗糙 ⇒ 不发射线（预算省下来）：单条镜面射线表达不了宽反射瓣，交给 env 的 mip。
@@ -548,7 +555,7 @@ void main() {
     // 背面命中（2026-11-13）：march 把 s 编成 s + kSsrBackfaceBias 写出来（见 kSsrMarchFs）。
     // T² 的 min 归约保证"有正面命中就一定不是背面命中"。
     bool is_backface = have_hit && best >= kSsrBackfaceBias;
-    if (!SsrHasDepth(texelFetch(uW, mir, 0).r)) {
+    if (!SsrHasDepth(texelFetch(uQueryW, mir, 0).r)) {
         type = 0u;                         // kNone：本像素不是反射候选
     } else if (SsrRoughnessAt(mir) > uRoughnessCutoff) {
         type = 0u;                         // kNone：太粗糙，本像素没有发射线
@@ -578,15 +585,15 @@ void main() {
             if (uGrazingFadeEnd > uGrazingFadeStart) {
                 ivec2 hcell = clamp(ivec2(pos), ivec2(0), ivec2(uRes) - 1);
                 float w_hit = SsrWAt(ray, s);
-                vec3 nq = SsrNormalOf(texelFetch(uNormal, hcell, 0));
+                vec3 nq = SsrNormalOf(texelFetch(uSrcNormal, hcell, 0));
                 if (w_hit > 0.0 && dot(nq, nq) > 0.5) {
                     float d_hit = 1.0 / w_hit;
                     vec2 ndc_h = pos / uRes * 2.0 - 1.0;
                     vec3 Qv = vec3(ndc_h.x * uAspect * uTanHalf, ndc_h.y * uTanHalf, -1.0) * d_hit;
                     // 反射体像素的视空间位置与法线（P 就是本像素）
-                    float w_p = texelFetch(uW, mir, 0).r;
+                    float w_p = texelFetch(uQueryW, mir, 0).r;
                     if (w_p > 0.0) {
-                        vec3 np = SsrNormalOf(texelFetch(uNormal, mir, 0));
+                        vec3 np = SsrNormalOf(texelFetch(uQueryNormal, mir, 0));
                         vec2 uv_p = (vec2(mir) + 0.5) / uRes;
                         vec2 ndc_p = uv_p * 2.0 - 1.0;
                         vec3 Pv = vec3(ndc_p.x * uAspect * uTanHalf, ndc_p.y * uTanHalf, -1.0) / w_p;
@@ -613,7 +620,7 @@ void main() {
             } else {
                 ivec2 vpi = clamp(ivec2(vp), ivec2(0), ivec2(uRes) - 1);
                 // 灭点处**没有深度数据** = 反射方向真的指向天空；有几何 = 我们漏检/预算不够。
-                type = SsrHasDepth(texelFetch(uW, vpi, 0).r) ? 4u : 2u;
+                type = SsrHasDepth(texelFetch(uSrcW, vpi, 0).r) ? 4u : 2u;
             }
         }
     }

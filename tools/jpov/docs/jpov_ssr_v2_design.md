@@ -619,6 +619,9 @@ SSR 的全部输入就是三张纹理 —— 造一张假的深度图就能喂�
 
 ## 17. 2026-11-01 落地：模块拆分 + 输出契约 + 正式进 JPOV
 
+> ⚠️ 本节的文件划分已被 **§19（2026-11-27）** 取代：那时把整条链路封成了
+> 「Source/Query 进、全分辨率反射图出」的装置（`SsrChain`）。下面这张表保留作历史记录。
+
 ### 17.1 拆成四块（各自可独立替换 / 测试）
 
 | 文件 | 角色 | 说明 |
@@ -832,3 +835,97 @@ SSR 原来只有 CPU↔GPU 对拍（几何/命中格）与 tile 等价性（并�
 闸门与仓库其它光照 gold 一致（8×8 ROI 均值 ≤ 25、逐像素显著变化 ≤ 0.05%）。
 改 SSR 的观感/算法时先跑 `--capture-materials` 看图，确认是有意的改动再重跑
 `jpov_ssr_gold_generator` 更新 gold；**不要为了让 red 变绿去放宽闸门**。
+
+---
+
+## 19. 2026-11-27 重构：SSR 装置化（Source / Query）
+
+### 19.1 为什么要动
+
+原来的边界是「模块 + 融合」，而**融合 = 用 SSR 替换环境镜面项**。那是「实心→实心」这一个
+位置的知识（要先减掉 3D pass 已经加过的那一份 env），却被焊在了链路里 ⇒
+
+- 水皮要拿 SSR 做倒影时，只能绕开融合、自己再拼一遍降采样 / mip 链 / 升采样；
+- strip、粒子这些同样"想要一份屏幕空间反射"的地方，各自拼一套必然出现**第二份实现**
+  （改一处、另一处不动的那种 bug）。
+
+结论（Danis 定）：把「降采样 → march/resolve → 预滤波 → 升采样」封成**即插即用的 util**，
+输入输出都只是屏幕图，**代码里看不出它在链路中的位置**。
+
+### 19.2 分层
+
+```
+   SsrSource（被反射的世界）  ┐
+                              ├─→ SsrChain（装置，位置无关） ─→ 全分辨率反射图
+   SsrQuery （谁在问）        ┘        (rgb = 辐亮度, a = 覆盖率 A, + 背面 flag)
+
+   消费端（位置知识，各自一份）：
+     · 不透明场景：SsrComposite（替换 env 项）+ SsrOpaqueReflection（属性 pass / 胶水）
+     · 水皮（下一个）：自己的介质/菲涅尔模型，直接吃 SsrChain 的结果
+```
+
+`SsrChain` **不认识**：SsrConfig、环境探针、HDR 目标、材质、AO、管线前后是谁。
+它只回答"这些像素往镜面方向看见的是什么颜色、这份答案有多可信"。
+
+### 19.3 Source 与 Query 的确切含义
+
+| | 纹理 | 语义 |
+|---|---|---|
+| Source | `color_tex` RGBA16F | 命中时取的颜色（**纯辐亮度**：未加雾/未 tonemap/未乘材质） |
+| | `depth_tex` R32F | **窗口深度**（1 = 天空）—— 装置自己换算成 1/z |
+| | `normal_tex` RGBA16F | 命中面法线（朝向判据）；`.a ≥ 0.25` = 有法线数据 |
+| Query | `depth_tex` R32F | 反射面自己的窗口深度（1 = 这一像素不查询） |
+| | `normal_tex` RGBA16F | 反射面法线（决定往哪反）；`.a ≥ 0.25` = 参与 |
+| | `rough_tex` RGBA16F | 逐像素 roughness，**只读 `.a`**（与属性纹理附件 1 同构） |
+
+两者必须**同分辨率、同一相机、逐像素同屏**（屏幕参数化 σ 靠这个前提）。
+实心→实心时把同一批纹理传两遍，内部各跑一趟降采样，结果逐字节相同。
+
+### 19.4 文件表（重构后）
+
+| 文件 | 角色 |
+|---|---|
+| `src/ssr/ssr_chain.{h,cc}` | **装置**：唯一的编排点；对外只有 Source/Query/Params/Result |
+| `src/ssr/ssr_downsample.{h,cc}` | 输入准备（两种 kind：`kSource` / `kQuery`，**选点规则一份**） |
+| `src/ssr/ssr_slab_back.{h,cc}` | 同面并集柱体（源几何的准备；原先长在 integration 里） |
+| `src/ssr/ssr_renderer.{h,cc}` + `ssr_shader.h` | 算法（march + resolve）。输入改成「源 3 张 + 查询 3 张」 |
+| `src/ssr/ssr_filter.{h,cc}` | 粗糙度预滤波（A 预乘 mip 链 + 三个可选遮丑滤波器） |
+| `src/ssr/ssr_upsample.{h,cc}` | 升采样（双边值域项 → 全分辨率反射图 + 背面 flag）。原先长在 fusion 里 |
+| `src/ssr/ssr_composite.{h,cc}` | **消费端**：用 SSR 替换环境镜面项（含 HDR 副本 blit、调试视图） |
+| `src/ssr/ssr_opaque_reflection.{h,cc}` | 胶水：属性 pass 的 program + SsrConfig→SsrParams + 调装置与合成 |
+
+`ssr_fusion.*` / `ssr_integration.*` 已删除（拆分后没有对应物）。
+
+### 19.5 为什么可以宣称"画面不变"
+
+升采样与合成拆成两趟后，中间那张缓冲用 **RGBA32F**（不是 16F）：消费端读到的 (L, A)
+与拆分前在同一表达式里的那两个 float 逐位相同 ⇒ 合成的算式不变。
+
+实测（2026-11-27，同机同 gold）：重构前后 12 个 gold 组合的
+`changed / max_diff / p99.9` **逐项完全相同**（例如 `graze_mirror` 16 px /
+`filter_atrous` 175 px，都是 main 上本来就有的 llvmpipe 级漂移）。
+
+### 19.6 新增的那条测试
+
+`test/ssr:ssr_gpu_test` 里的 `SsrChain.SourceAndQueryAreIndependentInputs`：
+① 只翻**查询**法线 ⇒ 反射图必须变；② 只改**查询**深度 ⇒ 必须变；
+③ 只翻**源**法线（朝相机 → 背相机）⇒ 背面 flag 从 0 变成几乎全覆盖。
+三条都做过负向验证（把着色器里 query 采样换成 source、或把朝向判据换成 query 侧 ⇒ 立刻红）。
+
+### 19.7 资源与生命周期（谁持有、谁释放）
+
+| 资源 | 持有者 | 释放者 | 备注 |
+|---|---|---|---|
+| `SsrSource` / `SsrQuery` 的纹理 | **调用方** | 调用方 | 装置只借用，不解绑、不删除；生命周期需覆盖本次 Render |
+| `SsrChainResult`（reflection / backface / raw） | `SsrChain` | `SsrChain::Finalize` | 下一次 Render 改写；**不要**把 id 存到下一帧 |
+| 装置内部中间目标（两套降采样、柱体、slice、mip 链、升采样） | `SsrChain` | 同上 | 懒创建；尺寸或 scale 变化才重建（Render 里零分配） |
+| 不透明场景的属性纹理 / 3D FBO | `Renderer` | `Renderer` | `SsrOpaqueReflection` 只借用（它在 3D pass 那一侧） |
+| HDR 副本（合成用） | `SsrComposite` | `SsrComposite::Finalize` | 避免同张纹理又读又写：从 `hdr_tex` blit（读端 FBO 每帧临时挂、用完脱钩），合成写回 `dst_fbo` |
+| GLSL program | `ShaderManager` | `ShaderManager` | 各模块只持 id，按名字缓存 |
+
+两套降采样（源 / 查询）是**两个对象、两份目标**：实心→实心时它们内容逐字节相同，
+但"源与查询可以不同"正是这套接口存在的理由，代码里不为同源情形留特例分支。
+
+状态洁净：装置与它的每一趟都自己保存/恢复 FBO、viewport、program、纹理绑定与
+blend/depth/cull/scissor —— 调用方不需要收拾，也不应依赖"进 Render 之前绑着什么"。
+

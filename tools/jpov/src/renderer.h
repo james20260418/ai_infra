@@ -24,7 +24,7 @@
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
-#include "tools/jpov/src/ssr/ssr_integration.h"
+#include "tools/jpov/src/ssr/ssr_opaque_reflection.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
@@ -171,7 +171,7 @@ private:
     unsigned int ssr_attr_mat_tex_ = 0;
     int ssr_attr_w_ = 0, ssr_attr_h_ = 0;
     unsigned int ssr_attr_depth_tex_ = 0;   // 缓存当时挂的深度纹理句柄（变了要重建 FBO）
-    SsrIntegration ssr_integration_;
+    SsrOpaqueReflection ssr_opaque_reflection_;
 
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_tex_hdr_ = 0;
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）

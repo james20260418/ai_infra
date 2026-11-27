@@ -1,18 +1,23 @@
 // JPOV SSR — 输入准备（降采样）
 //
-// 职责：把**全分辨率**的三张图（HDR 颜色 / 场景深度 / 属性纹理）降到 SSR 分辨率，
-// 供 SsrRenderer 使用。它是 SSR 唯一的"输入准备"环节。
+// 职责：把**全分辨率**的一组屏幕图降到 SSR 分辨率，供 SsrRenderer 使用。
 //
-// 选点规则（**三张图必须取自同一个 texel**）：
+// 2026-11-27：同一套选点规则要服务**两种**输入（见 ssr_chain.h 的 Source/Query 之分）：
+//   kSource —— 被反射的世界：color + depth(window) + normal  →  color + w + normal
+//   kQuery  —— 谁在问（反射面自己）：depth(window) + normal + rough →  w + normal + rough
+// 两者的**选点规则完全一样**（同一个 N×N 方块里挑窗口深度最小的 texel，各图同源），
+// 所以只写一份着色器、用 `SSR_DOWNSAMPLE_QUERY` 宏切输出布局。
+//
+// 选点规则（**同一 kind 内的几张图必须取自同一个 texel**）：
 //   在 scale×scale 的方块里挑**窗口深度最小**（= 离相机最近）的那一个全分辨率 texel，
-//   颜色 / 深度 / 法线全部取它。
+//   颜色 / 深度 / 法线 / 粗糙度全部取它。
 //   为什么不能各自取（颜色平均 + 深度取最小）：两者会分属**不同表面**，出错极隐蔽
 //   （倒影里出现"别的物体的颜色"）。为什么取最近：深度缓冲只记最前表面，镜子里能看见的
 //   也是它；被挡住的背景不该发射射线。min 对连续函数连续 ⇒ 相机移动时不会跳变。
 //
-// 属性纹理的 .a（掩码编码）与 .rgb（三维视空间法线）都要**原样带下去**：
-//   · rgb 是命中面朝向判据与被反射物法线；
-//   · a 告诉合成层"这一格是不是反射体"（模块本身不读 a）。
+// 法线纹理的 .a（掩码编码）与 .rgb（三维视空间法线）都要**原样带下去**：
+//   · rgb 是命中面朝向判据（源）与反射方向（查询）；
+//   · a ≥ 0.25 = 这一格有法线数据（模块用它决定"要不要判朝向 / 要不要发射线"）。
 //
 // 纯数学部分（IsValidScale / DownsampleTargetSize / PickSourceTexel）不依赖 GL，
 // 单测落在 ssr_downsample_test.cc。
@@ -79,34 +84,54 @@ DownsamplePick PickSourceTexel(int dx, int dy, int scale, int full_w, int full_h
     return best;
 }
 
-// GL 侧：拥有降采样目标纹理与 FBO，一趟把三张全分辨率图降到 SSR 分辨率。
+// 降采样的两种角色。kind 在 Init 时定死（它决定着色器变体与目标纹理的布局）：
+//   kSource → color_tex()/w_tex()/normal_tex() 有效，rough_tex() == 0
+//   kQuery  → w_tex()/normal_tex()/rough_tex() 有效，color_tex() == 0
+enum class SsrDownsampleKind {
+    kSource,
+    kQuery,
+};
+
+// GL 侧：拥有降采样目标纹理与 FBO，一趟把全分辨率图降到 SSR 分辨率。
 //
-// 生命周期：Init(shader_mgr) → 每帧 Run(...) → Finalize()。
-// Run 会保存/恢复调用方的 FBO、viewport、活动纹理单元与纹理绑定。
+// 生命周期：Init(shader_mgr, kind) → 每帧 Run(inputs) → Finalize()。
+// Run 自己保存/恢复调用方的全部相关 GL 状态（FBO、viewport、program、活动纹理单元与
+// 纹理绑定、blend/depth/cull/scissor）—— 调用方不需要收拾。
+// 纹理所有权：输入纹理是**调用方的**（只借不解绑）；输出三张是本类持有的（Finalize 释放，
+// 下一次 Run 改写），只借给调用方读。
 class SsrDownsample {
 public:
+    // 一趟的全部输入（只读）。各字段的"未设置 = 0"一律 FATAL，不做兜底。
+    struct Inputs {
+        unsigned int color_tex = 0;   // 仅 kSource：RGBA16F 源颜色
+        unsigned int depth_tex = 0;   // 必填：R32F **窗口深度**（1 = 天空/无几何）
+        unsigned int normal_tex = 0;  // 必填：RGBA16F rgb = 视空间法线，a = 掩码编码
+        unsigned int rough_tex = 0;   // 仅 kQuery：RGBA16F，**只读 .a** = roughness
+        int full_w = 0;               // > 0
+        int full_h = 0;               // > 0
+        int scale = 0;                // 1..4（= 1 / resolution_scale 的整数倍率）
+        float near_plane = 0.0f;      // > 0（窗口深度 → w 的换算需要）
+        float far_plane = 0.0f;       // > near
+    };
+
     SsrDownsample();
     ~SsrDownsample();
     SsrDownsample(const SsrDownsample&) = delete;
     SsrDownsample& operator=(const SsrDownsample&) = delete;
 
-    // Pre-condition: GL context 已激活。
-    void Init(ShaderManager* shader_mgr);
+    // Pre-condition: GL context 已激活。可重复调用（先内部 Finalize 再重建）。
+    void Init(ShaderManager* shader_mgr, SsrDownsampleKind kind);
     void Finalize();
 
-    // 跑一趟。scale = 1/N（用 IsValidScale 校验）。
-    // 返回后 color_tex()/w_tex()/normal_tex()/rough_tex() 为本帧结果，尺寸见 width()/height()。
-    // near/far：窗口深度 → w = 1/z 的换算需要（见 ssr_math.h::WFromWindowDepth）。
-    void Run(unsigned int full_color_tex, unsigned int full_depth_tex,
-             unsigned int full_attr_tex, unsigned int full_attr_mat_tex,
-             int full_w, int full_h, int scale, float near_plane, float far_plane);
+    // 跑一趟。尺寸 / scale 变化时内部重建目标（Render 热路径上零分配）。
+    void Run(const Inputs& in);
 
-    unsigned int color_tex() const { return color_tex_; }    // RGBA16F，命中源色
+    unsigned int color_tex() const { return color_tex_; }    // RGBA16F（kSource 才有）
     // R32F，**w = 1/z_view**（0 = 天空/无几何）。SSR 链路内部一律用 w。
     unsigned int w_tex() const { return w_tex_; }
-    unsigned int normal_tex() const { return normal_tex_; }  // RGBA16F，rgb=视空间法线, a=掩码
-    // R16F：反射层**逐像素** roughness（属性纹理附件 1 的 .a）。
-    // 只用于 march/resolve 的"太粗糙就不发射线"截止；材质本身（F0）由合成层在全分辨率读。
+    // RGBA16F，rgb = 三维视空间法线，a = 掩码编码（**原样带下去**）。
+    unsigned int normal_tex() const { return normal_tex_; }
+    // R16F：逐像素 roughness（kQuery 才有），只采样 .r。
     unsigned int rough_tex() const { return rough_tex_; }
     int width() const { return width_; }
     int height() const { return height_; }
@@ -116,12 +141,13 @@ private:
     void DestroyTargets();
 
     ShaderManager* shader_mgr_ = nullptr;
+    SsrDownsampleKind kind_ = SsrDownsampleKind::kSource;
     unsigned int prog_ = 0;
     unsigned int fbo_ = 0;
-    unsigned int color_tex_ = 0;
+    unsigned int color_tex_ = 0;   // kSource：RGBA16F 源颜色（命中取色用）
     unsigned int w_tex_ = 0;       // R32F：w = 1/z_view（0 = 空）
-    unsigned int normal_tex_ = 0;
-    unsigned int rough_tex_ = 0;
+    unsigned int normal_tex_ = 0;  // RGBA16F：rgb = 三维视空间法线，a = 掩码编码
+    unsigned int rough_tex_ = 0;   // kQuery：R16F 逐像素 roughness
     int width_ = 0;
     int height_ = 0;
 };

@@ -381,7 +381,7 @@ cc_library(
         ":shader_manager",
         ":sky_renderer",
         ":env_specular",
-        "//tools/jpov/src/ssr:ssr_integration",
+        "//tools/jpov/src/ssr:ssr_opaque_reflection",
         "//tools/jpov/src/fog:fog_composite_renderer",
         "//tools/jpov/src/fog:fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
