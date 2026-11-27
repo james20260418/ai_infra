@@ -59,6 +59,9 @@ struct WaterSsrQueryTuning {
     float resolution_scale = 0.5f;    // 1/N（> 0），装置的降采样倍率
     float roughness_to_lod = 8.0f;    // > 0，装置的 roughness → mip 级斜率
     float rough_max = 0.35f;          // (0, 1]，rough 上限（≈ 探针 LOD cap）
+    // 谱截断乘数（波长 < 3T~8T 像素的波**不进 query 法线**；0 = 不截断）。
+    // 见 WaterCommand::ssr_normal_truncate_px 的注释：这是倒影噪点的直接旋钮。
+    float normal_truncate_px = 4.0f;
 };
 
 class WaterSkinV2Renderer {
@@ -113,8 +116,10 @@ private:
     // query 趟的三附件目标（R32F 深度 / RGBA16F 法线 / RGBA16F rough）。懒创建。
     void EnsureQueryTarget(int w, int h);
     void DestroyQueryTarget();
+    // truncate_override_px > 0 ⇒ 覆盖波浪谱自带的截断乘数（只给 query 趟用：
+    // 着色趟必须与天球折射同口径，query 趟刻意用更强的截断压掉亚像素噪声）。
     void UploadCommonUniforms(unsigned int prog, const Inputs& in, int sample_count,
-                              const WaterCsmShadow* csm);
+                              const WaterCsmShadow* csm, float truncate_override_px = 0.0f);
     // 按「水上/水下 × 生产/调试」选 program（水上水下由相机 y vs level 决定，每帧常量）。
     unsigned int SelectProgram(const Inputs& inputs) const;
 

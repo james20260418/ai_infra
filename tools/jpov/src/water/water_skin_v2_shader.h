@@ -827,7 +827,16 @@ void main() {
 // （水下/生产的 program 里没有 uSsrReflection，拼进去会编译失败）。
 // 用途：判"SSR 到底有没有在这片水面生效" —— A 全黑 = 射线没发出/没命中/被淡出吃光。
 inline constexpr const char* kWaterSkinV2SsrDebugGlsl = R"glsl(
-bool EmitSsrDebugV2(int mode) {
+bool EmitSsrDebugV2(WaterSurfaceV2 s, int mode) {
+    if (mode == 22) {
+        // 反射方向的仰角符号：红 = 指向水面以下（物理上是"反射到别处的水"，
+        // 屏幕空间里既不是天空也不是水面 ⇒ 只能靠 env 兜底），绿 = 指向天上。
+        vec3 R = reflect(s.rd, s.N);
+        oAccum = vec4(max(-R.y, 0.0) * 6.0, max(R.y, 0.0) * 6.0, 0.02, 1.0);
+        oReveal = 1.0;
+        oDepth = 1.0;
+        return true;
+    }
     if (mode != 20 && mode != 21) {
         return false;
     }
@@ -847,7 +856,7 @@ void main() {
     RejectOccludedV2(s, uWaveDebug == 3);
     WaterShadeV2 o;
     ShadeAboveV2(s, o);
-    if (!EmitSsrDebugV2(uWaveDebug)) {
+    if (!EmitSsrDebugV2(s, uWaveDebug)) {
         EmitDebugV2(s, o, uWaveDebug);
     }
 }

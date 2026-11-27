@@ -1180,6 +1180,16 @@ struct WaterCommand {
     //   · enabled = false ⇒ 水皮 query pass 与整条链路一次都不跑（零开销、逐字节等于旧行为）；
     //   · 反射源只含**不透明 3D**（颜色/深度/法线），不含条带/粒子/水皮自己。
     SsrConfig ssr = DefaultWaterSsrConfig();
+
+    // ── query 法线的谱截断（2026-11-27，只影响 SSR 的 Query，不影响水皮着色）──
+    // 复用波浪谱**已有**的截断机制（`ResolveWaveTruncation` / `uWaveTruncatePx*`）：
+    // 波长 < 3·T 个**像素**的波不进 query 法线（T=0 = 不截断 = 逐字用中心法线）。
+    //
+    // 为什么必须截：着色趟每个像素有 S 个法线样本、而且探针是连续的（env LOD 按方差糊），
+    // 亚像素波在那里只是**能量**；而 SSR 只有**一条**射线 —— 亚像素波让这条射线逐像素乱跳，
+    // 倒影目标（船/岸）被切碎成噪点（Danis 2026-11-27 实拍：远处倒影里一半是天色）。
+    // 截断的判据与 V1 的老口径同一个（3~8 px 带 × T），不是新概念。
+    float ssr_normal_truncate_px = 4.0f;
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。

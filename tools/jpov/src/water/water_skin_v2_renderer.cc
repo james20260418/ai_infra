@@ -168,7 +168,8 @@ void WaterSkinV2Renderer::Begin(int full_w, int full_h) {
 }
 
 void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& in,
-                                               int sample_count, const WaterCsmShadow* csm) {
+                                               int sample_count, const WaterCsmShadow* csm,
+                                               float truncate_override_px) {
     // ⚠️ 四个 program 各只声明自己需要的 uniform（水上无介质、水下无 env/太阳），这里**统一全传**：
     //    未声明的 uniform 在 GetUniform 返回 -1，glUniform* 对 -1 是静默 no-op（GL 惯例）。
     //    与 V1 的差异共四条：S、谱不截断、相位局部原点 + 局部系相机 xz；
@@ -295,9 +296,14 @@ void WaterSkinV2Renderer::UploadCommonUniforms(unsigned int prog, const Inputs& 
 
     // 波浪谱：口径由 WaterWaves::{v2_truncation_px} 决定（V1 = 3/8 px，V2 默认不截断）
     // + 相位局部原点（float 精度手段）。与天球折射共用同一份上传实现。
-    const water::WaveTruncation trunc =
+    water::WaveTruncation trunc =
         in.waves != nullptr ? water::ResolveWaveTruncation(*in.waves)
                             : water::WaveTruncation{};
+    if (truncate_override_px > 0.0f) {
+        // query 趟专用：**同一个机制、另一组值**（3T~8T px）。着色趟仍用谱自己的口径。
+        trunc.truncate_px_main = truncate_override_px;
+        trunc.truncate_px_detail = truncate_override_px;
+    }
     water::WaveUniformParams wp;
     wp.time_s = in.wave_time_s;
     wp.depth_m = in.wave_depth_m;
@@ -379,6 +385,7 @@ void WaterSkinV2Renderer::DrawQuery(const Inputs& in, const WaterSsrQueryTuning&
     CHECK(tuning.resolution_scale > 0.0f);
     CHECK(tuning.roughness_to_lod > 0.0f);
     CHECK(tuning.rough_max > 0.0f && tuning.rough_max <= 1.0f);
+    CHECK(tuning.normal_truncate_px >= 0.0f);
 
     EnsureQueryTarget(in.full_w, in.full_h);
 
@@ -405,7 +412,8 @@ void WaterSkinV2Renderer::DrawQuery(const Inputs& in, const WaterSsrQueryTuning&
     glUseProgram(prog_query_);
     // 与着色趟共用同一份 uniform 上传（相机 / 波浪谱 / 介质 / 太阳 / 深度容差）。
     // 传 sample_count = 1：query 只要中心法线（S 不影响几何，也不进这一趟的成本）。
-    UploadCommonUniforms(prog_query_, in, /*sample_count=*/1, /*csm=*/nullptr);
+    UploadCommonUniforms(prog_query_, in, /*sample_count=*/1, /*csm=*/nullptr,
+                         /*truncate_override_px=*/tuning.normal_truncate_px);
     glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrResolutionScale"),
                 tuning.resolution_scale);
     glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrRoughnessToLod"),

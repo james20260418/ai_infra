@@ -1361,7 +1361,7 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
 // 判据：
 //   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
 //   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
-int RunCaptureWaterSsr(const std::string& out_dir) {
+int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 水皮 SSR A/B（headless）";
@@ -1381,6 +1381,9 @@ int RunCaptureWaterSsr(const std::string& out_dir) {
     InstallShip(app);
     app.InstallTextMeasure();
     app.SetOceanLab(true);
+    if (ssr_truncate_px >= 0.0f) {
+        app.water_ssr_truncate_px_ = ssr_truncate_px;
+    }
     app.SetWaterWaveTime(/*wave_time_s=*/6.0f);   // 冻结时刻：差异只来自 SSR
 
     jpov::WindowInfo winfo;
@@ -2464,6 +2467,7 @@ int main(int argc, char** argv) {
     std::string ocean_lab_out_dir;
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
+    float water_ssr_truncate_px = -1.0f;   // --water-ssr-truncate：query 法线的谱截断（<0 = 用默认）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2546,6 +2550,8 @@ int main(int argc, char** argv) {
             ocean_time_s = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-debug") == 0 && i + 1 < argc) {
             water_debug = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--water-ssr-truncate") == 0 && i + 1 < argc) {
+            water_ssr_truncate_px = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2554,7 +2560,7 @@ int main(int argc, char** argv) {
         return RunCaptureEnv(env_out_dir);
     }
     if (!water_ssr_out_dir.empty()) {
-        return RunCaptureWaterSsr(water_ssr_out_dir);
+        return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,
@@ -2706,6 +2712,9 @@ int main(int argc, char** argv) {
     }
     if (water_truncate_detail >= 0.0f) {
         app.SetWaterSkinV2TruncateDetail(water_truncate_detail);
+    }
+    if (water_ssr_truncate_px >= 0.0f) {
+        app.water_ssr_truncate_px_ = water_ssr_truncate_px;
     }
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──

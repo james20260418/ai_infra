@@ -355,6 +355,8 @@ public:
     // 默认都开（旧行为逐字节不变）。
     // 水皮 SSR 的整份配置（**独立**于实心场景的 ssr_；默认开，见 DefaultWaterSsrConfig）。
     jpov::SsrConfig water_ssr_ = jpov::DefaultWaterSsrConfig();
+    // query 法线的谱截断乘数（0 = 不截断）。语义见 WaterCommand::ssr_normal_truncate_px。
+    float water_ssr_truncate_px_ = 4.0f;
     bool water_skin_on_ = true;
     bool water_medium_on_ = true;
     // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
@@ -1101,6 +1103,7 @@ public:
             w.waves.v2_m3 = water_v2_m3_;
             // 水皮自己的 SSR 配置（默认开；与 cmds.ssr 是两个独立实例）。
             w.ssr = water_ssr_;
+            w.ssr_normal_truncate_px = water_ssr_truncate_px_;
             cmds->water = w;
         }
 
@@ -1354,6 +1357,9 @@ private:
                         water_ssr_.resolution_scale = 1.0f / std::max(ssr_n, 1.0f);
                     }
                 }
+                // query 法线的谱截断：0 = 逐字用中心法线（倒影会被亚像素波切碎）
+                ui_.SliderFloat("水皮 SSR 法线截断 T (×3~8px)", &water_ssr_truncate_px_,
+                                row(0, 17), 0.0f, 8.0f, 1);
                 {
                     float ssr_budget_px = static_cast<float>(water_ssr_.max_ray_pixels);
                     if (ui_.SliderFloat("水皮 SSR 射线预算 px", &ssr_budget_px, row(0, 16),
