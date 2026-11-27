@@ -52,6 +52,13 @@ using jpov_viewer::kViewerHeight;
 using jpov_viewer::kViewerFps;
 using jpov_viewer::kViewerFontAlias;
 
+// ── 远景帆船的摆放方位（**固定世界方向**，从场景原点出发）──
+// 面板上的距离滑条沿这条线推远/拉近；机位怎么转都不会让船跟着跑。
+// 方向取默认机位（25°、朝太阳侧）的视线方位 ⇒ 默认距离下船正好在画面上沿。
+inline constexpr float kShipDirX = -0.5547f;   // = normalize(-40, -60)
+inline constexpr float kShipDirZ = -0.8321f;
+inline constexpr float kShipDistanceDefaultM = 72.0f;
+
 // 天光查看器渲染核心 App。
 class SkylightApp : public JPOV {
 public:
@@ -355,8 +362,21 @@ public:
     // 默认都开（旧行为逐字节不变）。
     // 水皮 SSR 的整份配置（**独立**于实心场景的 ssr_；默认开，见 DefaultWaterSsrConfig）。
     jpov::SsrConfig water_ssr_ = jpov::DefaultWaterSsrConfig();
+    // query 法线钳位开关（与 WaterCommand::ssr_clamp_normal_above_horizon 同义）
+    bool water_ssr_clamp_normal_ = true;
+    // 帆船：距离（米，沿固定世界方位）+ 吃水后的基准高度（由 InstallShip 填）
+    float ship_distance_m_ = kShipDistanceDefaultM;
+    float ship_distance_f_ = kShipDistanceDefaultM;   // 滑条绑定（SliderFloat 只收 float*）
+    float ship_base_y_ = 0.0f;
+
+    // 沿固定世界方位摆船（距离 = 离场景原点；船体最低点始终压在水位下 kShipDraftM）
+    void SetShipDistance(float distance_m) {
+        ship_distance_m_ = distance_m;
+        ship_distance_f_ = distance_m;
+        ship_.center = {kShipDirX * distance_m, ship_base_y_, kShipDirZ * distance_m};
+    }
     // query 法线的谱截断乘数（0 = 不截断）。语义见 WaterCommand::ssr_normal_truncate_px。
-    float water_ssr_truncate_px_ = 4.0f;
+    float water_ssr_truncate_px_ = 0.0f;
     bool water_skin_on_ = true;
     bool water_medium_on_ = true;
     // 短波（毛细波/短重力波）：只进 MSS（不改 displacement / 法线 / 求交）。
@@ -1104,6 +1124,7 @@ public:
             // 水皮自己的 SSR 配置（默认开；与 cmds.ssr 是两个独立实例）。
             w.ssr = water_ssr_;
             w.ssr_normal_truncate_px = water_ssr_truncate_px_;
+            w.ssr_clamp_normal_above_horizon = water_ssr_clamp_normal_;
             cmds->water = w;
         }
 
@@ -1360,6 +1381,13 @@ private:
                 // query 法线的谱截断：0 = 逐字用中心法线（倒影会被亚像素波切碎）
                 ui_.SliderFloat("水皮 SSR 法线截断 T (×3~8px)", &water_ssr_truncate_px_,
                                 row(0, 17), 0.0f, 8.0f, 1);
+                // 法线钳位：把"反射方向指到水下"的像素魔改到 R.y ≥ sin1°（与 env 同口径）
+                ui_.Checkbox("水皮 SSR 法线钳到地平线", &water_ssr_clamp_normal_, row(0, 18));
+                // 远景帆船的远近（沿固定世界方位推远/拉近；改机位不会让它跟着跑）
+                if (ui_.SliderFloat("帆船 距离 m (0~1000)", &ship_distance_f_, row(0, 19),
+                                    0.0f, 1000.0f, 0)) {
+                    SetShipDistance(ship_distance_f_);
+                }
                 {
                     float ssr_budget_px = static_cast<float>(water_ssr_.max_ray_pixels);
                     if (ui_.SliderFloat("水皮 SSR 射线预算 px", &ssr_budget_px, row(0, 16),

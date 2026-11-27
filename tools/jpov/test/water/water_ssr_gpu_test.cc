@@ -406,4 +406,88 @@ TEST(WaterSsrGpu, ZeroCoverageEqualsEnvOnly) {
     f.TearDown();
 }
 
+// ④ 法线钳位：开 ⇒ 每个被查询像素的**反射方向** y ≥ sin(1°)；关 ⇒ 一定存在低于它的像素。
+//    这是"魔改法线让 PQ 的 y 半正定"这条逻辑的唯一判据（着色器里的其余行为不变）。
+TEST(WaterSsrGpu, QueryNormalClampKeepsRayAboveHorizon) {
+    Fixture f;
+    f.SetUp();
+    WaterSkinV2Renderer::Inputs in = f.BaseInputs();
+    // 掠射机位 + 波浪：不钳位时必然有一批法线把反射方向打到水面以下。
+    in.camera.position = Vec3f{0.0f, 1.5f, 9.0f};
+    in.camera.target = Vec3f{0.0f, 0.0f, -20.0f};
+    jpov::WaterWaves waves;
+    waves.v2 = true;
+    waves.enabled = true;
+    waves.num_waves = 3;
+    waves.waves[0] = jpov::WaterWave{1.0f, 0.0f, 9.0f, 0.6f, 0.2f};
+    waves.waves[1] = jpov::WaterWave{0.4f, 0.9f, 5.0f, 0.35f, 1.4f};
+    waves.waves[2] = jpov::WaterWave{-0.7f, 0.7f, 3.0f, 0.2f, 2.2f};
+    in.waves = &waves;
+
+    // 相机基（= BuildLookAt 的行：side / upv / −fwd），用来把视空间法线转回世界。
+    const Vec3f pos = in.camera.position;
+    const Vec3f fwd0 = in.camera.target - pos;
+    const float fl = fwd0.Norm();
+    const Vec3f fwd{fwd0.x() / fl, fwd0.y() / fl, fwd0.z() / fl};
+    const Vec3f side0{fwd.y() * in.camera.up.z() - fwd.z() * in.camera.up.y(),
+                      fwd.z() * in.camera.up.x() - fwd.x() * in.camera.up.z(),
+                      fwd.x() * in.camera.up.y() - fwd.y() * in.camera.up.x()};
+    const float sl = side0.Norm();
+    const Vec3f side{side0.x() / sl, side0.y() / sl, side0.z() / sl};
+    const Vec3f upv{side.y() * fwd.z() - side.z() * fwd.y(),
+                    side.z() * fwd.x() - side.x() * fwd.z(),
+                    side.x() * fwd.y() - side.y() * fwd.x()};
+    const float tan_half = std::tan(0.5f * kFovDeg * 3.14159265358979323846f / 180.0f);
+    const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
+    const float kSin1 = std::sin(1.0f * 3.14159265358979323846f / 180.0f);
+
+    const auto count_below = [&](bool clamp_on) {
+        WaterSsrQueryTuning tuning;
+        tuning.clamp_normal_above_horizon = clamp_on;
+        f.v2.Begin(kWidth, kHeight);
+        f.v2.DrawQuery(in, tuning);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const std::vector<float> nrm = ReadRgba(f.v2.query().normal_tex);
+        int below = 0;
+        int checked = 0;
+        for (int py = 0; py < kHeight; ++py) {
+            for (int px = 0; px < kWidth; ++px) {
+                const size_t i = (static_cast<size_t>(py) * kWidth + px) * 4;
+                if (nrm[i + 3] < 0.5f) {
+                    continue;
+                }
+                // 视空间法线 → 世界；再和世界视线方向做反射。
+                const Vec3f n{nrm[i] * side.x() + nrm[i + 1] * upv.x() - nrm[i + 2] * fwd.x(),
+                              nrm[i] * side.y() + nrm[i + 1] * upv.y() - nrm[i + 2] * fwd.y(),
+                              nrm[i] * side.z() + nrm[i + 1] * upv.z() - nrm[i + 2] * fwd.z()};
+                const float ndc_x = ((static_cast<float>(px) + 0.5f) / kWidth) * 2.0f - 1.0f;
+                const float ndc_y = ((static_cast<float>(py) + 0.5f) / kHeight) * 2.0f - 1.0f;
+                Vec3f rd{side.x() * (ndc_x * tan_half * aspect) + upv.x() * (ndc_y * tan_half) +
+                             fwd.x(),
+                         side.y() * (ndc_x * tan_half * aspect) + upv.y() * (ndc_y * tan_half) +
+                             fwd.y(),
+                         side.z() * (ndc_x * tan_half * aspect) + upv.z() * (ndc_y * tan_half) +
+                             fwd.z()};
+                const float rl = rd.Norm();
+                rd = Vec3f{rd.x() / rl, rd.y() / rl, rd.z() / rl};
+                const float dn = rd.x() * n.x() + rd.y() * n.y() + rd.z() * n.z();
+                const float ry = rd.y() - 2.0f * dn * n.y();
+                ++checked;
+                if (ry < kSin1 - 2.0e-3f) {
+                    ++below;
+                }
+            }
+        }
+        return std::pair<int, int>{below, checked};
+    };
+
+    const std::pair<int, int> off = count_below(false);
+    EXPECT_GT(off.first, 0) << "关掉钳位时必须有反射方向低于地平线的像素（否则本测试测不出东西）";
+    const std::pair<int, int> on = count_below(true);
+    EXPECT_GT(on.second, 100);
+    EXPECT_EQ(on.first, 0) << "开钳位后反射方向的 y 必须半正定（≥ sin1°），实际有 "
+                           << on.first << "/" << on.second << " 个像素低于它";
+    f.TearDown();
+}
+
 }  // namespace

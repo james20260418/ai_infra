@@ -414,6 +414,8 @@ void WaterSkinV2Renderer::DrawQuery(const Inputs& in, const WaterSsrQueryTuning&
     // 传 sample_count = 1：query 只要中心法线（S 不影响几何，也不进这一趟的成本）。
     UploadCommonUniforms(prog_query_, in, /*sample_count=*/1, /*csm=*/nullptr,
                          /*truncate_override_px=*/tuning.normal_truncate_px);
+    glUniform1i(shader_mgr_->GetUniform(prog_query_, "uSsrClampNormal"),
+                tuning.clamp_normal_above_horizon ? 1 : 0);
     glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrResolutionScale"),
                 tuning.resolution_scale);
     glUniform1f(shader_mgr_->GetUniform(prog_query_, "uSsrRoughnessToLod"),

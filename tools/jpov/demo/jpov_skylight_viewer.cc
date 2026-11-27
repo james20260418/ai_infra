@@ -139,8 +139,8 @@ void InstallModels(jpov_skylight::SkylightApp& app) {
 inline constexpr const char* kShipModelPath   = "models/dutch_ship.glb";
 inline constexpr float kShipMastHeightM = 24.0f;   // 龙骨 → 桅顶（fluyt 量级）
 inline constexpr float kShipDraftM      = 1.6f;    // 水面以下的船体深度
-inline constexpr float kShipX = -40.0f;            // 摆在默认机位视线的远端
-inline constexpr float kShipZ = -60.0f;
+// 摆放方位与默认距离的常量在 skylight_viewer_app.h（kShipDirX/Z、kShipDistanceDefaultM）——
+// 面板滑条也要用它们，两个编译单元必须同一份。
 // 船头朝向（模型局部 +Z 指向的世界方向）：斜对相机比纯侧影更有体积。
 inline constexpr float kShipFrontX = -0.55f;
 inline constexpr float kShipFrontZ =  0.835f;
@@ -162,10 +162,11 @@ void InstallShip(jpov_skylight::SkylightApp& app) {
     const float min_y = ship.bounds_min[1];
 
     app.ship_.obj = std::move(ship);
-    app.ship_.center = {kShipX, level_y - kShipDraftM - scale * min_y, kShipZ};
     app.ship_.up = {0.0f, 1.0f, 0.0f};
     app.ship_.front = {kShipFrontX, 0.0f, kShipFrontZ};
     app.ship_.scale = scale;
+    app.ship_base_y_ = level_y - kShipDraftM - scale * min_y;
+    app.SetShipDistance(app.ship_distance_m_);
     LOG(INFO) << "dutch ship assembled: asset_h=" << h << " scale=" << scale
               << " center_y=" << app.ship_.center.y();
 }
@@ -1361,7 +1362,8 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
 // 判据：
 //   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
 //   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
-int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px) {
+int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ssr_clamp,
+                       int water_debug, float ship_distance_m) {
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 水皮 SSR A/B（headless）";
@@ -1383,6 +1385,13 @@ int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px) {
     app.SetOceanLab(true);
     if (ssr_truncate_px >= 0.0f) {
         app.water_ssr_truncate_px_ = ssr_truncate_px;
+    }
+    if (ssr_clamp >= 0) {
+        app.water_ssr_clamp_normal_ = (ssr_clamp != 0);
+    }
+    app.SetWaterWaveDebug(water_debug);
+    if (ship_distance_m >= 0.0f) {
+        app.SetShipDistance(ship_distance_m);
     }
     app.SetWaterWaveTime(/*wave_time_s=*/6.0f);   // 冻结时刻：差异只来自 SSR
 
@@ -2468,6 +2477,8 @@ int main(int argc, char** argv) {
     std::string ocean_lab_ui_out_dir;
     bool start_ocean_lab = false;   // --ocean-lab：直接进海面选型场（交互）
     float water_ssr_truncate_px = -1.0f;   // --water-ssr-truncate：query 法线的谱截断（<0 = 用默认）
+    int water_ssr_clamp = -1;              // --water-ssr-clamp 0|1：query 法线是否钳到地平线
+    float ship_distance_m = -1.0f;         // --ship-distance：帆船离场景原点的距离（<0 = 默认）
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2552,6 +2563,10 @@ int main(int argc, char** argv) {
             water_debug = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--water-ssr-truncate") == 0 && i + 1 < argc) {
             water_ssr_truncate_px = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-clamp") == 0 && i + 1 < argc) {
+            water_ssr_clamp = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--ship-distance") == 0 && i + 1 < argc) {
+            ship_distance_m = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2560,7 +2575,8 @@ int main(int argc, char** argv) {
         return RunCaptureEnv(env_out_dir);
     }
     if (!water_ssr_out_dir.empty()) {
-        return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px);
+        return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px,
+                                  water_ssr_clamp, water_debug, ship_distance_m);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,

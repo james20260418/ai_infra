@@ -61,7 +61,10 @@ struct WaterSsrQueryTuning {
     float rough_max = 0.35f;          // (0, 1]，rough 上限（≈ 探针 LOD cap）
     // 谱截断乘数（波长 < 3T~8T 像素的波**不进 query 法线**；0 = 不截断）。
     // 见 WaterCommand::ssr_normal_truncate_px 的注释：这是倒影噪点的直接旋钮。
-    float normal_truncate_px = 4.0f;
+    float normal_truncate_px = 0.0f;
+    // 1 = 把 query 法线魔改到"反射方向 ≥ sin1°"（与着色趟 env 的钳位同口径）。
+    // 关掉 = 逐字用中心法线（A/B 用；关掉时会有 10%~20% 的射线指到水面以下）。
+    bool clamp_normal_above_horizon = true;
 };
 
 class WaterSkinV2Renderer {

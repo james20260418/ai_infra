@@ -623,6 +623,7 @@ layout(location = 0) out vec4 oQueryDepth;    // R32F
 layout(location = 1) out vec4 oQueryNormal;   // RGBA16F（视空间法线 + 有数据掩码）
 layout(location = 2) out vec4 oQueryRough;    // RGBA16F（只读 .a）
 
+uniform int uSsrClampNormal;         // 1 = 把 query 法线魔改到"反射方向不低于地平线"
 uniform float uSsrResolutionScale;   // 1/N（与装置同值）
 uniform float uSsrRoughnessToLod;    // SsrConfig::roughness_to_lod（SSR 像素 → mip 级）
 uniform float uSsrRoughMax;          // rough 上限（0.35 ≈ 环境探针的 LOD cap）
@@ -658,9 +659,33 @@ void main() {
     float ndc_z = (uFar + uNear - 2.0 * uFar * uNear / z_eye) / (uFar - uNear);
     oQueryDepth = vec4(clamp(0.5 * ndc_z + 0.5, 0.0, 1.0), 0.0, 0.0, 0.0);
 
-    // ② 视空间中心法线：行 = side / up / −fwd，与属性 pass 的 uWorldToView 完全同源
-    //    （Render 侧用的是同一个 BuildLookAt；uCamRight/uCamUp/uCamFwd 就是那三行）。
-    oQueryNormal = vec4(dot(s.N, uCamRight), dot(s.N, uCamUp), -dot(s.N, uCamFwd), 1.0);
+    // ② query 法线（视空间）。先取中心法线，再按需要"魔改"到反射方向不低于地平线：
+    //
+    //    掠射水面（|rd.y| 很小）时，R.y = |rd.y| + 2·α（α = 波面朝相机的倾角）。
+    //    α 为负的那一半波面会让 R 指到**水面以下** —— 物理上那是"反射到别处的水"，
+    //    屏幕空间里既没有水面颜色也没有它的深度（源只有不透明几何），只能撞到海底或落空。
+    //    着色趟的 env 路径对此的处理是 `ClampReflectionAboveHorizon`（把方向抬到 +1°）；
+    //    SSR 这一侧必须**同口径**，否则两条路在同一像素上给的是两个不同的世界。
+    //
+    //    做法：只钳 R，再反解出能产生这个 R 的 N（单位向量时 N ∝ R − rd，反射对称）。
+    //    ⇒ 反射方向的 y 分量**半正定**（≥ sin 1°），与 env 完全一致。
+    //    ⚠️ 这是刻意的"非物理法线"：波纹对倒影的扭曲仍在（只要 R 本身在地平线以上），
+    //       只有"要反射到水下"的那些像素被抬到地平线。开关：uSsrClampNormal。
+    vec3 Nq = s.N;
+    if (uSsrClampNormal != 0) {
+        vec3 R = reflect(s.rd, Nq);
+        if (R.y < uHorizonClampSin) {
+            vec3 Rc = ClampReflectionAboveHorizon(R);
+            vec3 Nc = Rc - s.rd;
+            float nl = length(Nc);
+            if (nl > 1.0e-6 && Nc.y > 0.0) {
+                Nq = Nc / nl;
+            }
+        }
+    }
+    // 行 = side / up / −fwd，与属性 pass 的 uWorldToView 完全同源
+    // （Render 侧用的是同一个 BuildLookAt；uCamRight/uCamUp/uCamFwd 就是那三行）。
+    oQueryNormal = vec4(dot(Nq, uCamRight), dot(Nq, uCamUp), -dot(Nq, uCamFwd), 1.0);
 
     // ③ rough：把"像素内法线方差"换算成装置的 mip 级。
     //    与 env 侧同源（同一份 σ = √normal_var_px）：反射方向的抖动 2σ（镜面放大 2×）
