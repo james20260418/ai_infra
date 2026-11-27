@@ -147,9 +147,14 @@ inline constexpr float kShipFrontZ =  0.835f;
 
 void InstallShip(jpov_skylight::SkylightApp& app) {
     jpov::GltfObject ship = app.LoadGltf(kShipModelPath);
-    CHECK(!ship.empty()) << "LoadGltf failed: " << kShipModelPath
-                         << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
-    CHECK(ship.bounds_valid) << "帆船资产无包围盒，无法归一尺度: " << kShipModelPath;
+    if (ship.empty() || !ship.bounds_valid) {
+        // **可选美术资源**：缺了只告警、不打崩查看器（场景 4 少一艘船，其余全部照常）。
+        // 常见原因：直接跑 bazel-bin 里的 exe，而没有 build 脚本铺的 exe 旁 models/。
+        LOG(WARNING) << "远景帆船加载失败（缺 " << kShipModelPath
+                     << " 或资产无包围盒）—— 场景 4 将没有帆船；"
+                        "跑过 build_jpov_skylight_viewer.sh 后 exe 旁才有 models/";
+        return;
+    }
     const float h = ship.bounds_max[1] - ship.bounds_min[1];
     CHECK_GT(h, 1.0e-6f) << "帆船资产 Y 向高度≈0: " << kShipModelPath;
     const float scale = kShipMastHeightM / h;
@@ -1385,11 +1390,14 @@ int RunCaptureWaterSsr(const std::string& out_dir) {
 
     struct Shot { const char* name; float phi_deg; float R; float theta_deg; };
     const float theta_toward = app.deg_.sun_azim_deg - 180.0f;
-    const Shot kShots[4] = {
+    const Shot kShots[5] = {
         {"cam45_5m",   45.0f, 5.0f / std::sin(45.0f * kPi / 180.0f), theta_toward},
         {"cam25_20m",  25.0f, 20.0f, theta_toward},
         {"cam10_graze", 10.0f, 18.0f, theta_toward},
         {"cam60_40m",  60.0f, 40.0f, theta_toward},
+        // 20°/25 m：船（桅顶 24 m、离相机约 100 m）刚好落在画面上沿里；
+        // 45° 俯视的机位拍到的是水面本身，水上的东西一律在画面之外（SSR 的屏幕空间前提）。
+        {"cam20_25m",  20.0f, 25.0f, theta_toward},
     };
     for (const Shot& s : kShots) {
         app.view_ = jpov_viewer::DefaultView();
@@ -2655,6 +2663,9 @@ int main(int argc, char** argv) {
     LOG(INFO) << "[stage] InstallPerson 开始（骨骼/实例）";
     InstallPerson(app);
     LOG(INFO) << "[stage] InstallPerson 完成";
+    LOG(INFO) << "[stage] InstallShip 开始（场景 4 的远景帆船，可选）";
+    InstallShip(app);
+    LOG(INFO) << "[stage] InstallShip 完成";
 
     // --water-waves：直接进水体场景 + 打开波浪（省掉下拉/勾选两步，验收用）。
     if (start_ocean_lab) {

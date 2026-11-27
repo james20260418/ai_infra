@@ -318,13 +318,19 @@ public:
         SetOceanLabView();
     }
 
-    // 选型场默认机位：45° 俯视、相机高 5 m、朝太阳（= 上轮实验的 ① 机位）。
+    // 选型场默认机位：25° 俯视、相机高 ≈10.6 m、朝太阳（R=25）。
+    //
+    // 2026-11-27 从「45° 俯视 5 m」改过来（Danis 报障"交互式看不到帆船"）：
+    //   · 45° 俯视的视锥上沿在地平线**以下 15°** ⇒ 水面上的一切（船/岸/立柱顶）永远在画面外；
+    //     而水皮 SSR 只反射**屏幕内**的东西 ⇒ 那个机位等于把倒影靶子全裁掉了。
+    //   · 25° 仍能看清浪型/谱结构（掠射角下坡面明暗最敏感），同时地平线与远景帆船在画面上沿。
+    //   · 想看纯水面细节仍可用 `--capture-ocean-lab` 的多机位表（里面保留 45°/5 m）。
     void SetOceanLabView() {
         constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
         view_ = jpov_viewer::DefaultView();
-        view_.phi = 45.0 * kDegToRad;
+        view_.phi = 25.0 * kDegToRad;
         view_.theta = (static_cast<double>(deg_.sun_azim_deg) - 180.0) * kDegToRad;
-        view_.R = 5.0 / std::sin(view_.phi);
+        view_.R = 25.0;
     }
 
     // 选型场的动画时钟：真实时间（frame_count/60 掉帧会变慢）。
