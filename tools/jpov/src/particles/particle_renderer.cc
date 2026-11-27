@@ -65,8 +65,6 @@ void ParticleRenderer::Init(ShaderManager* shader_mgr) {
     const std::string fs_draw =
         std::string(kFsWboHead) + kWboWeightGlsl + kFsWboTail;
     prog_draw_ = shader_mgr_->GetOrCreate("particle_wbo_draw", {kVs, fs_draw.c_str()});
-    prog_comp_ = shader_mgr_->GetOrCreate("particle_wbo_composite",
-                                          {kWboCompositeVs, kWboCompositeFs});
     glGenVertexArrays(1, &vao_);
     CHECK_NE(vao_, 0u);
     initialized_ = true;
@@ -82,7 +80,7 @@ void ParticleRenderer::Finalize() {
 }
 
 void ParticleRenderer::EnsureTarget(int w, int h) {
-    wbo_.Ensure({w, h, /*with_additive=*/true, /*with_depth=*/false,
+    wbo_.Ensure({w, h, /*with_additive=*/true, /*with_depth=*/true,
                  /*linear_filter=*/true});
 }
 
@@ -93,8 +91,6 @@ void ParticleRenderer::Begin(int full_w, int full_h) {
     EnsureTarget(hw, hh);
     wbo_.Clear();
     has_content_ = false;
-    has_alpha_ = false;
-    has_additive_ = false;
 }
 
 void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
@@ -220,56 +216,18 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glPopAttrib();
 
     has_content_ = true;
-    if (blend_path == 2) {
-        has_additive_ = true;
-    } else {
-        has_alpha_ = true;
-    }
 }
 
-void ParticleRenderer::Composite(int full_w, int full_h) {
+TransparentLayer ParticleRenderer::layer() const {
+    TransparentLayer layer;
     if (!has_content_ || !wbo_.valid()) {
-        return;
+        return layer;   // 全 0 = invalid()，TransparentLayerSet::Add 会忽略
     }
-    // 本 pass 会改 enable + blend func/equation：两者分属 GL_ENABLE_BIT 与
-    // GL_COLOR_BUFFER_BIT，必须**一起**入栈，否则会把自定义混合泄漏给后续 pass。
-    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
-    glViewport(0, 0, full_w, full_h);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-
-    glUseProgram(prog_comp_);
-    glBindVertexArray(vao_);
-
-    // ① 覆盖集：C=accum.rgb/accum.a、cov=1−reveal，预乘 over 进目标。
-    if (has_alpha_) {
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // over（预乘 src）
-        glActiveTexture(GL_TEXTURE0 + 0);
-        glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
-        glActiveTexture(GL_TEXTURE0 + 1);
-        glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
-    // ② 加法集：直接求和到目标之上（加法光不被覆盖集衰减 —— 单层 OIT 的固有近似）。
-    if (has_additive_) {
-        glBlendFunc(GL_ONE, GL_ONE);   // 求和
-        glActiveTexture(GL_TEXTURE0 + 0);
-        glBindTexture(GL_TEXTURE_2D, wbo_.additive_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 0);
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 1);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
-
-    glBindVertexArray(0);
-    glActiveTexture(GL_TEXTURE0);
-    glPopAttrib();          // 还原 enable / blend（含 equation）
-    has_content_ = false;   // 本帧消费掉
-    has_alpha_ = false;
-    has_additive_ = false;
+    layer.accum_tex = wbo_.accum_tex();
+    layer.reveal_tex = wbo_.reveal_tex();
+    layer.depth_tex = wbo_.depth_tex();
+    layer.additive_tex = wbo_.additive_tex();   // 恒有（粒子目标总是带加法集附件）
+    return layer;
 }
 
 }  // namespace jpov

@@ -60,12 +60,11 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     const std::string fs_draw_off =
         std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSkyLightOffFs + kFsMain;
     const std::string fs_draw_lit = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
-                                    kCsmSingleTapGlsl + kSkyLightFs + kFsMain;
+                                    kCsmSingleTapGlsl + water::kUnderwaterAttenGlsl + kSkyLightFs +
+                                    kFsMain;
     prog_draw_ = shader_mgr_->GetOrCreate("strip_wbo_draw", {kVs, fs_draw_off.c_str()});
     prog_draw_lit_ =
         shader_mgr_->GetOrCreate("strip_wbo_draw_lit", {kVs, fs_draw_lit.c_str()});
-    prog_comp_ = shader_mgr_->GetOrCreate("strip_wbo_composite",
-                                          {kWboCompositeVs, kWboCompositeFs});
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
@@ -103,11 +102,10 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
 
     // uniform 位置只查一次（见头文件里的 CommonUniforms 注释）。
     QueryCommonUniforms(prog_draw_, &draw_uniforms_);
-
-    comp_uniforms_.accum = shader_mgr_->GetUniform(prog_comp_, "uAccum");
-    comp_uniforms_.reveal = shader_mgr_->GetUniform(prog_comp_, "uReveal");
-    comp_uniforms_.add = shader_mgr_->GetUniform(prog_comp_, "uAdd");
-    comp_uniforms_.additive = shader_mgr_->GetUniform(prog_comp_, "uAdditive");
+    // lit 变体的 uniform 位置**必须单独查**：GL 的 location 是 per-program 的。
+    // （这里以前漏了 —— 折线 pass 的 sky_light 一直拿到 -1，等于没上传。平滑 pass 因为
+    //  QuerySmoothUniforms(prog_smooth_lit_) 顺手查到了，所以只有折线受影响。）
+    QueryCommonUniforms(prog_draw_lit_, &draw_lit_uniforms_);
 
     // ── 平滑 pass（kSmooth）：program + 独立 VAO/VBO + 控制点数据纹理 ──
     // 与折线 pass 完全独立：另一个 program、另一套顶点布局、另一条数据通道；
@@ -115,7 +113,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     const std::string fs_smooth_off = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
                                       kSkyLightOffFs + kSmoothFsMain;
     const std::string fs_smooth_lit = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
-                                      kCsmSingleTapGlsl + kSkyLightFs + kSmoothFsMain;
+                                      kCsmSingleTapGlsl + water::kUnderwaterAttenGlsl + kSkyLightFs +
+                                      kSmoothFsMain;
     prog_smooth_ = shader_mgr_->GetOrCreate("strip_wbo_smooth",
                                             {kSmoothVs, fs_smooth_off.c_str()});
     prog_smooth_lit_ = shader_mgr_->GetOrCreate("strip_wbo_smooth_lit",
@@ -211,6 +210,10 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
         glUniform3f(u.sun_color, 1.0f, 1.0f, 1.0f);
         glUniform1f(u.sun_intensity, 0.0f);
         glUniform1f(u.sky_injection, 0.0f);
+        // 水下照明衰减：关态。
+        glUniform1i(u.water_atten_on, 0);
+        glUniform1i(u.water_atten_ambient, 0);
+        glUniform1i(u.water_atten_sun, 0);
         glUseProgram(0);
     };
     init_disabled_uniforms(prog_draw_, draw_uniforms_);
@@ -287,6 +290,16 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->shadow_texel_world = shader_mgr_->GetUniform(program, "uShadowTexelWorld");
     out->shadow_bias_cascade = shader_mgr_->GetUniform(program, "uShadowBiasCascade");
     out->shadow_bias_override = shader_mgr_->GetUniform(program, "uShadowBiasOverride");
+    // 水下照明衰减（同天光：unlit program 里全是 -1）。
+    out->water_atten_on = shader_mgr_->GetUniform(program, "uWaterAttenOn");
+    out->water_atten_ambient = shader_mgr_->GetUniform(program, "uWaterAttenAmbient");
+    out->water_atten_sun = shader_mgr_->GetUniform(program, "uWaterAttenSun");
+    out->water_atten_level_y = shader_mgr_->GetUniform(program, "uWaterAttenLevelY");
+    out->water_atten_ior = shader_mgr_->GetUniform(program, "uWaterAttenIor");
+    out->water_atten_sigma_t = shader_mgr_->GetUniform(program, "uWaterAttenSigmaT");
+    out->water_atten_kd = shader_mgr_->GetUniform(program, "uWaterAttenKd");
+    out->water_atten_sun_toward = shader_mgr_->GetUniform(program, "uWaterAttenSunToward");
+    out->water_atten_ambient_t = shader_mgr_->GetUniform(program, "uWaterAttenAmbientT");
     out->shadow_fade_start = shader_mgr_->GetUniform(program, "uShadowFadeStart");
     out->shadow_fade_end = shader_mgr_->GetUniform(program, "uShadowFadeEnd");
     // 数组型（sampler / mat4）：逐元素查一次，Draw 里直接用整数。
@@ -378,12 +391,10 @@ void StripRenderer::Finalize() {
     ibo_capacity_.fill(0);
     initialized_ = false;
     has_content_ = false;
-    has_alpha_ = false;
-    has_additive_ = false;
 }
 
 void StripRenderer::EnsureTarget(int w, int h, bool with_additive) {
-    wbo_.Ensure({w, h, /*with_additive=*/with_additive, /*with_depth=*/false,
+    wbo_.Ensure({w, h, /*with_additive=*/with_additive, /*with_depth=*/true,
                  /*linear_filter=*/false});
     target_with_additive_ = with_additive;
 }
@@ -395,8 +406,6 @@ void StripRenderer::Begin(int full_w, int full_h, bool with_additive) {
     EnsureTarget(full_w, full_h, with_additive);
     wbo_.Clear();
     has_content_ = false;
-    has_alpha_ = false;
-    has_additive_ = false;
 }
 
 void StripRenderer::UploadAppearance(const BatchDrawContext& ctx) {
@@ -627,11 +636,6 @@ void StripRenderer::DrawShared(BatchDrawContext& ctx, TextureManager& texture_mg
     }
 
     has_content_ = true;
-    if (want_additive) {
-        has_additive_ = true;
-    } else {
-        has_alpha_ = true;
-    }
 }
 
 void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
@@ -745,6 +749,25 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
                 glUniformMatrix4fv(uniforms.shadow_vp[c], 1, GL_FALSE, csm.vp[c]);
                 glUniformMatrix4fv(uniforms.shadow_depth_vp[c], 1, GL_FALSE, csm.depth_vp[c]);
             }
+        }
+    }
+
+    // 水下照明衰减：与天光同一组（只在 lit program 生效；每批重传，量很小）。
+    {
+        const bool on = underwater_atten_.has_value();
+        glUniform1i(uniforms.water_atten_on, on ? 1 : 0);
+        if (on) {
+            const water::UnderwaterAttenuation& a = *underwater_atten_;
+            glUniform1i(uniforms.water_atten_ambient, a.ambient ? 1 : 0);
+            glUniform1i(uniforms.water_atten_sun, a.sun ? 1 : 0);
+            glUniform1f(uniforms.water_atten_level_y, a.level_y);
+            glUniform1f(uniforms.water_atten_ior, a.ior);
+            glUniform3f(uniforms.water_atten_sigma_t,
+                        a.sigma_t.x(), a.sigma_t.y(), a.sigma_t.z());
+            glUniform3f(uniforms.water_atten_kd, a.kd.x(), a.kd.y(), a.kd.z());
+            glUniform3f(uniforms.water_atten_sun_toward,
+                        a.sun_toward.x(), a.sun_toward.y(), a.sun_toward.z());
+            glUniform1f(uniforms.water_atten_ambient_t, a.ambient_t);
         }
     }
 
@@ -904,48 +927,17 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     glPopAttrib();
 }
 
-void StripRenderer::Composite(int full_w, int full_h) {
+TransparentLayer StripRenderer::layer() const {
+    TransparentLayer layer;
     if (!has_content_ || !wbo_.valid()) {
-        return;
+        return layer;   // 全 0 = invalid()，TransparentLayerSet::Add 会忽略
     }
-    // 本 pass 改 enable + blend func/equation：分属两个 attrib 组，必须一起入栈。
-    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
-    glViewport(0, 0, full_w, full_h);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-
-    glUseProgram(prog_comp_);
-    glBindVertexArray(vao_);
-
-    // ① 覆盖集：C = accum.rgb/accum.a、cov = 1−reveal，预乘 over 进目标。
-    if (has_alpha_) {
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        glActiveTexture(GL_TEXTURE0 + 0);
-        glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
-        glUniform1i(comp_uniforms_.accum, 0);
-        glActiveTexture(GL_TEXTURE0 + 1);
-        glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
-        glUniform1i(comp_uniforms_.reveal, 1);
-        glUniform1i(comp_uniforms_.additive, 0);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
-    // ② 加法集：直接求和到目标之上（发光介质不被覆盖集衰减 —— 单层 OIT 的固有近似）。
-    if (has_additive_) {
-        glBlendFunc(GL_ONE, GL_ONE);
-        glActiveTexture(GL_TEXTURE0 + 0);
-        glBindTexture(GL_TEXTURE_2D, wbo_.additive_tex());
-        glUniform1i(comp_uniforms_.add, 0);
-        glUniform1i(comp_uniforms_.additive, 1);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
-
-    glBindVertexArray(0);
-    glActiveTexture(GL_TEXTURE0);
-    glPopAttrib();          // 还原 enable / blend（含 equation）
-    has_content_ = false;   // 本帧消费掉
-    has_alpha_ = false;
-    has_additive_ = false;
+    layer.accum_tex = wbo_.accum_tex();
+    layer.reveal_tex = wbo_.reveal_tex();
+    layer.depth_tex = wbo_.depth_tex();
+    // 加法集附件按需申请：本帧没有 kEmissive 批时是 0（合成器按零哑元处理）。
+    layer.additive_tex = target_with_additive_ ? wbo_.additive_tex() : 0;
+    return layer;
 }
 
 }  // namespace jpov

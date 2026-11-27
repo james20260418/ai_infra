@@ -51,6 +51,7 @@ cc_library(
         "//tools/jpov/src/skeleton:skeleton",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/src/water:water_underwater_shading",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

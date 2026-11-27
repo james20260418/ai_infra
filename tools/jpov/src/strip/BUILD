@@ -13,7 +13,8 @@ cc_library(
     linkstatic = 1,
 )
 
-# 半透明条带渲染器：整批一次 draw call 画进 1× WBO 覆盖集，再 over 合成进 HDR。
+# 半透明条带渲染器：整批一次 draw call 画进 1× WBO（覆盖集 + 可选加法集 + 代表深度），
+# 结果作为一个透明层交给 fog/介质合成器（不自己合成）。
 cc_library(
     name = "strip_renderer",
     srcs = ["strip_renderer.cc"],
@@ -30,6 +31,8 @@ cc_library(
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",
         "//tools/jpov/src:texture_units",
+        "//tools/jpov/src:transparent_layer",
+        "//tools/jpov/src/water:water_underwater_shading",
         "//tools/jpov/src/wbo:wbo_shader",
         "//tools/jpov/src/wbo:wbo_target",
         "@glog_static//:glog",

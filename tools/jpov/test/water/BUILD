@@ -156,3 +156,15 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 水下照明衰减（照明侧）的 CPU 参考单测：逐通道增益、开关独立、水上恒等、低太阳更暗。
+cc_test(
+    name = "water_underwater_shading_test",
+    srcs = ["water_underwater_shading_test.cc"],
+    deps = [
+        "//tools/jpov/src/water:water_underwater_shading",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

@@ -203,6 +203,7 @@ cc_library(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
+        "//tools/jpov/src/water:water_underwater_shading",
     ],
     copts = ["-std=c++20"],
 )

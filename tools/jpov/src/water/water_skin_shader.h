@@ -383,6 +383,13 @@ void ShadeBelow(WaterSurface s, out WaterShade o) {
     MediumAt(P, mirror, kDeepSeaRayT, tau_deep, S_deep);
     o.C = F * S_deep;
     o.alpha = F;          // 环外 Fresnel 已回到 1 ⇒ α = 1（整片替换）
+    // 调试组合：相机在水下但 **medium 关闭**。没有水体就没有「深海环境」可反射
+    //（S_deep ≡ 0），环外再按 α=1 覆盖就会把画面盖成黑环 ⇒ 环外改成不覆盖
+    //（露出场景本身）；窗内保留 F（反射项为 0，透射来自天球折射）。
+    // 判据用 F 的精确值：MediumAt 的 TIR 分支返回的 F 恰好是 1.0（sin²θt ≥ 1）。
+    if (uHasWater == 0 && F >= 1.0) {
+        o.alpha = 0.0;
+    }
     o.fresnel_debug = 0.0;
     o.env_lod_debug = 0.0;
     o.refl_debug = vec3(0.0);

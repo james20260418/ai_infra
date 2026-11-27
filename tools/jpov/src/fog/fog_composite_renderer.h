@@ -17,7 +17,7 @@
 //   L = 0; W = 1; S_prev = 0; τ_prev = 0
 //   for i in 1..N:
 //       L += W·(S(z_i) − S_prev)          // 雾段 (z_{i-1} → z_i)
-//       L += W·exp(−τ(z_i))·C_i           // 层自身（被**前方雾**衰减）
+//       L += W·exp(−τ(z_i))·C_i           // 层自身（被**前方雾**衰减；C_i = 覆盖集 + 加法集）
 //       W *= T_i                          // 层遮挡后方
 //       S_prev = S(z_i); τ_prev = τ(z_i)
 //   L += W·(S(z_op) − S_prev)             // 最后一段雾
@@ -137,15 +137,19 @@ uniform int       uLayerCount;
 uniform sampler2D uLayer0Accum;
 uniform sampler2D uLayer0Reveal;
 uniform sampler2D uLayer0Depth;
+uniform sampler2D uLayer0Add;    // 加法集；本层没有时绑 1×1 **零**哑元
 uniform sampler2D uLayer1Accum;
 uniform sampler2D uLayer1Reveal;
 uniform sampler2D uLayer1Depth;
+uniform sampler2D uLayer1Add;
 uniform sampler2D uLayer2Accum;
 uniform sampler2D uLayer2Reveal;
 uniform sampler2D uLayer2Depth;
+uniform sampler2D uLayer2Add;
 uniform sampler2D uLayer3Accum;
 uniform sampler2D uLayer3Reveal;
 uniform sampler2D uLayer3Depth;
+uniform sampler2D uLayer3Add;
 
 // 深度 1.0 的语义 = 无穷远（= jpov::kDepthInfinityM），**不是 camera.far**。
 // 相机 far 只负责裁剪远处的模型；雾/介质要的是「背景到底有多远」。
@@ -159,37 +163,62 @@ uniform float uWaterInfiniteZ;
 //   也不贡献 S_i；它之后的水柱整段由 W=层透射率 衰减。
 uniform int uWaterLayerIndex;
 
-// 解析第 i 个透明层 → 预乘色 c、层透射率 t、代表深度 z（视空间米）。
-// 返回 false = 该像素上此层为空（accum.a≈0），不产生深度边界。
+// 只有加法集的像素（发光粒子/条带之间叠在一起、完全没有覆盖集）：代表深度无从可求
+// ——depth 附件存的是 Σ(z·α·w)，而 α≡0 ⇒ 分母为 0。这类像素不遮挡背景、只加光，
+// 所以交给主循环的 min(z, z_op) 钉到背景深度上是安全且一致的。
+const float kAdditiveOnlyDepthM = 1.0e30;
+
+// 覆盖集权重和的「等于 0」门槛。accum.a 是 RGBA16F：最小正**次正规** ≈ 5.96e-8，
+// 所以小于 1e-8 只可能是 0（或读回来的垃圾）—— 这一步实质就是判 0，同时把 0/x 挡在
+// 外面。写成 `!(x > kMinAccumAlpha)`，**NaN 也一起拦掉**（与 ZView 的守卫同一个理由：
+// NaN 一旦进 accum 就会顺着 L 污染整帧后处理链）。
+const float kMinAccumAlpha = 1.0e-8;
+
+// 解析第 i 个透明层 → 预乘色 c、层透射率 t、代表深度 z（沿视线的欧氏距离，米）。
+// 返回 false = 该像素上此层为空，不产生深度边界。
 bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
     vec4 accum = vec4(0.0);
     float reveal = 1.0;
     float depth_sum = 0.0;
+    vec3 add = vec3(0.0);
     if (i == 0) {
         accum = texture(uLayer0Accum, uv);
         reveal = texture(uLayer0Reveal, uv).r;
         depth_sum = texture(uLayer0Depth, uv).r;
+        add = texture(uLayer0Add, uv).rgb;
     } else if (i == 1) {
         accum = texture(uLayer1Accum, uv);
         reveal = texture(uLayer1Reveal, uv).r;
         depth_sum = texture(uLayer1Depth, uv).r;
+        add = texture(uLayer1Add, uv).rgb;
     } else if (i == 2) {
         accum = texture(uLayer2Accum, uv);
         reveal = texture(uLayer2Reveal, uv).r;
         depth_sum = texture(uLayer2Depth, uv).r;
+        add = texture(uLayer2Add, uv).rgb;
     } else {
         accum = texture(uLayer3Accum, uv);
         reveal = texture(uLayer3Reveal, uv).r;
         depth_sum = texture(uLayer3Depth, uv).r;
+        add = texture(uLayer3Add, uv).rgb;
     }
-    if (accum.a <= 1e-8) {
-        c = vec3(0.0);
+    if (!(accum.a > kMinAccumAlpha)) {
+        // 没有覆盖集：只剩加法集时仍然是一层（只加光、不遮挡）。
+        // 这里同样用 `!(x > 0)`：NaN 也得按「空层」处理，不能放它进 c。
+        if (!(max(max(add.r, add.g), add.b) > 0.0)) {
+            c = vec3(0.0);
+            t = 1.0;
+            z = 0.0;
+            return false;
+        }
+        c = add;
         t = 1.0;
-        z = 0.0;
-        return false;
+        z = kAdditiveOnlyDepthM;
+        return true;
     }
     float cov = clamp(1.0 - reveal, 0.0, 1.0);
-    c = (accum.rgb / accum.a) * cov;   // 预乘：本层贡献的亮度
+    // 覆盖集与加法集来自同一批几何 ⇒ 合成一个预乘色（拆成两层就是假的深度边界）。
+    c = (accum.rgb / accum.a) * cov + add;
     t = clamp(reveal, 0.0, 1.0);
     z = depth_sum / accum.a;           // 代表深度
     return true;
@@ -354,6 +383,7 @@ private:
     unsigned int prog_composite_ = 0;
     std::string fs_composite_;          // 组装后的 FS 源码（须存活到编译完成）
     unsigned int dummy_depth_tex_ = 0;  // 1×1 R32F（值 1.0）：无场景深度/空槽位时占位
+    unsigned int dummy_zero_tex_ = 0;   // 1×1 R32F（值 0.0）：无加法集时占位
 };
 
 }  // namespace jpov
