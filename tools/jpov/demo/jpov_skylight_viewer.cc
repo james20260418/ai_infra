@@ -1390,9 +1390,11 @@ int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px, int ss
         app.water_ssr_clamp_normal_ = (ssr_clamp != 0);
     }
     if (ssr_downscale_n > 0.0f) {
-        // 与面板同一个入口：非法小数被 snap 成 1/N（N = 1..4）——装置只认这几个值。
-        app.water_ssr_.resolution_scale =
-            jpov_skylight::SnapDownscaleTo1OverN(ssr_downscale_n);
+        // 与面板同一个入口：小数在这里被 round 成 1..4，倍率在消费点算（不会再翻）。
+        app.SetWaterSsrDownscaleN(ssr_downscale_n);
+        LOG(INFO) << "water ssr downscale: N=" << ssr_downscale_n
+                  << " → resolution_scale=" << 1.0f / std::max(1, std::min(4,
+                         static_cast<int>(std::lround(ssr_downscale_n))));
     }
     app.SetWaterWaveDebug(water_debug);
     if (ship_distance_m >= 0.0f) {

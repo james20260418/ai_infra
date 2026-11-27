@@ -371,6 +371,14 @@ public:
     jpov::SsrConfig water_ssr_ = jpov::DefaultWaterSsrConfig();
     // query 法线钳位开关（与 WaterCommand::ssr_clamp_normal_above_horizon 同义）
     bool water_ssr_clamp_normal_ = true;
+    // 降采样倍率**只存 N（1..4）**，`resolution_scale = 1/N` 在唯一的消费点算。
+    // 为什么这样存：之前存倍率、面板里又 `1/Snap(1/倍率)` 取了一次倒数 ⇒ 算出 2 撞 CHECK
+    //（2026-11-27 第二次崩，Danis 贴日志 `得到 2`）。存在 N 上从结构上不可能再翻。
+    int water_ssr_downscale_n_ = 2;
+    void SetWaterSsrDownscaleN(float n) {
+        water_ssr_downscale_n_ =
+            std::clamp(static_cast<int>(std::lround(n)), 1, 4);   // 拖拽中途的小数在这里消失
+    }
     // 帆船：距离（米，沿固定世界方位）+ 吃水后的基准高度（由 InstallShip 填）
     float ship_distance_m_ = kShipDistanceDefaultM;
     float ship_distance_f_ = kShipDistanceDefaultM;   // 滑条绑定（SliderFloat 只收 float*）
@@ -1130,6 +1138,7 @@ public:
             w.waves.v2_m3 = water_v2_m3_;
             // 水皮自己的 SSR 配置（默认开；与 cmds.ssr 是两个独立实例）。
             w.ssr = water_ssr_;
+            w.ssr.resolution_scale = 1.0f / static_cast<float>(water_ssr_downscale_n_);
             w.ssr_normal_truncate_px = water_ssr_truncate_px_;
             w.ssr_clamp_normal_above_horizon = water_ssr_clamp_normal_;
             cmds->water = w;
@@ -1382,10 +1391,10 @@ private:
                     // ⚠️ SliderFloat 即使 decimals=0 也会在拖动中途给出 1.1473 这种值
                     //   ⇒ 必须四舍五入 + 夹，否则 1/1.1473 = 0.871489 撞装置 CHECK 直接 abort
                     //   （2026-11-27 Danis 实拍：拖这根滑条把查看器拖崩了）。
-                    float ssr_n = 1.0f / std::max(water_ssr_.resolution_scale, 1.0e-3f);
+                    float ssr_n = static_cast<float>(water_ssr_downscale_n_);
                     if (ui_.SliderFloat("水皮 SSR 降采样 1/N", &ssr_n, row(0, 15), 1.0f, 4.0f,
                                         0)) {
-                        water_ssr_.resolution_scale = 1.0f / SnapDownscaleTo1OverN(ssr_n);
+                        SetWaterSsrDownscaleN(ssr_n);
                     }
                 }
                 // query 法线的谱截断：0 = 逐字用中心法线（倒影会被亚像素波切碎）
