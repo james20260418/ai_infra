@@ -2312,6 +2312,12 @@ int RunCaptureUnderwater(const std::string& out_dir) {
         app.RunOnce(input, winfo, (out_dir + "/" + shot.name + ".png").c_str());
     }
 
+    // 第五张：medium 关闭（Danis 2026-11-27 的调试组合）—— 水皮不能把 TIR 环盖成黑环。
+    app.SetWaterMedium(false);
+    app.SetWaterAttenuation(false, false);
+    app.RunOnce(input, winfo, (out_dir + "/underwater_medium_off.png").c_str());
+    app.SetWaterMedium(true);
+
     LOG(INFO) << "underwater attenuation A/B captured to " << out_dir;
     app.Finalize();
     return 0;

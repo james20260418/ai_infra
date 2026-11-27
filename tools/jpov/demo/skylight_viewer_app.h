@@ -1127,7 +1127,7 @@ private:
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
         constexpr int kOceanLabPanelRows = 21;   // 场景4：row(0,0..13) + row(1,0..20)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
-        constexpr int kUnderwaterRows    = 9;    // 场景5：row(0,0..8)
+        constexpr int kUnderwaterRows    = 10;   // 场景5：row(0,0..9)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
                         : IsUnderwater() ? kUnderwaterRows
                         : IsWaterScene() ? kWaterPanelRows
@@ -1160,6 +1160,9 @@ private:
                     view_.phi = 0.21;   // ≈12° 仰角
                     view_.theta = 0.0;
                     view_.R = 45.0;
+                } else if (sel == kSceneOceanLab) {
+                    // 选型场：恢复默认海面（否则从场景 5 切回来会留着抬高的水位）。
+                    SetOceanLab(true);
                 } else if (sel == kSceneUnderwater) {
                     // 水下：同一份默认海面 + 抬水位 + 水下机位（见 SetUnderwaterScene）。
                     // BuildWaterPeople：交互切场景时 blue-man 的站位也要补（否则 skinned pass 是空的）。
@@ -1332,11 +1335,13 @@ private:
                                 kTurbidityMin, kTurbidityMax, 1);
                 ui_.Checkbox("ambient 衰减（水下）", &water_atten_ambient_, row(0, 4));
                 ui_.Checkbox("平行光衰减（水下）", &water_atten_sun_, row(0, 5));
-                // 刻意**不**给「水体介质 / 水皮」开关：相机在水下时介质是硬依赖
-                //（Renderer 的 CHECK：水下关介质会把画面盖成黑环），给个能点崩的
-                // 开关只会制造"一点就崩"的 bug。它们由场景固定为开。
-                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(0, 6), 0.0f, 3.0f, 2);
-                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(0, 7), 0.0f, 120.0f,
+                // 水体介质开关：水下关掉 = **支持的调试组合**（2026-11-27 Danis）——
+                // 水皮在水下把 TIR 环改成不覆盖（露出场景），不会崩也不会黑环。
+                // 关掉介质时仍保留照明侧衰减（σ 照旧来自 medium 配置），
+                // 所以可以单独看「视线侧吸收」与「照明侧衰减」各自的贡献。
+                ui_.Checkbox("水体介质 (吸收+注入)", &water_medium_on_, row(0, 6));
+                ui_.SliderFloat("时间速度 (0=冻结)", &ocean_time_speed_, row(0, 7), 0.0f, 3.0f, 2);
+                ui_.SliderFloat("时间 s（冻结时）", &water_wave_time_s_, row(0, 8), 0.0f, 120.0f,
                                 2);
                 // 只读：海底深度处的两个逐通道增益（让「开关改了什么」可核对，
                 // 观感上的差异大部分被水体的注入色吃掉了，数字不会骗人）。
@@ -1368,7 +1373,7 @@ private:
                                   static_cast<double>(amb_gain.x()),
                                   static_cast<double>(amb_gain.y()),
                                   static_cast<double>(amb_gain.z()));
-                    ui_.Text(buf, row(0, 8));
+                    ui_.Text(buf, row(0, 9));
                 }
                 return;
             }

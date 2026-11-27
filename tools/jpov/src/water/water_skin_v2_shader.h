@@ -624,8 +624,12 @@ void ShadeBelowV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         vec3 tau_deep;   // MediumAt 的 out 参数：深海反射只用 S，不需要 τ
         vec3 S_deep;
         MediumAt(P, mirror, kSkinV2DeepSeaRayT, tau_deep, S_deep);
-        sum_c += F * S_deep;
-        sum_a += F;      // 环外 Fresnel 已回到 1 ⇒ α = 1（整片替换）
+        // 调试组合：相机在水下但 **medium 关闭** ⇒ 没有深海环境可反射（S_deep ≡ 0）。
+        // 环外（F == 1 的精确 TIR 分支）如果仍按 α=1 覆盖会把画面盖成黑环 ⇒
+        // 那里改成不覆盖（露出场景）；窗内保留 F（反射项 0、透射来自天球折射）。
+        float a_i = (uHasWater == 0 && F >= 1.0) ? 0.0 : F;
+        sum_c += a_i * S_deep;
+        sum_a += a_i;    // 环外 Fresnel 已回到 1 ⇒ α = 1（整片替换）
     }
     o.C = sum_c / float(S);
     o.alpha = sum_a / float(S);

@@ -2060,10 +2060,15 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK(cmds.sky.has_value())
                     << "水皮需要 sky：窗内内容由天空 pass 的折射天球提供";
                 const bool cam_underwater = cmds.camera.position.y() < cmds.water->level_y;
-                // 水下没有介质 ⇒ S_P(∞)=0 ⇒ 环外 α=1 会把画面盖成**黑环**（不是"暗水"）。
-                // 这个组合没有物理意义，直接拦。
-                CHECK(!cam_underwater || water_medium_ptr != nullptr)
-                    << "水下（相机低于 level_y）必须开启 medium：否则环外 α=1 会盖成黑环";
+                // 水下 + medium 关闭 = **支持的调试组合**（2026-11-27 Danis 要求）：
+                // 没有水体就没有"深海环境"可反射，水皮在水下支路把环外（TIR, F==1）
+                // 改成不覆盖（露出场景），不会再把画面盖成黑环。见 water_skin*_shader.h。
+                // 这里只提示一次，不拦。
+                if (cam_underwater && water_medium_ptr == nullptr) {
+                    LOG_FIRST_N(INFO, 1)
+                        << "相机在水下但 medium 关闭：水皮的 TIR 环不覆盖（露出场景），"
+                           "窗内仍有天球折射；这是调试组合。";
+                }
                 if (!cam_underwater) {
                     CHECK(cmds.env_specular.has_value())
                         << "水上水皮需要 env_specular：水面唯一的反射源是天光探针";

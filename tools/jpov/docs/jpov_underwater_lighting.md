@@ -65,8 +65,12 @@ bool attenuate_sun = false;       // 平行光衰减
 - 相机：`phi=18°, R=5`，水面下 ≈1.45 m（离波面足够远）。
 - 内容：海底（object3d）+ 三个方块（低反 / **镜面金属** / 高光）+ 橡树 ×3（instanced，
   一次 draw）+ 蓝人 ×3（skinned，一次 draw）+ 两条竖直条带（**折线 / 平滑各一条**）。
-- 面板：天体仰角/方位/浊度 + **ambient 衰减 / 平行光衰减** 两个勾选框 + 时间；
-  另有一行只读读数（海底增益的 R/G/B），因为观感差异会被水体注入色吃掉，数字更可信。
+- 面板：天体仰角/方位/浊度 + **ambient 衰减 / 平行光衰减** 两个勾选框 + **水体介质** +
+  时间；另有一行只读读数（海底增益的 R/G/B），因为观感差异会被水体注入色吃掉，数字更可信。
+- **水下关 medium 是支持的调试组合**（2026-11-27）：没有水体就没有「深海环境」可反射，
+  水皮在水下支路把环外（TIR，F 恰好为 1）改成 **α=0 不覆盖**（露出场景），窗内保留 F；
+  不会再出现「环外 α=1 ⇒ 黑环」，Renderer 也不再 CHECK。这样可以把
+  「视线侧吸收」与「照明侧衰减」拆开单独看。
 
 复现：
 
@@ -90,5 +94,7 @@ cd output/jpov_skylight_viewer
 
 - `test/water:water_underwater_shading_test`（7 cases，GL-free）：手算对拍 45°/5 m、
   开关独立、水上恒等、更深更暗、低太阳更暗、太阳在地平线下无直射。
+- `WaterSkinV2Gpu.UnderwaterWithoutMediumLeavesTirRingUncovered`：水下 + 无介质时
+  环外 α 不得为 1（否则黑环），层色必须为 0。
 - 回归：`test/water:all` 9 targets / 93 cases、`test/object3d:all` + `test/skeleton:all`
   30 targets 全绿（关态对既有 gold 逐字节不变）。

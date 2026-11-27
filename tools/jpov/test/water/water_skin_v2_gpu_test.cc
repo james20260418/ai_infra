@@ -489,6 +489,53 @@ TEST(WaterSkinV2Gpu, V2FlatUnderwaterMatchesV1) {
     f.TearDown();
 }
 
+// ⑥ 水下 + **medium 关闭**（2026-11-27 Danis 的调试组合）：不许崩，也不许把 TIR 环
+//    画成 α=1 的黑环。预期：环外 α=0（露出场景）、窗内 α=F（>0 且 <1），C ≡ 0
+//    （没有深海环境可反射）。
+//    ⚠️ 负向对照：旧实现（无介质时 α 恒等于 F）在这一机位下会有成千上万个 α=1 像素。
+TEST(WaterSkinV2Gpu, UnderwaterWithoutMediumLeavesTirRingUncovered) {
+    Fixture f;
+    f.SetUp();
+    SceneInputs s;
+    s.cam.position = {0.0f, -3.0f, 0.0f};   // 水下 3 m（与 V2FlatUnderwaterMatchesV1 同机位）
+    s.cam.target = {0.0f, 3.0f, -3.0f};
+    s.cam.fov = 60.0f;
+    s.cam.near = kNear;
+    s.cam.far = kFar;
+    s.depth_tex = MakeDepthTexture();
+    s.level_y = 0.0f;
+    s.waves = nullptr;
+    // ToInputs 里 medium 恒为 nullptr ⇒ 正好是「水下 + 无介质」。
+    f.DrawV1(s);
+    const std::vector<float> a1 = ReadRgba(f.v1.layer().accum_tex);
+    f.DrawV2(s, 4);
+    const std::vector<float> a2 = ReadRgba(f.v2.layer().accum_tex);
+
+    const auto audit = [](const std::vector<float>& a, const char* tag) {
+        int opaque_ring = 0;
+        int window = 0;
+        float max_rgb = 0.0f;
+        for (size_t i = 0; i < a.size(); i += 4) {
+            const float alpha = a[i + 3];
+            if (alpha >= 0.999f) {
+                ++opaque_ring;
+            } else if (alpha > 0.005f) {
+                ++window;
+            }
+            max_rgb = std::max(max_rgb, std::max(std::fabs(a[i]), std::max(
+                                                    std::fabs(a[i + 1]), std::fabs(a[i + 2]))));
+        }
+        EXPECT_LT(opaque_ring, 20)
+            << tag << ": TIR 环仍有 α=1 的像素（会把画面盖成黑环）";
+        EXPECT_GT(window, 100) << tag << ": 没有窗内像素（机位选错 / 整屏都被吃掉）";
+        EXPECT_LT(max_rgb, 1.0e-5f) << tag << ": 无介质时层色应为 0（没有环境可反射）";
+    };
+    audit(a1, "V1");
+    audit(a2, "V2");
+    glDeleteTextures(1, &s.depth_tex);
+    f.TearDown();
+}
+
 // ③ 采样数越小越「噪」：S=1 的像素间方差必须大于 S=16。
 //    这是 docs §2.1 那张「噪声起点」表的可执行版本 —— 若 S 不影响空间方差，
 //    多法线平均就只是「同样一次着色算了很多遍」。
