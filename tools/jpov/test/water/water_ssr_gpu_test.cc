@@ -490,4 +490,72 @@ TEST(WaterSsrGpu, QueryNormalClampKeepsRayAboveHorizon) {
     f.TearDown();
 }
 
+
+// ⑤ 未解析细节波的**唯一**合法去处：粗糙度（2026-11-28 方案 A 定案）。
+//
+// 这条测试锁的是"被谱截断的斜率有没有进 rough"—— 它是现在唯一能把亚像素细节带到反射上的
+// 通道（倒影位置由解析主法线决定，糊由 rough → 装置的覆盖率预乘 mip 链给出）。
+//   · 平水面、无波 ⇒ var_p = normal_var_px = 0 ⇒ rough.a 必须恒 0（不糊）；
+//   · 一条长主波（不截断）+ 两条**亚像素**细节波（λ = 0.1/0.15 m，footprint ≈ 0.48 m
+//     ⇒ 0.2~0.3 px，全被足迹截断）⇒ 它们的斜率只能进方差 ⇒ rough.a 必须明显 > 0。
+// 负向验证（提交前实测过）：把 query 的 rough_max 设 0 ⇒ 第二条红。
+TEST(WaterSsrGpu, QueryRoughCarriesTruncatedDetailVariance) {
+    Fixture f;
+    f.SetUp();
+    WaterSkinV2Renderer::Inputs in = f.BaseInputs();
+
+    // 统计"有水面"的像素里 rough.a 的分布（mask 取 query 法线的 .a，与装置同口径）。
+    const auto rough_stats = [&](const jpov::WaterWaves* waves) {
+        WaterSkinV2Renderer::Inputs run = in;
+        run.waves = waves;
+        WaterSsrQueryTuning tuning;
+        f.v2.Begin(kWidth, kHeight);
+        f.v2.DrawQuery(run, tuning);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const WaterSsrQueryTextures q = f.v2.query();
+        const std::vector<float> nrm = ReadRgba(q.normal_tex);
+        const std::vector<float> rgh = ReadRgba(q.rough_tex);
+        int n = 0;
+        int above = 0;
+        float max_rough = 0.0f;
+        for (int py = 0; py < kHeight; ++py) {
+            for (int px = 0; px < kWidth; ++px) {
+                const size_t i = (static_cast<size_t>(py) * kWidth + px) * 4;
+                if (nrm[i + 3] < 0.5f) {
+                    continue;   // 不是水面
+                }
+                ++n;
+                max_rough = std::max(max_rough, rgh[i + 3]);
+                if (rgh[i + 3] > 0.02f) {
+                    ++above;
+                }
+            }
+        }
+        return std::vector<float>{static_cast<float>(n), static_cast<float>(above), max_rough};
+    };
+
+    // ① 无波：rough 必须恒 0。
+    const std::vector<float> flat = rough_stats(nullptr);
+    EXPECT_GT(flat[0], 100.0f) << "本机位应该有大量水面像素";
+    EXPECT_EQ(flat[2], 0.0f) << "无波时 rough 必须恒 0（否则平水面被无谓地糊）";
+
+    // ② 主波 + 亚像素细节波：细节的斜率被足迹截断 ⇒ 只能进 rough。
+    jpov::WaterWaves waves;
+    waves.enabled = true;
+    waves.v2 = true;
+    waves.num_waves = 1;
+    waves.waves[0] = jpov::WaterWave{1.0f, 0.0f, 20.0f, 0.10f, 0.0f};   // 20 m：远大于 8 px，不截断
+    waves.num_detail_waves = 2;
+    waves.detail_waves[0] = jpov::WaterWave{1.0f, 0.0f, 0.10f, 0.010f, 0.0f};
+    waves.detail_waves[1] = jpov::WaterWave{0.6f, 0.8f, 0.15f, 0.008f, 1.3f};
+    const std::vector<float> chopped = rough_stats(&waves);
+    EXPECT_GT(chopped[1], 0.5f * chopped[0])
+        << "被截断的细节波必须进 rough（有 " << chopped[1] << "/" << chopped[0]
+        << " 个水面像素 rough > 0.02）";
+    EXPECT_GT(chopped[2], 0.05f) << "细节波的斜率幅度不小，rough 上限不该只有 "
+                                 << chopped[2];
+
+    f.TearDown();
+}
+
 }  // namespace

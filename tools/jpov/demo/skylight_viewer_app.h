@@ -727,14 +727,14 @@ public:
     float ssr_fade_edge_px_ = 0.0f;        // ② 反射体像素 P 贴边
     float ssr_fade_hit_edge_px_ = 0.0f;    // ③ 命中点 Q 贴边
     // 遮丑滤波器（2026-11-13）：三个 toggle 各自独立，默认全关 = 旧行为。
-    bool  ssr_filter_hole_ = false;        // ① 形态学补洞（1px 梳齿缝）
-    bool  ssr_filter_clamp_ = false;       // ② 方差引导离群抑制（毛刺）
+    bool  ssr_filter_hole_ = true;         // ① 形态学补洞（1px 梳齿缝）—— 2026-11-27 默认开
+    bool  ssr_filter_clamp_ = true;        // ② 方差引导离群抑制（毛刺）—— 2026-11-27 默认开
     bool  ssr_filter_atrous_ = false;      // ③ 边缘保持 à-trous（多尺度）
     float ssr_filter_atrous_iters_ = 1.0f; // ③ 趟数 1..3（步长 1/2/4）
     float ssr_filter_clamp_k_ = 2.0f;      // ② 允许偏离几倍标准差（面板暂未暴露，拍摄用 env）
     // 背面命中的两个正交 flag（2026-11-13）：模块照常给颜色，处置在这里。
     // 默认 (false, 1.0) = 交回 env = 与旧行为逐字节相同（gold 不动）；交互时再打开。
-    bool  ssr_backface_use_ssr_ = false;   // false = 用 env；true = 用 SSR 颜色
+    bool  ssr_backface_use_ssr_ = true;    // true = 用 SSR 颜色（2026-11-27 默认开）
     float ssr_backface_dim_ = 1.0f;        // 该像素最终采用那份颜色的亮度因子
     void SetSsr(bool on) { ssr_on_ = on; }
 
@@ -1209,7 +1209,7 @@ private:
         // 水面/水位那两格直接画到屏幕外）。面板底对齐 ⇒ 行数必须 =「该面板最大行号 + 1」，
         // 多给的行变成顶部一片空白。
         // ⚠️ 改某个面板的 row 索引时，只需改对应的那个常量。
-        constexpr int kOceanLabPanelRows = 22;   // 场景4：row(0,0..13,14..21) + row(1,0..20)
+        constexpr int kOceanLabPanelRows = 24;   // 场景4：row(0,0..13,14..21) + row(1,0..23)
         constexpr int kWaterPanelRows    = 16;   // 场景3：row(0,0..13) + row(1,0..15)
         constexpr int kUnderwaterRows    = 10;   // 场景5：row(0,0..9)
         const int kRows = IsOceanLab()   ? kOceanLabPanelRows
@@ -1380,11 +1380,23 @@ private:
                     // 不额外做事：time_s 的取值在渲染体里按开关分叉
                 }
                 // 亚像素补偿三条通道（σ² 本身按谱截断自动推导，没有开关）
-                ui_.Checkbox("V2 探针模糊 (env LOD←σ²)", &water_v2_env_lod_, row(1, 16));
-                ui_.Checkbox("V2 M1 lobe 拉宽 (a2←2σ²)", &water_v2_m1_, row(1, 17));
-                ui_.Checkbox("V2 M2 多散射对账", &water_v2_m2_, row(1, 18));
+                // 2026-11-27 Danis：V2 探针模糊 / M1 / M2 **默认常开**，UI 撤掉
+                //（它们是正确性的一部分，不是调参手感；关掉只会看到假象）。
+                // 代码里仍可经 WaterWaves::v2_env_lod / v2_m1 / v2_m2 关掉（A/B 用 CLI 场景）。
                 ui_.Checkbox("V2 M3 glints (各向异性+颗粒)", &water_v2_m3_, row(1, 19));
                 ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(1, 20));
+                // ── 未解析细节波的补偿：**走粗糙度**（2026-11-28 定案，不做图像域补偿）──
+                // 链：`var_p + normal_var_px → rough`（query 趟）→ 装置的覆盖率预乘 mip 链
+                // + 双边升采样（跨剪影硬拒）⇒ 反射空间的模糊。这两根就是"糊多少"的总闸：
+                //   · rough→LOD 斜率：每单位 roughness 换几级 mip（越大越糊）；
+                //   · rough 截止：超过它就干脆不发射线、退回探针（宽瓣交给 mip 探针）。
+                ui_.SliderFloat("水皮 SSR 粗糙→LOD", &water_ssr_.roughness_to_lod,
+                                row(1, 16), 0.0f, 16.0f, 1);
+                ui_.SliderFloat("水皮 SSR 粗糙截止", &water_ssr_.roughness_cutoff,
+                                row(1, 17), 0.3f, 1.0f, 2);
+                // 遮丑三件套里的小波（à-trous）：补洞/离群默认开，这一根留成开关。
+                ui_.Checkbox("水皮 SSR 小波遮丑 (à-trous)", &water_ssr_.filter_atrous,
+                             row(1, 23));
 
                 // ── 水皮 SSR（2026-11-27）：倒影 = SSR + 探针兜底 ──
                 // 关掉 = 逐字节回到纯探针；这是验收"单调改进"的 A/B 基线。

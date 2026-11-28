@@ -86,6 +86,12 @@ struct SsrGoldCase {
 
     // 性质探针（见 LumProbe 的注释）。默认 w == 0 ⇒ 不启用。
     LumProbe lum_cap;
+
+    // 背面命中的处置（2026-11-27 从 app 默认改成**逐 case 显式**）：
+    // gold 的基线是"背面命中交回 env"，而面板默认已经改成"用 SSR 颜色" ⇒ 测试必须
+    // 自己钉住，否则改一次面板默认就整批 gold 变红（这次就是这么红的）。
+    // ⚠️ 放在结构体**最后**：上面的 kCases 是位置聚合初始化，插中间会全体错位。
+    bool backface_use_ssr = false;
 };
 
 // 0.0013333 ≈ asin(0.06 / 45)：相机离地 6 cm、距原点 45 m（真正的掠射）。
@@ -267,6 +273,7 @@ inline void ApplyCase(jpov_skylight::SkylightApp& app, const SsrGoldCase& c) {
     app.ssr_filter_hole_ = c.filter_hole;
     app.ssr_filter_clamp_ = c.filter_clamp;
     app.ssr_filter_atrous_ = c.filter_atrous;
+    app.ssr_backface_use_ssr_ = c.backface_use_ssr;
     app.ssr_filter_clamp_k_ = c.clamp_k;
     app.ssr_filter_atrous_iters_ = static_cast<float>(c.atrous_iters);
     app.SetSsr(true);
@@ -281,6 +288,7 @@ inline void DisableAllFeatures(jpov_skylight::SkylightApp& app) {
     app.ssr_filter_hole_ = false;
     app.ssr_filter_clamp_ = false;
     app.ssr_filter_atrous_ = false;
+    app.ssr_backface_use_ssr_ = false;
 }
 
 inline std::string GoldFileName(const SsrGoldCase& c) {

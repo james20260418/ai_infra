@@ -1362,10 +1362,27 @@ int RunCaptureOceanLab(const std::string& out_dir, bool show_ui, float wave_time
 // 判据：
 //   · off 必须与改动前**逐字节**一致（纯探针 = 旧行为）；
 //   · on 时帆船/立柱的倒影应该出现在水面倒影带里，A（覆盖率）随掠射/距离连续淡出。
-int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px,
-                       float ssr_truncate_main_px, float ssr_truncate_detail_px,
-                       int ssr_clamp, int water_debug, float ship_distance_m,
-                       float ssr_downscale_n) {
+// --capture-water-ssr 的全部旋钮（<0 / -1 = 用默认）。
+struct WaterSsrCaptureOpts {
+    float truncate_px = -1.0f;
+    float truncate_main_px = -1.0f;
+    float truncate_detail_px = -1.0f;
+    int clamp = -1;
+    int water_debug = 0;
+    float ship_distance_m = -1.0f;
+    float downscale_n = -1.0f;
+    float rough_to_lod = -1.0f;   // <0 = 用默认
+    float rough_cutoff = -1.0f;   // <0 = 用默认
+};
+
+int RunCaptureWaterSsr(const std::string& out_dir, const WaterSsrCaptureOpts& opt) {
+    const float ssr_truncate_px = opt.truncate_px;
+    const float ssr_truncate_main_px = opt.truncate_main_px;
+    const float ssr_truncate_detail_px = opt.truncate_detail_px;
+    const int ssr_clamp = opt.clamp;
+    const int water_debug = opt.water_debug;
+    const float ship_distance_m = opt.ship_distance_m;
+    const float ssr_downscale_n = opt.downscale_n;
     const float kPi = 3.14159265358979323846f;
     JPOV::Config cfg;
     cfg.title = "JPOV — 水皮 SSR A/B（headless）";
@@ -1397,6 +1414,12 @@ int RunCaptureWaterSsr(const std::string& out_dir, float ssr_truncate_px,
     }
     if (ssr_clamp >= 0) {
         app.water_ssr_clamp_normal_ = (ssr_clamp != 0);
+    }
+    if (opt.rough_to_lod >= 0.0f) {
+        app.water_ssr_.roughness_to_lod = opt.rough_to_lod;
+    }
+    if (opt.rough_cutoff >= 0.0f) {
+        app.water_ssr_.roughness_cutoff = opt.rough_cutoff;
     }
     if (ssr_downscale_n > 0.0f) {
         // 与面板同一个入口：小数在这里被 round 成 1..4，倍率在消费点算（不会再翻）。
@@ -2498,6 +2521,8 @@ int main(int argc, char** argv) {
     int water_ssr_clamp = -1;              // --water-ssr-clamp 0|1：query 法线是否钳到地平线
     float ship_distance_m = -1.0f;         // --ship-distance：帆船离场景原点的距离（<0 = 默认）
     float water_ssr_downscale_n = -1.0f;   // --water-ssr-downscale：N（会被 snap 到 1..4 的整数）
+    float water_ssr_rough_to_lod = -1.0f;   // --water-ssr-rough-to-lod：rough→mip 斜率
+    float water_ssr_rough_cutoff = -1.0f;   // --water-ssr-rough-cutoff：超过就不发射线
     std::string ocean_report_out_dir;
     std::string ocean_config_path;
     float ocean_time_s = 7.0f;   // 海面选型场拍摄用哪个时刻（秒；冻结）
@@ -2592,6 +2617,10 @@ int main(int argc, char** argv) {
             ship_distance_m = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--water-ssr-downscale") == 0 && i + 1 < argc) {
             water_ssr_downscale_n = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-rough-to-lod") == 0 && i + 1 < argc) {
+            water_ssr_rough_to_lod = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--water-ssr-rough-cutoff") == 0 && i + 1 < argc) {
+            water_ssr_rough_cutoff = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -2600,10 +2629,17 @@ int main(int argc, char** argv) {
         return RunCaptureEnv(env_out_dir);
     }
     if (!water_ssr_out_dir.empty()) {
-        return RunCaptureWaterSsr(water_ssr_out_dir, water_ssr_truncate_px,
-                                  water_ssr_truncate_main_px, water_ssr_truncate_detail_px,
-                                  water_ssr_clamp, water_debug, ship_distance_m,
-                                  water_ssr_downscale_n);
+        WaterSsrCaptureOpts opt;
+        opt.truncate_px = water_ssr_truncate_px;
+        opt.truncate_main_px = water_ssr_truncate_main_px;
+        opt.truncate_detail_px = water_ssr_truncate_detail_px;
+        opt.clamp = water_ssr_clamp;
+        opt.water_debug = water_debug;
+        opt.ship_distance_m = ship_distance_m;
+        opt.downscale_n = water_ssr_downscale_n;
+        opt.rough_to_lod = water_ssr_rough_to_lod;
+        opt.rough_cutoff = water_ssr_rough_cutoff;
+        return RunCaptureWaterSsr(water_ssr_out_dir, opt);
     }
     if (!ocean_lab_ui_out_dir.empty()) {
         return RunCaptureOceanLab(ocean_lab_ui_out_dir, /*show_ui=*/true, ocean_time_s,

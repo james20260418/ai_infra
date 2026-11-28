@@ -161,6 +161,29 @@ vec3 ClampReflectionAboveHorizon(vec3 dir) {
     return vec3(dir.x * scale, uHorizonClampSin, dir.z * scale);
 }
 
+// 把**法线**魔改到「反射方向不低于地平线」（与 env 的 ClampReflectionAboveHorizon 同口径）。
+// 只钳 R，再反解出能产生这个 R 的 N（单位向量时 N ∝ R − rd，反射对称）。
+// ⚠️ 这是刻意的「非物理法线」：波纹对倒影的扭曲仍在（只要 R 本身在地平线以上），
+//    只有「要反射到水下」的那些像素被抬到地平线。on == 0 ⇒ 原样返回。
+// 唯一出处：query 趟（`kWaterSkinV2QueryGlsl`）。抽成函数是为了让"钳位口径"只有一份，
+// 下游（着色趟/装置）看到的法线必然同源。
+vec3 ClampNormalAboveHorizon(vec3 N, vec3 rd, int on) {
+    if (on == 0) {
+        return N;
+    }
+    vec3 R = reflect(rd, N);
+    if (!(R.y < uHorizonClampSin)) {
+        return N;
+    }
+    vec3 Rc = ClampReflectionAboveHorizon(R);
+    vec3 Nc = Rc - rd;
+    float nl = length(Nc);
+    if (nl > 1.0e-6 && Nc.y > 0.0) {
+        return Nc / nl;
+    }
+    return N;
+}
+
 // ── 一次求交的全部中间量（V2 版：**只有几何**，没有方差/导数类派生量）──
 struct WaterSurfaceV2 {
     bool  hit;            // 射线打中水面（t > 0）
@@ -560,8 +583,15 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
         float n = SkinV2Hash12(gl_FragCoord.xy);
         sparkle = 1.0 + amp * (2.0 * n - 1.0);
     }
-    // SSR：逐像素取一次（装置给的是**屏幕空间**反射图，与样本无关）。
+    // ── SSR：逐像素取一次（装置给的是**屏幕空间**反射图，与样本无关）──
     // 循环外取 → S 个样本共用同一份 L，只把各自的 env_i 按同一个 A 混过去。
+    //
+    // ⚠️ **不做图像域补偿**（2026-11-28 Danis 定案，方案 A）：被谱截断的细节波不在
+    //    这里"挪倒影"，而是走粗糙度 —— `var_p + normal_var_px → rough → 装置的 mip 级`
+    //    （装置内部是**覆盖率预乘**的 mip 链 + 双边升采样，跨剪影会硬拒 + 值域软权）。
+    //    历史教训（已删除，别再加回来）：`残差位移 + 3-tap 展宽` 会把船倒影搬到船上方
+    //    （图像域 warp 与几何脱钩）、把亮命中抹到本该显示水体的像素（漏光）。
+    //    详见 docs/jpov_water_ssr_design.md §5.4。
     vec4 ssr_refl = vec4(0.0);
     if (uSsrOn != 0) {
         ssr_refl = texelFetch(uSsrReflection, ivec2(gl_FragCoord.xy), 0);
@@ -613,7 +643,8 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
 // 输出（全分辨率三附件）：
 //   0 R32F    ：水面窗口深度（与 gl_FragCoord.z 同口径；1.0 = 这一像素不查询）
 //   1 RGBA16F ：**视空间**中心法线（与属性纹理同一套约定），a = 1 表示有水面
-//   2 RGBA16F ：.a = roughness（装置的模糊量 + 发射线截止）
+//   2 RGBA16F ：.a = roughness（装置的模糊量 + 发射线截止）；rgb 恒 0
+//               （装置只读 .a，见 ssr_chain.cc 的 CHECK）。
 //
 // 为什么要单开一趟：装置必须在**着色之前**读到 Query（水面位置/法线），而水皮是解析
 // 求交、没有 G-buffer；它自己 WBO 里那条深度是着色之后才有的，时序上用不了。
@@ -621,7 +652,7 @@ void ShadeAboveV2(WaterSurfaceV2 s, out WaterShadeV2 o) {
 inline constexpr const char* kWaterSkinV2QueryGlsl = R"glsl(
 layout(location = 0) out vec4 oQueryDepth;    // R32F
 layout(location = 1) out vec4 oQueryNormal;   // RGBA16F（视空间法线 + 有数据掩码）
-layout(location = 2) out vec4 oQueryRough;    // RGBA16F（只读 .a）
+layout(location = 2) out vec4 oQueryRough;    // RGBA16F（只读 .a = roughness）
 
 uniform int uSsrClampNormal;         // 1 = 把 query 法线魔改到"反射方向不低于地平线"
 uniform float uSsrResolutionScale;   // 1/N（与装置同值）
@@ -666,23 +697,8 @@ void main() {
     //    屏幕空间里既没有水面颜色也没有它的深度（源只有不透明几何），只能撞到海底或落空。
     //    着色趟的 env 路径对此的处理是 `ClampReflectionAboveHorizon`（把方向抬到 +1°）；
     //    SSR 这一侧必须**同口径**，否则两条路在同一像素上给的是两个不同的世界。
-    //
-    //    做法：只钳 R，再反解出能产生这个 R 的 N（单位向量时 N ∝ R − rd，反射对称）。
-    //    ⇒ 反射方向的 y 分量**半正定**（≥ sin 1°），与 env 完全一致。
-    //    ⚠️ 这是刻意的"非物理法线"：波纹对倒影的扭曲仍在（只要 R 本身在地平线以上），
-    //       只有"要反射到水下"的那些像素被抬到地平线。开关：uSsrClampNormal。
-    vec3 Nq = s.N;
-    if (uSsrClampNormal != 0) {
-        vec3 R = reflect(s.rd, Nq);
-        if (R.y < uHorizonClampSin) {
-            vec3 Rc = ClampReflectionAboveHorizon(R);
-            vec3 Nc = Rc - s.rd;
-            float nl = length(Nc);
-            if (nl > 1.0e-6 && Nc.y > 0.0) {
-                Nq = Nc / nl;
-            }
-        }
-    }
+    //    钳位实现见 ClampNormalAboveHorizon（口径只有一份）。
+    vec3 Nq = ClampNormalAboveHorizon(s.N, s.rd, uSsrClampNormal);
     // 行 = side / up / −fwd，与属性 pass 的 uWorldToView 完全同源
     // （Render 侧用的是同一个 BuildLookAt；uCamRight/uCamUp/uCamFwd 就是那三行）。
     oQueryNormal = vec4(dot(Nq, uCamRight), dot(Nq, uCamUp), -dot(Nq, uCamFwd), 1.0);

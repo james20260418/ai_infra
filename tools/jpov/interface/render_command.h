@@ -921,6 +921,12 @@ inline SsrConfig DefaultWaterSsrConfig() {
     c.max_ray_pixels = 220;
     c.roughness_cutoff = 1.0f;
     c.roughness_to_lod = 8.0f;
+    // 2026-11-27 Danis：背面命中默认用 SSR 颜色；遮丑三件套里补洞/离群默认开、小波关。
+    c.backface_use_ssr = true;
+    c.backface_dim = 1.0f;
+    c.filter_hole_fill = true;
+    c.filter_outlier_clamp = true;
+    c.filter_atrous = false;
     return c;
 }
 
@@ -1197,6 +1203,18 @@ struct WaterCommand {
     // 能分开。0 = 该族不截断（默认两族都是 0）。
     float ssr_normal_truncate_main_px = 0.0f;
     float ssr_normal_truncate_detail_px = 0.0f;
+
+    // ── 未解析的细节波怎么补：**走粗糙度，不做图像域补偿**（2026-11-28 定案）──
+    //
+    // 定性（Danis 2026-11-28 报障后重定）：被谱截断的波只允许改变"糊多少"，
+    // **不允许改变倒影的位置**。图像域位移（消失点位移）会把船倒影搬到船上方
+    // （那里屏幕射线根本没打到船）；3-tap 展宽又把亮的命中抹到该显示水体的像素（漏光）。
+    // 两者都和几何脱钩，参数上没有解。
+    //
+    // 正确链（在这份配置之外，已经存在）：`var_p + normal_var_px → rough`（query 趟写
+    // rough 纹理）→ 装置的**覆盖率预乘 mip 链** + 双边升采样（跨剪影硬拒）→ 反射空间的模糊。
+    // 旋钮就是 `ssr.roughness_to_lod`（每单位 roughness 换几级 mip）与
+    // `ssr.roughness_cutoff`（超过它就干脆不发射线、退回探针）。
 
     // 把 query 法线魔改到"反射方向 ≥ sin 1°"（默认开）。
     // 理由：掠射水面上约 10%~20% 的波面法线会让反射线指到水面以下，而屏幕空间里
